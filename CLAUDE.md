@@ -14,6 +14,23 @@ a behaviour looks odd, it is almost certainly odd because Go does it that way,
 and changing it breaks a real user's installation. Read the comments before
 "fixing" anything in a serialiser, a wire format or an API response shape.
 
+## The drop-in contract
+
+What "drop-in" means, concretely. Changing any of these breaks an existing
+installation.
+
+| Surface | Contract |
+|---|---|
+| Config file | `AdGuardHome.yaml`, `schema_version: 34`, field order significant |
+| Binary path | `/opt/adguardhome/AdGuardHome` |
+| Docker CMD | `--no-check-update -c /opt/adguardhome/conf/AdGuardHome.yaml -w /opt/adguardhome/work` |
+| Work dir | `<work>/data/{querylog.json,querylog.json.1,stats.db,sessions.db,filters/,userfilters/}` |
+| Query log | JSON lines, keys `T,QH,QT,QC,CP,IP,Result,Elapsed,Upstream,Answer,…` |
+| Statistics | bbolt file, one bucket per hour named by big-endian `u64`, value a gob `unitDB` under key `[0]` |
+| HTTP API | 81 paths under `/control/*`, all routed |
+| Web interface | single-page app served from the embedded filesystem at `/` |
+| Ports | 53 tcp/udp, 67–68 udp, 80, 443 tcp/udp, 853 tcp/udp, 3000, 5443, 6060 |
+
 ## Commands
 
 ```bash
