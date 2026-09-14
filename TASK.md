@@ -199,7 +199,14 @@ Verification claims below are reproducible with `scripts/verify.sh` and
       children — resolved from each kept index rather than counted, because
       deleting a child breaks `docker pull` for that architecture. Attestations
       are off (`provenance: false`) so every manifest in the package is either
-      an index or a child of one.
+      an index or a child of one. Verified on the first two runs: tagging
+      `v0.107.79` on the commit `main` had just built moved every tag onto the
+      new index, and the prune correctly reaped the old index and its two
+      children.
+- **A `sha-` tag names a commit, not a set of bytes.** `BUILD_DATE` is a build
+      argument, so rebuilding the same commit produces a different digest; the
+      new index takes the tags and the old one is then pruned as untagged. Pin
+      a digest, not a tag, if the bytes have to be identical across a redeploy.
 - [x] **CI is `workflow_dispatch` only.** Formatting, lints, the test suite and
       the differential against a cloned AdGuard Home all run locally with
       `cargo test --workspace` and `scripts/verify.sh`, so paying for them on
