@@ -17,6 +17,7 @@ These are AdGuard's work, redistributed under the GPL-3.0:
 |---|---|---|
 | `web/build/` | `client/`, built | The web interface, compiled and gzip-compressed |
 | `crates/agl-filter/data/blocked-services.json.gz` | `/control/blocked_services/all` | The 139-service catalogue: names, icons and blocking rules |
+| `crates/agl-filter/src/safesearch/*.txt` | `internal/filtering/safesearch/rules/` | The safe-search rules for the seven supported providers, verbatim |
 | `tests/fixtures/` | a running v0.107.79 instance | Reference config, query-log lines, `stats.db`, gob payloads, and the verdicts Go gave for 4,190 domains |
 | `docker/Dockerfile` (runtime stage) | `docker/build.Dockerfile` | The image's runtime contract |
 
@@ -40,7 +41,13 @@ scripts/build-frontend.sh          # regenerates web/build/
 ```
 
 The services catalogue is captured from a running instance's
-`/control/blocked_services/all`.
+`/control/blocked_services/all`, and the safe-search rules are copied
+verbatim from the upstream checkout:
+
+```bash
+cp upstream/internal/filtering/safesearch/rules/*.txt \
+   crates/agl-filter/src/safesearch/
+```
 
 ## Third-party Rust dependencies
 

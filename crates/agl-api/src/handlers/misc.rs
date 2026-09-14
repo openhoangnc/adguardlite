@@ -76,8 +76,38 @@ pub struct ClientJson {
     pub safe_search: Option<serde_json::Value>,
 }
 
+/// Renders the WHOIS fields the interface shows.
+///
+/// Always an object, even when empty: the interface reads it unconditionally.
+pub fn whois_json(fields: &[(String, String)]) -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    for (k, v) in fields {
+        m.insert(k.clone(), json!(v));
+    }
+
+    serde_json::Value::Object(m)
+}
+
+/// The clients discovered while running, as `auto_clients`.
+fn auto_clients(s: &Shared) -> Vec<serde_json::Value> {
+    s.resolver
+        .runtime
+        .all()
+        .into_iter()
+        .map(|(ip, c)| {
+            json!({
+                "whois_info": whois_json(&c.whois),
+                "ip": ip.to_string(),
+                "name": c.name,
+                "source": c.source.map(|s| s.as_str()).unwrap_or(""),
+            })
+        })
+        .collect()
+}
+
 /// `GET /control/clients`
 pub async fn clients(State(s): State<Shared>) -> Json<serde_json::Value> {
+    let auto = auto_clients(&s);
     let cfg = s.config.read();
     let clients: Vec<ClientJson> = cfg
         .clients
@@ -102,7 +132,7 @@ pub async fn clients(State(s): State<Shared>) -> Json<serde_json::Value> {
 
     Json(json!({
         "clients": if clients.is_empty() { serde_json::Value::Null } else { serde_json::to_value(&clients).unwrap_or(serde_json::Value::Null) },
-        "auto_clients": [],
+        "auto_clients": auto,
         "supported_tags": SUPPORTED_TAGS,
     }))
 }
@@ -208,10 +238,101 @@ pub async fn clients_update(
 }
 
 /// `GET /control/clients/find`
-pub async fn clients_find(State(s): State<Shared>) -> Json<Vec<serde_json::Value>> {
-    let _ = &s;
+///
+/// The parameters are `ip0`, `ip1`, … and the answer is a list of one-entry
+/// objects keyed by the identifier that was asked about, which is the shape
+/// the interface reads.
+pub async fn clients_find(
+    State(s): State<Shared>,
+    axum::extract::RawQuery(q): axum::extract::RawQuery,
+) -> Json<Vec<serde_json::Value>> {
+    let query = q.unwrap_or_default();
+    let mut out = Vec::new();
 
-    Json(Vec::new())
+    for i in 0.. {
+        let Some(id) = query_param(&query, &format!("ip{i}")) else {
+            break;
+        };
+        if id.is_empty() {
+            break;
+        }
+
+        out.push(json!({ &id: find_client(&s, &id) }));
+    }
+
+    Json(out)
+}
+
+/// Reads one parameter out of a raw query string.
+fn query_param(query: &str, key: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (k, v) = pair.split_once('=')?;
+        (k == key).then(|| percent_decode(v))
+    })
+}
+
+/// Decodes the percent-encoding a query string uses.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.replace('+', " ").into_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+            if let Ok(b) = u8::from_str_radix(hex, 16) {
+                out.push(b);
+                i += 3;
+
+                continue;
+            }
+        }
+
+        out.push(bytes[i]);
+        i += 1;
+    }
+
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Describes whichever client an identifier names, persistent or discovered.
+fn find_client(s: &Shared, id: &str) -> serde_json::Value {
+    let addr = id.parse::<std::net::IpAddr>().ok();
+
+    if let Some(c) = s.config.read().clients.persistent.iter().find(|c| {
+        c.ids.iter().any(|i| i.eq_ignore_ascii_case(id)) || c.name.eq_ignore_ascii_case(id)
+    }) {
+        return json!({
+            "name": c.name,
+            "ids": c.ids,
+            "tags": c.tags,
+            "upstreams": c.upstreams,
+            "blocked_services": c.blocked_services.ids,
+            "use_global_settings": c.use_global_settings,
+            "use_global_blocked_services": c.use_global_blocked_services,
+            "filtering_enabled": c.filtering_enabled,
+            "parental_enabled": c.parental_enabled,
+            "safebrowsing_enabled": c.safebrowsing_enabled,
+            "ignore_querylog": c.ignore_querylog,
+            "ignore_statistics": c.ignore_statistics,
+            "disallowed": addr.is_some_and(|a| !s.dns_server.access.read().permits(a)),
+            "disallowed_rule": "",
+        });
+    }
+
+    let Some(a) = addr else {
+        return serde_json::Value::Null;
+    };
+    let Some(rc) = s.resolver.runtime.get(a) else {
+        return serde_json::Value::Null;
+    };
+
+    json!({
+        "name": rc.name,
+        "ids": [id],
+        "whois_info": whois_json(&rc.whois),
+        "disallowed": !s.dns_server.access.read().permits(a),
+        "disallowed_rule": "",
+    })
 }
 
 /// `GET /control/access/list`
@@ -907,6 +1028,26 @@ mod tests {
     async fn dhcp_interfaces_is_empty() {
         let Json(v) = dhcp_interfaces().await;
         assert_eq!(v, serde_json::json!({}));
+    }
+
+    #[test]
+    fn query_parameters_are_read_and_decoded() {
+        assert_eq!(
+            query_param("ip0=192.0.2.5&ip1=192.0.2.6", "ip1").as_deref(),
+            Some("192.0.2.6")
+        );
+        assert_eq!(query_param("ip0=a%3Ab", "ip0").as_deref(), Some("a:b"));
+        assert_eq!(query_param("ip0=a+b", "ip0").as_deref(), Some("a b"));
+        assert_eq!(query_param("ip0=x", "ip1"), None);
+    }
+
+    #[test]
+    fn whois_fields_are_always_an_object() {
+        assert_eq!(whois_json(&[]), serde_json::json!({}));
+        assert_eq!(
+            whois_json(&[("city".into(), "Ashburn".into())]),
+            serde_json::json!({ "city": "Ashburn" })
+        );
     }
 
     #[test]

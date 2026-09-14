@@ -106,9 +106,39 @@ pub fn rules_for(ids: &[String]) -> String {
     out
 }
 
+/// Finds the service a generated rule belongs to.
+///
+/// The rules are flattened into one list before matching, so the service name
+/// the query log records has to be recovered from the winning rule's text.
+pub fn name_for_rule(rule: &str) -> Option<String> {
+    static INDEX: OnceLock<std::collections::HashMap<&'static str, &'static str>> = OnceLock::new();
+
+    let index = INDEX.get_or_init(|| {
+        let mut m = std::collections::HashMap::new();
+        for s in &catalogue().blocked_services {
+            for r in &s.rules {
+                m.insert(r.as_str(), s.name.as_str());
+            }
+        }
+
+        m
+    });
+
+    index.get(rule).map(|n| (*n).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_generated_rule_names_its_service() {
+        let rules = rules_for(&["youtube".to_string()]);
+        let first = rules.lines().next().expect("youtube has rules");
+
+        assert_eq!(name_for_rule(first).as_deref(), Some("YouTube"));
+        assert_eq!(name_for_rule("||not-a-service.example^"), None);
+    }
 
     #[test]
     fn the_catalogue_loads() {

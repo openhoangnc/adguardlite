@@ -22,6 +22,12 @@ pub struct Recorder {
     pub stats: Arc<Stats>,
     /// Whether client addresses are anonymised.
     pub anonymize: std::sync::atomic::AtomicBool,
+    /// Where unknown client addresses are sent to be named.
+    discovery: parking_lot::RwLock<Option<crate::discovery::Queue>>,
+    /// The store of names already known, so discovery is asked only once.
+    runtime: parking_lot::RwLock<Option<Arc<agl_dns::clients::Runtime>>>,
+    /// Feeds resolved addresses into the configured ipsets.
+    ipset: parking_lot::RwLock<Option<Arc<crate::ipset::Manager>>>,
 }
 
 impl Recorder {
@@ -31,6 +37,46 @@ impl Recorder {
             querylog,
             stats,
             anonymize: std::sync::atomic::AtomicBool::new(anonymize),
+            discovery: parking_lot::RwLock::new(None),
+            runtime: parking_lot::RwLock::new(None),
+            ipset: parking_lot::RwLock::new(None),
+        }
+    }
+
+    /// Connects the recorder to the ipset manager.
+    ///
+    /// The observer is the point where an answer is complete, which is where
+    /// upstream adds the addresses too.
+    pub fn set_ipset(&self, m: Option<Arc<crate::ipset::Manager>>) {
+        *self.ipset.write() = m;
+    }
+
+    /// Connects the recorder to client discovery.
+    ///
+    /// Done after construction because discovery needs the resolver, which is
+    /// built from this recorder.
+    pub fn set_discovery(
+        &self,
+        queue: crate::discovery::Queue,
+        runtime: Arc<agl_dns::clients::Runtime>,
+    ) {
+        *self.discovery.write() = Some(queue);
+        *self.runtime.write() = Some(runtime);
+    }
+
+    /// Asks for a name for a client that has none yet.
+    fn note_client(&self, addr: std::net::IpAddr) {
+        let known = self
+            .runtime
+            .read()
+            .as_ref()
+            .is_some_and(|r| r.is_known(addr));
+        if known {
+            return;
+        }
+
+        if let Some(q) = self.discovery.read().as_ref() {
+            q.submit(addr);
         }
     }
 }
@@ -60,19 +106,32 @@ impl Observer for Recorder {
             Action::Drop => None,
         };
 
+        self.note_client(ev.client.ip());
+
+        if let Some(m) = self.ipset.read().as_ref()
+            && let Some(resp) = ev.outcome.response()
+        {
+            let addrs = agl_dns::resolver::answer_addrs(resp);
+            let n = m.add(&host, &addrs);
+            if n > 0 {
+                tracing::debug!(host = %host, added = n, "ipset updated");
+            }
+        }
+
         let entry = Entry {
             time: agl_core::gotime::format_local(jiff::Timestamp::now()),
             question_host: host.clone(),
             question_type: q.query_type().to_string(),
             question_class: q.query_class().to_string(),
-            req_ecs: String::new(),
-            client_id: String::new(),
+            req_ecs: ev.outcome.req_ecs.clone(),
+            client_id: ev.outcome.client_id.clone(),
             client_proto: proto_of(ev.proto),
             upstream: ev.outcome.upstream.clone().unwrap_or_default(),
             answer,
             orig_answer: None,
             ip: client.clone(),
             result: EntryResult {
+                service_name: ev.outcome.service_name.clone(),
                 rules: ev
                     .outcome
                     .rules
@@ -95,7 +154,14 @@ impl Observer for Recorder {
                 .is_some_and(|m| m.metadata.authentic_data),
         };
 
-        self.querylog.push(entry);
+        // A client may ask to be left out of one or both records.
+        if !ev.outcome.ignore_querylog {
+            self.querylog.push(entry);
+        }
+
+        if ev.outcome.ignore_statistics {
+            return;
+        }
 
         let upstreams = ev
             .outcome
@@ -174,10 +240,49 @@ impl ListFetcher for Downloader {
     }
 }
 
+/// The announcement document AdGuard publishes for the stable channel.
+const VERSION_URL: &str = "https://static.adtidy.org/adguardhome/release/version.json";
+
+/// How large an announcement may be.
+const VERSION_MAX_BYTES: u64 = 64 * 1024;
+
+/// How long a version check may take.
+const VERSION_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Reports what the latest AdGuard Home release is.
+///
+/// The announcement is only read, never acted on: this build cannot replace
+/// itself with an AdGuard Home release, so the interface is told a new version
+/// exists but not offered a button to install it.
+pub struct ReleaseChecker {
+    /// Whether `--no-check-update` was given.
+    pub disabled: bool,
+}
+
+impl agl_api::state::VersionChecker for ReleaseChecker {
+    fn fetch(&self) -> agl_api::state::VersionFuture {
+        Box::pin(async move {
+            let body = crate::fetch::get(VERSION_URL, VERSION_MAX_BYTES, VERSION_TIMEOUT)
+                .await
+                .map_err(|e| e.to_string())?;
+
+            String::from_utf8(body).map_err(|e| e.to_string())
+        })
+    }
+
+    fn disabled(&self) -> bool {
+        self.disabled
+    }
+}
+
 /// Pushes configuration changes into the running server.
 pub struct LiveReloader {
     /// The resolver to reconfigure.
     pub resolver: Arc<agl_dns::resolver::Resolver>,
+    /// The listener front end, for access control and the concurrency bound.
+    pub server: Arc<agl_dns::server::Server>,
+    /// The certificate the encrypted listeners serve.
+    pub certificate: Arc<agl_dns::tls::Reloadable>,
 }
 
 impl Reloader for LiveReloader {
@@ -189,10 +294,66 @@ impl Reloader for LiveReloader {
                 .iter()
                 .map(|r| (r.domain.as_str(), r.answer.as_str(), r.enabled)),
         ));
+        self.resolver.set_clients(crate::app::clients(cfg));
+        self.resolver
+            .set_safe_search(agl_filter::safesearch::engine(&crate::app::safe_search(
+                &cfg.filtering.safe_search,
+            )));
+        self.resolver
+            .runtime
+            .set_sources(agl_dns::clients::Sources {
+                whois: cfg.clients.runtime_sources.whois,
+                arp: cfg.clients.runtime_sources.arp,
+                rdns: cfg.clients.runtime_sources.rdns,
+                dhcp: false,
+                hosts: cfg.clients.runtime_sources.hosts,
+            });
+        self.server.set_max_concurrent(cfg.dns.max_goroutines);
+        self.reload_certificate(cfg);
+        *self.server.access.write() = agl_dns::server::Access {
+            allowed: cfg
+                .dns
+                .allowed_clients
+                .iter()
+                .filter_map(|s| s.parse().ok())
+                .collect(),
+            disallowed: cfg
+                .dns
+                .disallowed_clients
+                .iter()
+                .filter_map(|s| s.parse().ok())
+                .collect(),
+        };
     }
 
     fn reload_filters(&self, filters: &Manager) {
         self.resolver.set_engine(filters.build_engine());
+        self.resolver.set_services(filters.build_services_engine());
+    }
+}
+
+impl LiveReloader {
+    /// Installs the configured certificate into the running listeners.
+    ///
+    /// Only the certificate is live-reloadable: which ports are bound is
+    /// decided when the listeners start, so changing a port still needs a
+    /// restart.
+    fn reload_certificate(&self, cfg: &Config) {
+        let src = agl_dns::tls::Source {
+            certificate_chain: cfg.tls.certificate_chain.clone(),
+            private_key: cfg.tls.private_key.clone(),
+            certificate_path: cfg.tls.certificate_path.clone(),
+            private_key_path: cfg.tls.private_key_path.clone(),
+        };
+
+        if !cfg.tls.enabled || src.is_empty() {
+            return;
+        }
+
+        match agl_dns::tls::install(&src, &self.certificate) {
+            Ok(st) => tracing::info!(names = ?st.dns_names, "certificate reloaded"),
+            Err(e) => tracing::error!(error = %e, "reloading the certificate"),
+        }
     }
 }
 

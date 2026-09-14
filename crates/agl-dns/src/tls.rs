@@ -111,7 +111,17 @@ pub struct Status {
     /// Whether the key belongs to the certificate.
     pub valid_pair: bool,
     /// The names the certificate covers.
+    ///
+    /// DNS names only, as upstream's `dns_names` field is: the IP addresses a
+    /// certificate may also carry are reported by [`Status::has_ip_addresses`]
+    /// instead, because the API's field is compared against Go's.
     pub dns_names: Vec<String>,
+    /// Whether the certificate names any IP address.
+    ///
+    /// Discovery of Designated Resolvers only advertises DNS-over-TLS when it
+    /// does: a client that found this resolver by address has no hostname to
+    /// validate the certificate against.
+    pub has_ip_addresses: bool,
     /// When the certificate becomes valid, in Go's zero-time-aware format.
     pub not_before: String,
     /// When the certificate expires.
@@ -133,6 +143,9 @@ pub struct Loaded {
     /// The rustls configuration for HTTPS and DNS-over-HTTPS, which differs
     /// only in the protocols it advertises.
     pub https: Arc<ServerConfig>,
+    /// The rustls configuration for HTTP/3, which QUIC carries and which
+    /// therefore needs its own ALPN identifier.
+    pub h3: Arc<ServerConfig>,
     /// The rustls configuration for DNS-over-QUIC.
     ///
     /// Separate because QUIC requires TLS 1.3 and its own ALPN identifier.
@@ -288,8 +301,10 @@ fn describe_leaf(leaf: &CertificateDer<'_>, st: &mut Status) {
 
     if let Ok(Some(san)) = cert.subject_alternative_name() {
         for name in &san.value.general_names {
-            if let GeneralName::DNSName(n) = name {
-                st.dns_names.push((*n).to_string());
+            match name {
+                GeneralName::DNSName(n) => st.dns_names.push((*n).to_string()),
+                GeneralName::IPAddress(_) => st.has_ip_addresses = true,
+                _ => {}
             }
         }
     }
@@ -325,6 +340,98 @@ fn format_time(unix: i64) -> String {
     jiff::Timestamp::from_second(unix)
         .map(agl_core::gotime::format_utc)
         .unwrap_or_else(|_| agl_core::gotime::GO_ZERO_TIME.to_string())
+}
+
+/// A certificate that can be replaced while the listeners keep running.
+///
+/// rustls takes the certificate when a `ServerConfig` is built, so a listener
+/// started with one keeps it for life.  Handing it a resolver instead means a
+/// certificate replaced through `/control/tls/configure` takes effect on the
+/// next handshake rather than at the next restart.
+#[derive(Debug, Default)]
+pub struct Reloadable {
+    /// The certificate currently being served.
+    current: parking_lot::RwLock<Option<Arc<rustls::sign::CertifiedKey>>>,
+}
+
+impl Reloadable {
+    /// An empty slot, serving nothing until a certificate is installed.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Installs a certificate and key, replacing whatever was there.
+    pub fn set(
+        &self,
+        chain: Vec<CertificateDer<'static>>,
+        key: PrivateKeyDer<'static>,
+    ) -> Result<(), Error> {
+        let signing = rustls::crypto::ring::sign::any_supported_type(&key)
+            .map_err(|e| Error::Rustls(format!("using the private key: {e}")))?;
+        *self.current.write() = Some(Arc::new(rustls::sign::CertifiedKey::new(chain, signing)));
+
+        Ok(())
+    }
+
+    /// Reports whether a certificate is installed.
+    pub fn is_loaded(&self) -> bool {
+        self.current.read().is_some()
+    }
+}
+
+impl rustls::server::ResolvesServerCert for Reloadable {
+    fn resolve(
+        &self,
+        _hello: rustls::server::ClientHello<'_>,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        self.current.read().clone()
+    }
+}
+
+/// Builds the three server configurations around one reloadable certificate.
+///
+/// Each listener advertises its own protocol, but they share the certificate,
+/// so replacing it reaches all of them at once.
+pub fn reloadable(resolver: Arc<Reloadable>) -> Loaded {
+    let make = |alpn: Vec<Vec<u8>>| {
+        let mut c = ServerConfig::builder()
+            .with_no_client_auth()
+            .with_cert_resolver(resolver.clone());
+        c.alpn_protocols = alpn;
+
+        Arc::new(c)
+    };
+
+    Loaded {
+        dot: make(vec![b"dot".to_vec()]),
+        https: make(vec![b"h2".to_vec(), b"http/1.1".to_vec()]),
+        h3: make(vec![b"h3".to_vec()]),
+        doq: make(vec![b"doq".to_vec()]),
+        status: Status::default(),
+    }
+}
+
+/// Parses a source and installs it into a reloadable slot.
+pub fn install(src: &Source, into: &Reloadable) -> Result<Status, Error> {
+    let chain = parse_chain(&src.cert_pem()?)?;
+    let key = parse_key(&src.key_pem()?)?;
+
+    let mut status = Status {
+        valid_cert: true,
+        valid_key: true,
+        ..Default::default()
+    };
+    status.valid_chain = chain.len() > 1;
+    describe_leaf(&chain[0], &mut status);
+
+    // Building a configuration first is what catches a key that does not
+    // match the certificate: the resolver would accept the pair and fail at
+    // handshake time instead.
+    build(chain.clone(), key.clone_key())?;
+    into.set(chain, key)?;
+    status.valid_pair = true;
+
+    Ok(status)
 }
 
 /// Builds a rustls server configuration from a chain and key.
@@ -368,6 +475,9 @@ pub fn load(src: &Source) -> Result<Loaded, Error> {
     let mut https = build(chain.clone(), key.clone_key())?;
     https.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
+    let mut h3 = build(chain.clone(), key.clone_key())?;
+    h3.alpn_protocols = vec![b"h3".to_vec()];
+
     // RFC 9250 names the protocol `doq`; earlier drafts used other tokens,
     // and clients that still send them are simply not served.
     let mut doq = build(chain, key)?;
@@ -378,6 +488,7 @@ pub fn load(src: &Source) -> Result<Loaded, Error> {
     Ok(Loaded {
         dot: Arc::new(dot),
         https: Arc::new(https),
+        h3: Arc::new(h3),
         doq: Arc::new(doq),
         status,
     })
@@ -428,6 +539,7 @@ mod tests {
             vec![b"h2".to_vec(), b"http/1.1".to_vec()]
         );
         assert_eq!(loaded.doq.alpn_protocols, vec![b"doq".to_vec()]);
+        assert_eq!(loaded.h3.alpn_protocols, vec![b"h3".to_vec()]);
     }
 
     #[test]
@@ -575,5 +687,84 @@ mod tests {
             }
             .is_empty()
         );
+    }
+
+    #[test]
+    fn a_reloadable_certificate_can_be_replaced_while_running() {
+        // A certificate installed through the API has to reach the running
+        // listeners; otherwise it only takes effect at the next restart.
+        let slot = Arc::new(Reloadable::new());
+        assert!(!slot.is_loaded());
+
+        let (cert, key) = self_signed(&["first.example"]);
+        let status = install(&inline(&cert, &key), &slot).expect("the pair should install");
+        assert!(status.valid_pair);
+        assert!(slot.is_loaded());
+
+        let first = {
+            let guard = slot.current.read();
+
+            guard.clone().expect("a certificate should be resolvable")
+        };
+
+        let (cert2, key2) = self_signed(&["second.example"]);
+        install(&inline(&cert2, &key2), &slot).expect("the second pair should install");
+
+        let second = {
+            let guard = slot.current.read();
+
+            guard.clone().expect("the replacement should be resolvable")
+        };
+        assert_ne!(
+            first.cert[0].as_ref(),
+            second.cert[0].as_ref(),
+            "the served certificate should have changed"
+        );
+    }
+
+    #[test]
+    fn a_mismatched_pair_is_refused_before_it_is_installed() {
+        let slot = Reloadable::new();
+        let (cert, _) = self_signed(&["a.example"]);
+        let (_, key) = self_signed(&["b.example"]);
+
+        assert!(install(&inline(&cert, &key), &slot).is_err());
+        assert!(!slot.is_loaded(), "nothing should have been installed");
+    }
+
+    #[test]
+    fn the_reloadable_configurations_advertise_the_right_protocols() {
+        let slot = Arc::new(Reloadable::new());
+        let loaded = reloadable(slot);
+
+        assert_eq!(loaded.dot.alpn_protocols, vec![b"dot".to_vec()]);
+        assert_eq!(
+            loaded.https.alpn_protocols,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()]
+        );
+        assert_eq!(loaded.doq.alpn_protocols, vec![b"doq".to_vec()]);
+        assert_eq!(loaded.h3.alpn_protocols, vec![b"h3".to_vec()]);
+    }
+
+    #[test]
+    fn ip_addresses_are_reported_separately_from_dns_names() {
+        // The API's `dns_names` is compared against Go's, which carries DNS
+        // names only; DDR needs to know about IP names as well.
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        params
+            .subject_alt_names
+            .push(rcgen::SanType::IpAddress("127.0.0.1".parse().unwrap()));
+        let key = rcgen::KeyPair::generate().unwrap();
+        let cert = params.self_signed(&key).unwrap();
+
+        let st = inspect(&inline(&cert.pem(), &key.serialize_pem()));
+        assert_eq!(st.dns_names, vec!["localhost".to_string()]);
+        assert!(st.has_ip_addresses);
+    }
+
+    #[test]
+    fn a_certificate_without_ip_names_says_so() {
+        let (c, k) = self_signed(&["localhost"]);
+        assert!(!inspect(&inline(&c, &k)).has_ip_addresses);
     }
 }

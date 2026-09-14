@@ -6,13 +6,21 @@
 //! credentials are accepted too, which is what the API's scripted users rely
 //! on.
 
-use std::time::{Duration, SystemTime};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ahash::AHashMap;
 use parking_lot::Mutex;
 
 /// The name of the session cookie.
 pub const COOKIE_NAME: &str = "agh_session";
+
+/// The bucket `sessions.db` stores sessions in.
+///
+/// The name carries a version: upstream changed the record layout once and
+/// used a new bucket rather than migrating.
+const BUCKET: &[u8] = b"sessions-2";
 
 /// One logged-in session.
 #[derive(Clone, Debug)]
@@ -24,15 +32,37 @@ pub struct Session {
 }
 
 /// The session store.
+///
+/// Sessions are persisted to `sessions.db` in the layout the Go build uses, so
+/// a restart does not sign everyone out and either build can read the other's
+/// file: a 16-byte token as the key, and a four-byte expiry, a two-byte name
+/// length and the name as the value.
 #[derive(Default)]
 pub struct Sessions {
+    /// The live sessions, by token.
     by_token: Mutex<AHashMap<String, Session>>,
+    /// Where the sessions are stored, if anywhere.
+    path: Option<PathBuf>,
 }
 
 impl Sessions {
-    /// Creates an empty store.
+    /// Creates an empty, unsaved store.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Opens the store backed by a file, loading whatever it holds.
+    ///
+    /// A missing or unreadable file starts an empty store: losing sessions is
+    /// an inconvenience, while refusing to start is an outage.
+    pub fn open(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let by_token = load(&path).unwrap_or_default();
+
+        Self {
+            by_token: Mutex::new(by_token),
+            path: Some(path),
+        }
     }
 
     /// Creates a session for a user and returns its token.
@@ -45,6 +75,7 @@ impl Sessions {
                 expires: SystemTime::now() + ttl,
             },
         );
+        self.persist();
 
         token
     }
@@ -65,12 +96,17 @@ impl Sessions {
     /// Removes a session.
     pub fn remove(&self, token: &str) {
         self.by_token.lock().remove(token);
+        self.persist();
     }
 
     /// Drops every expired session.
     pub fn sweep(&self) {
         let now = SystemTime::now();
+        let before = self.by_token.lock().len();
         self.by_token.lock().retain(|_, s| s.expires > now);
+        if self.by_token.lock().len() != before {
+            self.persist();
+        }
     }
 
     /// The number of live sessions.
@@ -82,6 +118,111 @@ impl Sessions {
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
+
+    /// Writes the store out, if it is backed by a file.
+    ///
+    /// A write failure is logged rather than propagated: a session that is
+    /// only in memory still works until the next restart.
+    pub fn persist(&self) {
+        let Some(path) = &self.path else {
+            return;
+        };
+
+        let mut bucket: agl_bolt::write::BucketData = BTreeMap::new();
+        for (token, s) in self.by_token.lock().iter() {
+            let Some(key) = token_bytes(token) else {
+                continue;
+            };
+            bucket.insert(key, encode(s));
+        }
+
+        let mut buckets = BTreeMap::new();
+        buckets.insert(BUCKET.to_vec(), bucket);
+
+        if let Err(e) = agl_bolt::write_file(path, &buckets, agl_bolt::DEFAULT_PAGE_SIZE) {
+            tracing::warn!(path = %path.display(), error = %e, "saving sessions");
+        }
+    }
+}
+
+/// Reads the stored sessions, dropping the expired ones.
+fn load(path: &Path) -> Option<AHashMap<String, Session>> {
+    let db = agl_bolt::Db::open(path).ok()?;
+    let buckets = db.buckets().ok()?;
+    let bucket = buckets.get(BUCKET)?;
+
+    let now = SystemTime::now();
+    let mut out = AHashMap::new();
+    for (key, value) in bucket {
+        let Some(s) = decode(value) else {
+            continue;
+        };
+        if s.expires <= now {
+            continue;
+        }
+
+        out.insert(hex(key), s);
+    }
+
+    Some(out)
+}
+
+/// Encodes a session the way the Go build stores it.
+fn encode(s: &Session) -> Vec<u8> {
+    let expire = s
+        .expires
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+        .min(u64::from(u32::MAX)) as u32;
+
+    let name = s.user.as_bytes();
+    let mut out = Vec::with_capacity(6 + name.len());
+    out.extend_from_slice(&expire.to_be_bytes());
+    out.extend_from_slice(&(name.len().min(usize::from(u16::MAX)) as u16).to_be_bytes());
+    out.extend_from_slice(name);
+
+    out
+}
+
+/// Decodes a stored session.
+fn decode(data: &[u8]) -> Option<Session> {
+    if data.len() < 6 {
+        return None;
+    }
+
+    let expire = u32::from_be_bytes(data[..4].try_into().ok()?);
+    let name_len = usize::from(u16::from_be_bytes(data[4..6].try_into().ok()?));
+    let name = data.get(6..6 + name_len)?;
+
+    Some(Session {
+        user: String::from_utf8_lossy(name).into_owned(),
+        expires: UNIX_EPOCH + Duration::from_secs(u64::from(expire)),
+    })
+}
+
+/// Parses a hex token back into the raw bytes used as the database key.
+fn token_bytes(token: &str) -> Option<Vec<u8>> {
+    if !token.len().is_multiple_of(2) {
+        return None;
+    }
+
+    (0..token.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(token.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+/// Renders raw token bytes as the hex form the cookie carries.
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+
+    s
 }
 
 /// Generates a fresh session token, hex-encoded as upstream does.
@@ -197,6 +338,93 @@ impl LoginLimiter {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sessions_survive_a_restart() {
+        // A restart that signs everyone out is a visible regression, and the
+        // file has to be the one the Go build reads.
+        let dir = std::env::temp_dir().join(format!("agl-sessions-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sessions.db");
+
+        let token = {
+            let s = Sessions::open(&path);
+            let t = s.create("admin", Duration::from_secs(3600));
+            assert_eq!(s.len(), 1);
+
+            t
+        };
+
+        let again = Sessions::open(&path);
+        assert_eq!(again.len(), 1, "the session should be read back");
+        assert_eq!(again.get(&token).map(|s| s.user).as_deref(), Some("admin"));
+
+        again.remove(&token);
+        let third = Sessions::open(&path);
+        assert!(third.is_empty(), "a logout is persisted too");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_expired_session_is_not_loaded() {
+        let dir = std::env::temp_dir().join(format!("agl-sessions-exp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("sessions.db");
+
+        {
+            let s = Sessions::open(&path);
+            // A zero TTL is already in the past by the time it is written.
+            s.create("admin", Duration::from_secs(0));
+        }
+
+        assert!(Sessions::open(&path).is_empty());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_missing_database_starts_empty_rather_than_failing() {
+        let path = std::env::temp_dir().join("agl-sessions-does-not-exist.db");
+        std::fs::remove_file(&path).ok();
+
+        assert!(Sessions::open(&path).is_empty());
+    }
+
+    #[test]
+    fn the_stored_record_matches_the_go_layout() {
+        // Four bytes of expiry, two of name length, then the name.
+        let s = Session {
+            user: "admin".into(),
+            expires: UNIX_EPOCH + Duration::from_secs(0x1234_5678),
+        };
+        let data = encode(&s);
+
+        assert_eq!(&data[..4], &[0x12, 0x34, 0x56, 0x78]);
+        assert_eq!(&data[4..6], &[0x00, 0x05]);
+        assert_eq!(&data[6..], b"admin");
+
+        let back = decode(&data).unwrap();
+        assert_eq!(back.user, "admin");
+        assert_eq!(back.expires, s.expires);
+    }
+
+    #[test]
+    fn a_short_record_is_rejected() {
+        assert!(decode(&[0, 0, 0]).is_none());
+        assert!(
+            decode(&[0, 0, 0, 0, 0, 9, b'a']).is_none(),
+            "name too short"
+        );
+    }
+
+    #[test]
+    fn tokens_round_trip_between_hex_and_bytes() {
+        let t = new_token();
+        let bytes = token_bytes(&t).unwrap();
+        assert_eq!(bytes.len(), 16);
+        assert_eq!(hex(&bytes), t);
+        assert!(token_bytes("abc").is_none(), "an odd length is not hex");
+    }
+
     use super::*;
 
     #[test]

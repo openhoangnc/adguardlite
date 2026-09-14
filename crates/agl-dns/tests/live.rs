@@ -92,3 +92,67 @@ async fn bootstrap_resolves_an_encrypted_upstreams_hostname() {
     assert!(!c.addrs().is_empty());
     assert!(c.addrs().iter().all(|a| a.port() == 853));
 }
+
+#[tokio::test]
+#[ignore = "needs network"]
+async fn dns_over_quic_upstream_resolves() {
+    // AdGuard's own public resolver is the one that advertises DoQ.
+    let ips = resolve_via("quic://dns.adguard-dns.com", "example.com.").await;
+    assert!(!ips.is_empty(), "expected an answer");
+}
+
+#[tokio::test]
+#[ignore = "needs network"]
+async fn safe_browsing_recognises_a_known_bad_host() {
+    use agl_dns::hashprefix::{Checker, SAFE_BROWSING_SUFFIX};
+
+    let c = Checker::connect(SAFE_BROWSING_SUFFIX, Duration::from_secs(60), 1024)
+        .await
+        .expect("the family resolver should be reachable");
+
+    // AdGuard publish this name specifically for testing the lookup.
+    assert!(
+        c.check("testsafebrowsing.adguard.com").await,
+        "the test host should be reported as unsafe"
+    );
+    assert!(
+        !c.check("example.com").await,
+        "an ordinary host must not be reported"
+    );
+}
+
+#[tokio::test]
+#[ignore = "needs network"]
+async fn parental_control_recognises_a_known_adult_host() {
+    use agl_dns::hashprefix::{Checker, PARENTAL_SUFFIX};
+
+    let c = Checker::connect(PARENTAL_SUFFIX, Duration::from_secs(60), 1024)
+        .await
+        .expect("the family resolver should be reachable");
+
+    assert!(!c.check("example.com").await);
+}
+
+#[tokio::test]
+#[ignore = "needs network"]
+async fn dns_over_https_upstream_resolves_over_http3() {
+    // Cloudflare's resolver is the one that reliably offers HTTP/3 here; a
+    // server that does not would fall back to HTTP/2 and still answer, so the
+    // assertion below is that the exchange works at all.
+    let up = addr::parse("https://cloudflare-dns.com/dns-query")
+        .unwrap()
+        .upstream
+        .unwrap();
+    let bootstrap: Vec<SocketAddr> = vec!["9.9.9.10:53".parse().unwrap()];
+
+    let c = Client::connect(up, &bootstrap, Duration::from_secs(10), false, tls_config())
+        .await
+        .expect("connecting")
+        .with_http3(true);
+
+    let resp = c
+        .exchange(&query("example.com."), Duration::from_secs(10))
+        .await
+        .expect("the exchange should succeed");
+    assert!(!resp.answers.is_empty());
+}

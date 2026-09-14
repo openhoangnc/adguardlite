@@ -44,12 +44,86 @@ pub fn router(state: Shared, secure: bool) -> Router {
             get(doh::get_with_client).post(doh::post_with_client),
         );
 
-    Router::new()
+    let mut app = Router::new()
         .nest("/control", control)
         .merge(dns.with_state(state.clone()))
-        .fallback(get(serve_ui))
-        .layer(axum::Extension(doh::Secure(secure)))
+        .fallback(get(serve_ui));
+
+    // On the plain listener, `force_https` sends browsers to the encrypted
+    // one.  The redirect is added only there: applying it to the HTTPS router
+    // would send every request back to itself.
+    if !secure {
+        app = app.layer(middleware::from_fn_with_state(
+            state.clone(),
+            redirect_to_https,
+        ));
+    }
+
+    app.layer(axum::Extension(doh::Secure(secure)))
         .with_state(state)
+}
+
+/// Redirects a plain-HTTP request to the HTTPS port when `force_https` is set.
+///
+/// DNS-over-HTTPS is left alone: a DoH client does not follow redirects, and
+/// whether it may use the plain port is already decided by
+/// `http.doh.insecure_enabled`.
+async fn redirect_to_https(State(s): State<Shared>, req: Request, next: Next) -> Response {
+    let (enabled, port) = {
+        let cfg = s.config.read();
+
+        (
+            cfg.tls.enabled && cfg.tls.force_https && cfg.tls.port_https != 0,
+            cfg.tls.port_https,
+        )
+    };
+
+    let path = req.uri().path();
+    if !enabled || path.starts_with("/dns-query") {
+        return next.run(req).await;
+    }
+
+    let Some(host) = host_without_port(req.headers()) else {
+        return next.run(req).await;
+    };
+
+    let target = if port == 443 {
+        format!("https://{host}{}", path_and_query(&req))
+    } else {
+        format!("https://{host}:{port}{}", path_and_query(&req))
+    };
+
+    match target.parse::<header::HeaderValue>() {
+        Ok(v) => (StatusCode::FOUND, [(header::LOCATION, v)]).into_response(),
+        Err(_) => next.run(req).await,
+    }
+}
+
+/// The `Host` header without its port, which the redirect target rebuilds.
+fn host_without_port(headers: &HeaderMap) -> Option<String> {
+    let host = headers.get(header::HOST)?.to_str().ok()?.trim();
+    if host.is_empty() {
+        return None;
+    }
+
+    // An IPv6 literal is bracketed, so the last colon is only a port
+    // separator when it comes after the closing bracket.
+    if let Some(end) = host.rfind(']') {
+        return Some(host[..=end].to_string());
+    }
+
+    Some(match host.rsplit_once(':') {
+        Some((h, _)) => h.to_string(),
+        None => host.to_string(),
+    })
+}
+
+/// The path and query of a request, as the redirect target needs them.
+fn path_and_query(req: &Request) -> String {
+    req.uri()
+        .path_and_query()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| "/".to_string())
 }
 
 /// Serves the embedded web interface.
@@ -87,7 +161,7 @@ fn control_router() -> Router<Shared> {
         .route("/cache_clear", post(status::cache_clear))
         .route("/test_upstream_dns", post(status::test_upstream))
         .route("/version.json", get(status::version).post(status::version))
-        .route("/update", post(not_supported))
+        .route("/update", post(update_unsupported))
         // Filtering.
         .route("/filtering/status", get(filtering::status))
         .route("/filtering/config", post(filtering::set_config))
@@ -202,14 +276,22 @@ fn control_router() -> Router<Shared> {
         .route("/apple/dot.mobileconfig", get(mobileconfig_dot))
 }
 
-/// Answers endpoints this build does not implement.
+/// Answers `POST /control/update`.
 ///
-/// A clear 501 is better than a silent success that leaves the user thinking
-/// a setting took effect.
-async fn not_supported() -> Response {
+/// This build deliberately cannot update itself.  The releases the
+/// announcement server publishes are AdGuard Home's own Go binaries;
+/// downloading one and writing it over this executable would replace
+/// adguardlite with a different implementation, which is not an update.
+///
+/// `/control/version.json` still reports the latest release so the interface
+/// can say one exists, with `can_autoupdate` false so the button is not
+/// offered.  See the updates section of TASK.md.
+async fn update_unsupported() -> Response {
     (
         StatusCode::NOT_IMPLEMENTED,
-        "this endpoint is not implemented by adguardlite",
+        "this build of adguardlite cannot update itself; \
+         the published releases are AdGuard Home's own binaries, \
+         so replace the binary through your package manager or image instead",
     )
         .into_response()
 }
@@ -298,6 +380,30 @@ pub async fn enabled_json(enabled: bool) -> Json<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_host_header_loses_its_port() {
+        let mut h = HeaderMap::new();
+        h.insert(header::HOST, "example.com:3000".parse().unwrap());
+        assert_eq!(host_without_port(&h).as_deref(), Some("example.com"));
+
+        h.insert(header::HOST, "example.com".parse().unwrap());
+        assert_eq!(host_without_port(&h).as_deref(), Some("example.com"));
+
+        h.insert(header::HOST, "[2001:db8::1]:3000".parse().unwrap());
+        assert_eq!(host_without_port(&h).as_deref(), Some("[2001:db8::1]"));
+
+        h.insert(header::HOST, "".parse().unwrap());
+        assert_eq!(host_without_port(&h), None);
+    }
+
+    #[tokio::test]
+    async fn self_update_is_refused_rather_than_pretending_to_work() {
+        // Accepting it would have to download an AdGuard Home release and
+        // write it over this binary, which replaces the implementation.
+        let r = update_unsupported().await;
+        assert_eq!(r.status(), StatusCode::NOT_IMPLEMENTED);
+    }
 
     #[tokio::test]
     async fn every_dhcp_change_is_refused() {

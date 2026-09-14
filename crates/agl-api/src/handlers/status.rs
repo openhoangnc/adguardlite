@@ -366,16 +366,81 @@ pub async fn cache_clear(State(s): State<Shared>) -> ApiResult<()> {
     Ok(())
 }
 
-/// `GET /control/version.json` and `POST /control/version.json`
-pub async fn version(State(s): State<Shared>) -> Json<serde_json::Value> {
-    let _ = &s;
+/// How long an announcement is reused before it is fetched again.
+///
+/// Upstream's interval: the interface asks on every page load, and the
+/// announcement server should not hear about each one.
+const VERSION_CHECK_PERIOD: std::time::Duration = std::time::Duration::from_secs(8 * 60 * 60);
 
-    Json(json!({
-        "new_version": agl_core::AGH_VERSION,
-        "announcement": "",
-        "announcement_url": "",
+/// The body `POST /control/version.json` may carry.
+#[derive(Deserialize, Default)]
+pub struct VersionReq {
+    /// Whether to fetch now rather than reuse the cached announcement.
+    #[serde(default)]
+    pub recheck_now: bool,
+}
+
+/// `GET /control/version.json` and `POST /control/version.json`
+///
+/// `can_autoupdate` is always false: this build cannot replace itself with an
+/// AdGuard Home release, so the interface must not offer the button.  See the
+/// updates section of TASK.md.
+pub async fn version(
+    State(s): State<Shared>,
+    body: Option<Json<VersionReq>>,
+) -> Json<serde_json::Value> {
+    if s.version.disabled() {
+        return Json(json!({ "disabled": true }));
+    }
+
+    let recheck = body.map(|Json(b)| b.recheck_now).unwrap_or(false);
+
+    if !recheck
+        && let Some((at, cached)) = s.version_cache.read().clone()
+        && jiff::Timestamp::now().duration_since(at).unsigned_abs() < VERSION_CHECK_PERIOD
+    {
+        return Json(cached);
+    }
+
+    let fetched = s.version.fetch().await.ok().and_then(parse_version);
+    let Some(info) = fetched else {
+        // Upstream answers 502 here; reporting the running version keeps the
+        // interface usable when the announcement server is unreachable.
+        return Json(json!({
+            "new_version": agl_core::AGH_VERSION,
+            "can_autoupdate": false,
+            "disabled": false,
+        }));
+    };
+
+    *s.version_cache.write() = Some((jiff::Timestamp::now(), info.clone()));
+
+    Json(info)
+}
+
+/// Parses the announcement document into the API's response shape.
+pub fn parse_version(body: String) -> Option<serde_json::Value> {
+    let doc: serde_json::Value = serde_json::from_str(&body).ok()?;
+    let field = |k: &str| {
+        doc.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+
+    let new_version = field("version");
+    if new_version.is_empty() {
+        return None;
+    }
+
+    Some(json!({
+        "new_version": new_version,
+        "announcement": field("announcement"),
+        "announcement_url": field("announcement_url"),
+        // This build is not an AdGuard Home release and cannot replace itself
+        // with one, so the interface is told not to offer the update button.
         "can_autoupdate": false,
-        "disabled": true,
+        "disabled": false,
     }))
 }
 

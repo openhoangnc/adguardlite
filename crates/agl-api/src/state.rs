@@ -31,6 +31,34 @@ impl ListFetcher for NoFetcher {
     }
 }
 
+/// A future returned by a version check.
+pub type VersionFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<String, String>> + Send>>;
+
+/// Fetches the release announcement.
+///
+/// Implemented by the binary so this crate needs no HTTP client of its own.
+pub trait VersionChecker: Send + Sync + 'static {
+    /// Downloads the announcement document.
+    fn fetch(&self) -> VersionFuture;
+
+    /// Reports whether checking is switched off, by `--no-check-update`.
+    fn disabled(&self) -> bool;
+}
+
+/// A checker that reports the feature as switched off, for tests.
+pub struct NoVersionCheck;
+
+impl VersionChecker for NoVersionCheck {
+    fn fetch(&self) -> VersionFuture {
+        Box::pin(async { Err("version checking is not available".to_string()) })
+    }
+
+    fn disabled(&self) -> bool {
+        true
+    }
+}
+
 /// Applies configuration changes to the running server.
 ///
 /// The API mutates the config; something has to push those changes into the
@@ -78,6 +106,13 @@ pub struct AppState {
     pub reloader: Arc<dyn Reloader>,
     /// The addresses the DNS server listens on, for `/control/status`.
     pub dns_addresses: RwLock<Vec<String>>,
+    /// Checks for a newer release.
+    pub version: Arc<dyn VersionChecker>,
+    /// The last announcement seen, and when it was fetched.
+    ///
+    /// Upstream rechecks at most every eight hours; asking the announcement
+    /// server on every page load would be rude and slow.
+    pub version_cache: RwLock<Option<(Timestamp, serde_json::Value)>>,
 }
 
 impl AppState {

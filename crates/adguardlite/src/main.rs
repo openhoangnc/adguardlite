@@ -2,8 +2,13 @@
 
 mod app;
 mod cli;
+mod discovery;
 mod fetch;
+mod ipset;
 mod lists;
+mod logging;
+mod osconf;
+mod service;
 mod wiring;
 
 use std::sync::Arc;
@@ -19,7 +24,40 @@ use crate::cli::Args;
 
 fn main() -> std::process::ExitCode {
     let args = Args::parse();
-    init_logging(&args);
+
+    let paths = Paths::new(args.work_dir_or_default(), args.config_or_default());
+
+    // The configuration is read before the runtime starts, because two of the
+    // things it decides — where the log goes and which user to run as — have
+    // to be settled while the process is still single-threaded.
+    let config = match app::load_or_init(&paths) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("adguardlite: reading {}: {e}", paths.config.display());
+
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+
+    init_logging(&args, &config.log);
+
+    // A service action neither starts the server nor needs the runtime.
+    if let Some(action) = args.service.as_deref() {
+        return match service::run(action, &args) {
+            Ok(message) => {
+                println!("{message}");
+
+                std::process::ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("adguardlite: {e}");
+
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
+
+    osconf::apply(&config.os);
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -33,7 +71,7 @@ fn main() -> std::process::ExitCode {
         }
     };
 
-    match runtime.block_on(run(args)) {
+    match runtime.block_on(run(args, paths, config)) {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e) => {
             tracing::error!(error = %e, "fatal");
@@ -49,8 +87,12 @@ fn main() -> std::process::ExitCode {
 /// binary target is `AdGuardHome`, so `module_path!` reports that rather than
 /// the package name, and a per-crate filter spelled `adguardlite=info` would
 /// silently drop every message the server logs.
-fn init_logging(args: &Args) {
-    let default = if args.verbose { "debug" } else { "info" };
+fn init_logging(args: &Args, log: &agl_config::model::LogConfig) {
+    let default = if args.verbose || log.verbose {
+        "debug"
+    } else {
+        "info"
+    };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         // Quiet the dependencies that are chatty at these levels.
         EnvFilter::new(format!(
@@ -58,19 +100,44 @@ fn init_logging(args: &Args) {
         ))
     });
 
-    tracing_subscriber::fmt()
+    // `--logfile` wins over the configured file, which is what upstream does:
+    // the flag is how an init script overrides the file for one run.
+    let target = args.logfile.clone().unwrap_or_else(|| {
+        if log.enabled {
+            log.file.clone()
+        } else {
+            String::new()
+        }
+    });
+
+    let rotation = logging::Rotation {
+        max_size_mb: log.max_size,
+        max_backups: log.max_backups,
+        max_age_days: log.max_age,
+        compress: log.compress,
+    };
+
+    let builder = tracing_subscriber::fmt()
         .with_env_filter(filter)
-        .with_target(false)
-        .init();
+        .with_target(false);
+
+    match logging::Sink::choose(&target, rotation) {
+        logging::Sink::Stderr => builder.init(),
+        logging::Sink::File(f) => builder.with_ansi(false).with_writer(move || f).init(),
+        #[cfg(unix)]
+        logging::Sink::Syslog(s) => builder
+            .with_ansi(false)
+            // The system log stamps its own time and level.
+            .without_time()
+            .with_writer(move || s)
+            .init(),
+    }
 }
 
 /// Starts the server and runs until a shutdown signal arrives.
-async fn run(args: Args) -> anyhow::Result<()> {
+async fn run(args: Args, paths: Paths, mut config: agl_config::Config) -> anyhow::Result<()> {
     // rustls needs a process-wide crypto provider before any TLS is set up.
     let _ = rustls::crypto::ring::default_provider().install_default();
-
-    let paths = Paths::new(args.work_dir_or_default(), args.config_or_default());
-    let mut config = app::load_or_init(&paths)?;
 
     if let Some(addr) = args.web_override()
         && let Ok(parsed) = addr.parse::<std::net::SocketAddr>()
@@ -90,6 +157,13 @@ async fn run(args: Args) -> anyhow::Result<()> {
         work_dir = %paths.work.display(),
         "starting adguardlite"
     );
+
+    if let Some(p) = &args.pidfile {
+        match osconf::write_pidfile(p) {
+            Ok(()) => tracing::info!(path = %p.display(), "pid file written"),
+            Err(e) => tracing::warn!(path = %p.display(), error = %e, "writing the pid file"),
+        }
+    }
 
     // The query log and statistics are shared between the DNS observer and the
     // HTTP API, so they are built before either.
@@ -130,6 +204,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         stats.clone(),
         config.dns.anonymize_client_ip,
     ));
+    let recorder_handle = recorder.clone();
 
     let web_addr = config.http.address.0;
     let max_list_bytes = config.filtering.max_http_size.bytes();
@@ -141,6 +216,8 @@ async fn run(args: Args) -> anyhow::Result<()> {
         lists = application.filters.blocklists.len() + application.filters.allowlists.len(),
         "filter lists loaded"
     );
+
+    let certificate = Arc::new(agl_dns::tls::Reloadable::new());
 
     let dns_addrs: Vec<String> = application
         .dns_addrs()
@@ -156,7 +233,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         filters: parking_lot::RwLock::new(application.filters.clone()),
         querylog: querylog.clone(),
         stats: stats.clone(),
-        sessions: agl_api::auth::Sessions::new(),
+        sessions: agl_api::auth::Sessions::open(application.paths.sessions_db()),
         started: jiff::Timestamp::now(),
         fetcher: Arc::new(wiring::Downloader {
             paths: application.paths.clone(),
@@ -165,12 +242,49 @@ async fn run(args: Args) -> anyhow::Result<()> {
         }),
         reloader: Arc::new(wiring::LiveReloader {
             resolver: application.resolver.clone(),
+            server: application.server.clone(),
+            certificate: certificate.clone(),
         }),
         dns_addresses: parking_lot::RwLock::new(dns_addrs),
+        version: Arc::new(wiring::ReleaseChecker {
+            disabled: args.no_check_update,
+        }),
+        version_cache: parking_lot::RwLock::new(None),
     });
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     let mut tasks = application.serve_dns(shutdown_rx.clone()).await?;
+
+    // ipset, if any sets are configured.
+    let ipset_lines = ipset::lines(
+        &application.config.dns.ipset,
+        &application.config.dns.ipset_file,
+    );
+    if let Some(m) = ipset::Manager::new(ipset::parse(&ipset_lines)) {
+        tracing::info!(rules = ipset_lines.len(), "ipset enabled");
+        recorder_handle.set_ipset(Some(Arc::new(m)));
+    }
+
+    // Client discovery: names for the addresses that show up in the log.
+    let discoverer = Arc::new(discovery::Discoverer {
+        resolver: application.resolver.clone(),
+        runtime: application.resolver.runtime.clone(),
+    });
+    let (queue, discovery_task) = discoverer.start(shutdown_rx.clone());
+    recorder_handle.set_discovery(queue, application.resolver.runtime.clone());
+    tasks.push(discovery_task);
+
+    // Safe browsing and parental control, whose lookups go to AdGuard's own
+    // family resolver.  Resolving it can block, so it happens in the
+    // background: a slow network must not hold up the DNS listeners.
+    tasks.push(tokio::spawn(start_hashprefix_checkers(
+        application.resolver.clone(),
+        application.config.filtering.safebrowsing_enabled,
+        application.config.filtering.parental_enabled,
+        application.config.filtering.cache_time,
+        application.config.filtering.safebrowsing_cache_size as usize,
+        application.config.filtering.parental_cache_size as usize,
+    )));
 
     for addr in application.dns_addrs() {
         tracing::info!(%addr, "serving dns");
@@ -179,7 +293,11 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // Encryption, if a usable certificate is configured.  A broken one is a
     // warning rather than a fatal error: plain DNS and the web interface
     // should keep working while the operator fixes it.
-    let tls = load_tls(&application.config);
+    //
+    // The listeners are given a resolver rather than a certificate, so one
+    // replaced through the API reaches them without a restart.
+    let tls = load_tls(&application.config, &certificate)
+        .then(|| agl_dns::tls::reloadable(certificate.clone()));
 
     // The web interface over plain HTTP.
     let listener = tokio::net::TcpListener::bind(web_addr).await?;
@@ -203,6 +321,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
 
     if let Some(tls) = tls {
         let cfg = &application.config;
+        // A ClientID reaches an encrypted listener as a label below the name
+        // the certificate is for.
+        let server_name = Arc::new(cfg.tls.server_name.clone());
 
         // HTTPS carries both the web interface and DNS-over-HTTPS, as upstream
         // serves them.
@@ -223,6 +344,25 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     }
                     Err(e) => tracing::error!(%addr, error = %e, "binding https"),
                 }
+
+                // HTTP/3 runs over QUIC, so it needs its own listener on the
+                // same port number — the UDP one rather than the TCP one.
+                if cfg.dns.serve_http3 {
+                    match agl_api::http3::endpoint(addr, tls.h3.clone()) {
+                        Ok(ep) => {
+                            tracing::info!(%addr, "serving http/3");
+                            let router = agl_api::routes::router(state.clone(), true);
+                            let mut rx = shutdown_rx.clone();
+                            tasks.push(tokio::spawn(async move {
+                                agl_api::http3::serve(ep, router, async move {
+                                    let _ = rx.changed().await;
+                                })
+                                .await;
+                            }));
+                        }
+                        Err(e) => tracing::error!(%addr, error = %e, "binding http/3"),
+                    }
+                }
             }
         }
 
@@ -233,9 +373,10 @@ async fn run(args: Args) -> anyhow::Result<()> {
                     Ok(ep) => {
                         tracing::info!(%addr, "serving dns-over-quic");
                         let server = application.server.clone();
+                        let name = server_name.clone();
                         let mut rx = shutdown_rx.clone();
                         tasks.push(tokio::spawn(async move {
-                            agl_dns::doq::serve(ep, server, async move {
+                            agl_dns::doq::serve(ep, server, name, async move {
                                 let _ = rx.changed().await;
                             })
                             .await;
@@ -254,9 +395,10 @@ async fn run(args: Args) -> anyhow::Result<()> {
                         tracing::info!(%addr, "serving dns-over-tls");
                         let server = application.server.clone();
                         let dot = tls.dot.clone();
+                        let name = server_name.clone();
                         let mut rx = shutdown_rx.clone();
                         tasks.push(tokio::spawn(async move {
-                            let _ = agl_dns::server::serve_dot(l, dot, server, async move {
+                            let _ = agl_dns::server::serve_dot(l, dot, server, name, async move {
                                 let _ = rx.changed().await;
                             })
                             .await;
@@ -280,6 +422,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
     let _ = shutdown_tx.send(true);
 
     // Persist whatever is still buffered before the process exits.
+    state.sessions.persist();
     if let Err(e) = querylog.flush() {
         tracing::warn!(error = %e, "flushing the query log");
     }
@@ -291,13 +434,60 @@ async fn run(args: Args) -> anyhow::Result<()> {
         let _ = tokio::time::timeout(Duration::from_secs(5), t).await;
     }
 
+    if let Some(p) = &args.pidfile {
+        osconf::remove_pidfile(p);
+    }
+
     Ok(())
 }
 
-/// Loads the configured certificate, if encryption is on and one is set.
-fn load_tls(cfg: &agl_config::Config) -> Option<agl_dns::tls::Loaded> {
+/// Builds the safe browsing and parental control checkers.
+///
+/// Each is a DNS-over-HTTPS client to AdGuard's family resolver; a failure to
+/// reach it leaves the feature off for this run rather than stopping the
+/// server, and is logged so the operator can see why nothing is being
+/// blocked.
+async fn start_hashprefix_checkers(
+    resolver: Arc<agl_dns::resolver::Resolver>,
+    safebrowsing: bool,
+    parental: bool,
+    cache_minutes: u32,
+    sb_cache: usize,
+    pc_cache: usize,
+) {
+    use agl_dns::hashprefix::{Checker, PARENTAL_SUFFIX, SAFE_BROWSING_SUFFIX};
+
+    if !safebrowsing && !parental {
+        return;
+    }
+
+    let ttl = Duration::from_secs(u64::from(cache_minutes.max(1)) * 60);
+
+    if safebrowsing {
+        match Checker::connect(SAFE_BROWSING_SUFFIX, ttl, sb_cache).await {
+            Ok(c) => {
+                tracing::info!("safe browsing enabled");
+                resolver.set_safebrowsing(Some(Arc::new(c)));
+            }
+            Err(e) => tracing::error!(error = %e, "safe browsing is on but unreachable"),
+        }
+    }
+
+    if parental {
+        match Checker::connect(PARENTAL_SUFFIX, ttl, pc_cache).await {
+            Ok(c) => {
+                tracing::info!("parental control enabled");
+                resolver.set_parental(Some(Arc::new(c)));
+            }
+            Err(e) => tracing::error!(error = %e, "parental control is on but unreachable"),
+        }
+    }
+}
+
+/// Installs the configured certificate, reporting whether encryption can run.
+fn load_tls(cfg: &agl_config::Config, into: &agl_dns::tls::Reloadable) -> bool {
     if !cfg.tls.enabled {
-        return None;
+        return false;
     }
 
     let src = agl_dns::tls::Source {
@@ -310,19 +500,19 @@ fn load_tls(cfg: &agl_config::Config) -> Option<agl_dns::tls::Loaded> {
     if src.is_empty() {
         tracing::warn!("encryption is enabled but no certificate is configured");
 
-        return None;
+        return false;
     }
 
-    match agl_dns::tls::load(&src) {
-        Ok(l) => {
-            tracing::info!(names = ?l.status.dns_names, "certificate loaded");
+    match agl_dns::tls::install(&src, into) {
+        Ok(st) => {
+            tracing::info!(names = ?st.dns_names, "certificate loaded");
 
-            Some(l)
+            true
         }
         Err(e) => {
             tracing::error!(error = %e, "encryption is enabled but the certificate is unusable");
 
-            None
+            false
         }
     }
 }

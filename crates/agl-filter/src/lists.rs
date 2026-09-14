@@ -156,13 +156,30 @@ impl Manager {
         self.hosts_rules = contents;
     }
 
+    /// Builds the engine for the global blocked services, if any are set.
+    ///
+    /// These are kept out of the main engine so the weekly schedule can pause
+    /// them for a request without rebuilding anything.
+    pub fn build_services_engine(&self) -> Option<Engine> {
+        if self.service_rules.trim().is_empty() {
+            return None;
+        }
+
+        Some(Engine::build(
+            [(BLOCKED_SERVICE_LIST_ID, self.service_rules.as_str())],
+            [],
+        ))
+    }
+
     /// Builds a filtering engine from the enabled lists and the user's rules.
+    ///
+    /// The blocked services are **not** included; they get their own engine,
+    /// because the schedule decides per request whether they apply.
     pub fn build_engine(&self) -> Engine {
         let user_text = self.user_rules.join("\n");
 
         let block: Vec<(i64, &str)> = [
             (CUSTOM_LIST_ID, user_text.as_str()),
-            (BLOCKED_SERVICE_LIST_ID, self.service_rules.as_str()),
             (ETC_HOSTS_LIST_ID, self.hosts_rules.as_str()),
         ]
         .into_iter()
@@ -432,12 +449,28 @@ mod tests {
     }
 
     #[test]
-    fn blocked_services_are_enforced() {
+    fn blocked_services_get_their_own_engine() {
+        // They are kept out of the main engine so the weekly schedule can
+        // pause them per request without rebuilding anything.
         let p = tmpdir("services");
         let mut m = Manager::load(&p, &[], &[], &[]);
         m.set_blocked_services(&["youtube".into()]);
 
-        let e = m.build_engine();
+        let main = m.build_engine();
+        assert_eq!(
+            main.match_request(&crate::engine::Request {
+                hostname: "www.youtube.com",
+                qtype: 1,
+                ..Default::default()
+            })
+            .reason,
+            agl_core::Reason::NotFilteredNotFound,
+            "the main engine must not carry the service rules"
+        );
+
+        let e = m
+            .build_services_engine()
+            .expect("a selected service must compile");
         let r = e.match_request(&crate::engine::Request {
             hostname: "www.youtube.com",
             qtype: 1,
@@ -450,8 +483,9 @@ mod tests {
             "the match must be attributed to the blocked-services list"
         );
 
-        // And nothing is blocked once the service is deselected.
+        // And nothing is built once the service is deselected.
         m.set_blocked_services(&[]);
+        assert!(m.build_services_engine().is_none());
         let e = m.build_engine();
         assert_eq!(
             e.match_request(&crate::engine::Request {

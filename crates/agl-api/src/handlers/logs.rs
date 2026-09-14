@@ -58,6 +58,9 @@ pub struct LogEntryJson {
     pub client_info: serde_json::Value,
     /// The transport the query arrived on.
     pub client_proto: String,
+    /// The ClientID the query carried.
+    #[serde(rename = "client_id", skip_serializing_if = "String::is_empty")]
+    pub client_id: String,
     /// How long handling took, in milliseconds, as a string.
     #[serde(rename = "elapsedMs")]
     pub elapsed_ms: String,
@@ -110,27 +113,66 @@ pub async fn querylog(
     let limit = p.limit.unwrap_or(500).min(5_000);
     let offset = p.offset.unwrap_or(0);
 
-    // Over-read so filtering still fills a page.
-    let raw = s.querylog.read(offset, limit.saturating_mul(4).max(limit));
+    // A cursor reads from the start of the log and skips forward instead of
+    // using the offset, because the two cannot be combined coherently.
+    let cutoff = p.older_than.as_deref().and_then(parse_time);
+    let over_read = limit.saturating_mul(4).max(limit);
+    let raw = if cutoff.is_some() {
+        s.querylog.read(0, over_read.saturating_mul(4))
+    } else {
+        s.querylog.read(offset, over_read)
+    };
 
     let search = p.search.as_deref().map(str::to_ascii_lowercase);
     let status = p.response_status.as_deref().unwrap_or("all");
 
+    let name_of = |e: &Entry| -> String {
+        e.ip.parse()
+            .ok()
+            .map(|a| s.resolver.runtime.name_of(a))
+            .unwrap_or_default()
+    };
+
     let filtered: Vec<&Entry> = raw
         .iter()
-        .filter(|e| matches_search(e, search.as_deref()))
+        .filter(|e| is_older_than(e, cutoff))
+        .filter(|e| matches_search(e, search.as_deref(), &name_of(e)))
         .filter(|e| matches_status(e, status))
         .take(limit)
         .collect();
 
     let oldest = filtered.last().map(|e| e.time.clone()).unwrap_or_default();
-    let data: Vec<LogEntryJson> = filtered.iter().map(|e| to_json(e)).collect();
+    let data: Vec<LogEntryJson> = filtered
+        .iter()
+        .map(|e| to_json(e, client_info(&s, e, &name_of(e))))
+        .collect();
 
     Json(json!({ "data": data, "oldest": oldest }))
 }
 
+/// Parses a query log timestamp.
+///
+/// The log writes Go's RFC 3339 with a local offset, and the cursor the
+/// interface sends back is a value it read from a previous page.
+fn parse_time(s: &str) -> Option<jiff::Timestamp> {
+    s.parse::<jiff::Timestamp>().ok()
+}
+
+/// Reports whether an entry is strictly older than the cursor.
+fn is_older_than(e: &Entry, cutoff: Option<jiff::Timestamp>) -> bool {
+    let Some(c) = cutoff else {
+        return true;
+    };
+
+    parse_time(&e.time).is_some_and(|t| t < c)
+}
+
 /// Reports whether an entry matches a search term.
-fn matches_search(e: &Entry, term: Option<&str>) -> bool {
+///
+/// The term is matched against the queried name, the client's address and the
+/// name discovery found for it, which is what the interface's single search
+/// box implies.
+fn matches_search(e: &Entry, term: Option<&str>, client_name: &str) -> bool {
     let Some(t) = term else {
         return true;
     };
@@ -138,7 +180,10 @@ fn matches_search(e: &Entry, term: Option<&str>) -> bool {
         return true;
     }
 
-    e.question_host.to_ascii_lowercase().contains(t) || e.ip.to_ascii_lowercase().contains(t)
+    e.question_host.to_ascii_lowercase().contains(t)
+        || e.ip.to_ascii_lowercase().contains(t)
+        || client_name.to_ascii_lowercase().contains(t)
+        || e.client_id.to_ascii_lowercase().contains(t)
 }
 
 /// Reports whether an entry matches a response-status filter.
@@ -160,8 +205,24 @@ fn matches_status(e: &Entry, status: &str) -> bool {
     }
 }
 
+/// Describes the client an entry came from, as the interface reads it.
+fn client_info(s: &Shared, e: &Entry, name: &str) -> serde_json::Value {
+    let addr = e.ip.parse::<std::net::IpAddr>().ok();
+    let whois = addr
+        .and_then(|a| s.resolver.runtime.get(a))
+        .map(|c| crate::handlers::misc::whois_json(&c.whois))
+        .unwrap_or_else(|| json!({}));
+
+    json!({
+        "whois": whois,
+        "name": name,
+        "disallowed_rule": "",
+        "disallowed": addr.is_some_and(|a| !s.dns_server.access.read().permits(a)),
+    })
+}
+
 /// Converts a stored entry into its API form.
-fn to_json(e: &Entry) -> LogEntryJson {
+fn to_json(e: &Entry, client_info: serde_json::Value) -> LogEntryJson {
     let (status, answers, dnssec) = decode_answer(e);
 
     let first = e.result.rules.first();
@@ -171,8 +232,9 @@ fn to_json(e: &Entry) -> LogEntryJson {
         answer_dnssec: dnssec || e.authenticated_data,
         cached: e.cached,
         client: e.ip.clone(),
-        client_info: json!({ "whois": {}, "name": "", "disallowed_rule": "", "disallowed": false }),
+        client_info,
         client_proto: e.client_proto.as_str().to_string(),
+        client_id: e.client_id.clone(),
         // Upstream sends this as a string, not a number.
         elapsed_ms: format!("{}", e.elapsed as f64 / 1_000_000.0),
         filter_id: first.map(|r| r.filter_list_id),
@@ -509,14 +571,51 @@ mod tests {
     #[test]
     fn search_matches_host_and_client() {
         let e = entry("ads.example.com", Reason::FilteredBlockList);
-        assert!(matches_search(&e, Some("example")));
-        assert!(matches_search(&e, Some("192.168")));
-        assert!(!matches_search(&e, Some("nothing")));
-        assert!(matches_search(&e, None), "no term matches everything");
+        assert!(matches_search(&e, Some("example"), ""));
+        assert!(matches_search(&e, Some("192.168"), ""));
+        assert!(!matches_search(&e, Some("nothing"), ""));
+        assert!(matches_search(&e, None, ""), "no term matches everything");
         assert!(
-            matches_search(&e, Some("")),
+            matches_search(&e, Some(""), ""),
             "an empty term matches everything"
         );
+    }
+
+    #[test]
+    fn search_matches_the_discovered_client_name() {
+        // The interface has one search box, and a user searching for a device
+        // types its name rather than its address.
+        let e = entry("ads.example.com", Reason::FilteredBlockList);
+        assert!(matches_search(&e, Some("printer"), "printer.lan"));
+        assert!(!matches_search(&e, Some("printer"), ""));
+    }
+
+    #[test]
+    fn search_matches_the_client_id() {
+        let mut e = entry("ads.example.com", Reason::FilteredBlockList);
+        e.client_id = "kids-tablet".into();
+        assert!(matches_search(&e, Some("kids"), ""));
+    }
+
+    #[test]
+    fn the_cursor_keeps_only_older_entries() {
+        let mut e = entry("a.com", Reason::NotFilteredNotFound);
+        e.time = "2024-01-01T10:00:00Z".into();
+
+        let cutoff = parse_time("2024-01-01T11:00:00Z");
+        assert!(cutoff.is_some());
+        assert!(is_older_than(&e, cutoff));
+
+        let earlier = parse_time("2024-01-01T09:00:00Z");
+        assert!(!is_older_than(&e, earlier));
+        assert!(is_older_than(&e, None), "no cursor keeps everything");
+    }
+
+    #[test]
+    fn a_go_formatted_timestamp_parses() {
+        // The log writes RFC 3339 with a local offset and nanoseconds.
+        assert!(parse_time("2024-01-01T10:00:00.123456789+02:00").is_some());
+        assert!(parse_time("not a time").is_none());
     }
 
     #[test]
@@ -546,7 +645,7 @@ mod tests {
     #[test]
     fn elapsed_is_reported_in_milliseconds_as_a_string() {
         let e = entry("a.com", Reason::NotFilteredNotFound);
-        let j = to_json(&e);
+        let j = to_json(&e, json!({}));
         assert_eq!(j.elapsed_ms, "1.5", "1,500,000 ns is 1.5 ms");
     }
 
@@ -559,7 +658,7 @@ mod tests {
             filter_list_id: 7,
         }];
 
-        let j = to_json(&e);
+        let j = to_json(&e, json!({}));
         assert_eq!(j.rule.as_deref(), Some("||a.com^"));
         assert_eq!(j.filter_id, Some(7));
         assert_eq!(j.rules.len(), 1);
@@ -568,7 +667,7 @@ mod tests {
 
     #[test]
     fn an_entry_without_rules_omits_them() {
-        let j = to_json(&entry("a.com", Reason::NotFilteredNotFound));
+        let j = to_json(&entry("a.com", Reason::NotFilteredNotFound), json!({}));
         assert!(j.rule.is_none());
         assert!(j.filter_id.is_none());
         assert!(j.rules.is_empty());

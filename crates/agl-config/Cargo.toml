@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 agl-core = { version = "0.107.79", path = "../agl-core" }
+bcrypt = "0.19.3"
 indexmap = "2.14.2"
 saphyr = "0.0.12"
 serde = { version = "1.0.229", features = ["derive"] }

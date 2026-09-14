@@ -99,11 +99,11 @@ impl Upstream {
     }
 
     /// Reports whether this upstream is implemented by this build.
+    ///
+    /// Only `sdns://` stamps are left out: DNSCrypt is excluded by design, so
+    /// a stamp is reported at startup and skipped rather than half-served.
     pub const fn is_supported(&self) -> bool {
-        matches!(
-            self.transport,
-            Transport::Udp | Transport::Tcp | Transport::Tls | Transport::Https
-        )
+        !matches!(self.transport, Transport::Stamp)
     }
 }
 
@@ -424,7 +424,8 @@ mod tests {
         assert!(up("1.1.1.1").is_supported());
         assert!(up("tls://dns.example").is_supported());
         assert!(up("https://dns.example/dns-query").is_supported());
-        assert!(!up("quic://dns.example").is_supported());
+        assert!(up("quic://dns.example").is_supported());
+        // DNSCrypt is excluded by design, so a stamp is never usable here.
         assert!(!up("sdns://AQIAAAA").is_supported());
     }
 

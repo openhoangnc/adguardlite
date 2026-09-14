@@ -79,6 +79,11 @@ pub struct Server {
     pub access: Arc<parking_lot::RwLock<Access>>,
     /// The query observer.
     pub observer: Arc<dyn Observer>,
+    /// The bound on requests being handled at once, or `None` for no bound.
+    ///
+    /// This is `max_goroutines`: without it a flood of slow upstream lookups
+    /// can pile up until the process runs out of memory.
+    concurrency: parking_lot::RwLock<Option<Arc<tokio::sync::Semaphore>>>,
 }
 
 impl Server {
@@ -93,11 +98,35 @@ impl Server {
             limiter,
             access: Arc::new(parking_lot::RwLock::new(Access::default())),
             observer,
+            concurrency: parking_lot::RwLock::new(None),
         }
+    }
+
+    /// Sets how many requests may be handled at once; zero means no bound.
+    pub fn set_max_concurrent(&self, n: u32) {
+        *self.concurrency.write() = (n > 0).then(|| {
+            Arc::new(tokio::sync::Semaphore::new(
+                usize::try_from(n).unwrap_or(usize::MAX),
+            ))
+        });
     }
 
     /// Handles one request and returns the bytes to send back, if any.
     pub async fn handle(&self, wire: &[u8], client: SocketAddr, proto: Proto) -> Option<Vec<u8>> {
+        self.handle_as(wire, client, proto, None).await
+    }
+
+    /// Handles one request on behalf of a named client.
+    ///
+    /// The ClientID comes from a DoH path segment or a DoT server name, and
+    /// selects a persistent client's own settings.
+    pub async fn handle_as(
+        &self,
+        wire: &[u8],
+        client: SocketAddr,
+        proto: Proto,
+        client_id: Option<String>,
+    ) -> Option<Vec<u8>> {
         // Access control and rate limiting come before parsing, so a flood of
         // malformed datagrams costs as little as possible.
         if !self.access.read().permits(client.ip()) {
@@ -107,10 +136,17 @@ impl Server {
             return None;
         }
 
+        let sem = self.concurrency.read().clone();
+        let _permit = match &sem {
+            Some(s) => Some(s.clone().acquire_owned().await.ok()?),
+            None => None,
+        };
+
         let req = Message::from_bytes(wire).ok()?;
 
         let info = ClientInfo {
             addr: Some(client.ip()),
+            id: client_id,
             name: None,
             tags: Vec::new(),
         };
@@ -177,7 +213,7 @@ pub async fn serve_tcp(
         let server = server.clone();
         tokio::spawn(async move {
             stream.set_nodelay(true).ok();
-            let _ = serve_stream(stream, server, peer, Proto::Tcp).await;
+            let _ = serve_stream(stream, server, peer, Proto::Tcp, None).await;
         });
     }
 }
@@ -186,10 +222,15 @@ pub async fn serve_tcp(
 ///
 /// A handshake failure closes that one connection and leaves the listener
 /// running: an unreachable server is a worse outcome than a rejected client.
+///
+/// `server_name` is the name the certificate is for; a client that connects
+/// with `<id>.<server_name>` is asking to be treated as the client named
+/// `<id>`, which is how a ClientID reaches a DoT listener.
 pub async fn serve_dot(
     listener: TcpListener,
     tls: Arc<rustls::ServerConfig>,
     server: Arc<Server>,
+    server_name: Arc<String>,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) -> std::io::Result<()> {
     let acceptor = tokio_rustls::TlsAcceptor::from(tls);
@@ -203,6 +244,7 @@ pub async fn serve_dot(
 
         let server = server.clone();
         let acceptor = acceptor.clone();
+        let name = server_name.clone();
         tokio::spawn(async move {
             stream.set_nodelay(true).ok();
 
@@ -213,9 +255,36 @@ pub async fn serve_dot(
                 return;
             };
 
-            let _ = serve_stream(tls_stream, server, peer, Proto::Tls).await;
+            let client_id = tls_stream
+                .get_ref()
+                .1
+                .server_name()
+                .and_then(|sni| client_id_from_sni(sni, &name));
+
+            let _ = serve_stream(tls_stream, server, peer, Proto::Tls, client_id).await;
         });
     }
+}
+
+/// Extracts a ClientID from the name a client asked for.
+///
+/// Only the label directly below the server's own name counts, and the name
+/// itself carries no identifier.  A client that asks for something unrelated
+/// gets no identifier rather than having part of that name taken as one.
+pub fn client_id_from_sni(sni: &str, server_name: &str) -> Option<String> {
+    if server_name.is_empty() {
+        return None;
+    }
+
+    let sni = sni.trim_end_matches('.').to_ascii_lowercase();
+    let base = server_name.trim_end_matches('.').to_ascii_lowercase();
+
+    let id = sni.strip_suffix(&base)?.strip_suffix('.')?;
+    if id.is_empty() || id.contains('.') {
+        return None;
+    }
+
+    Some(id.to_string())
 }
 
 /// Handles queries on one stream until it closes or goes idle.
@@ -227,6 +296,7 @@ async fn serve_stream<S>(
     server: Arc<Server>,
     peer: SocketAddr,
     proto: Proto,
+    client_id: Option<String>,
 ) -> std::io::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -249,7 +319,10 @@ where
             return Ok(());
         }
 
-        let Some(resp) = server.handle(&wire, peer, proto).await else {
+        let Some(resp) = server
+            .handle_as(&wire, peer, proto, client_id.clone())
+            .await
+        else {
             // Nothing to send: close rather than leave the client waiting.
             return Ok(());
         };
@@ -535,7 +608,7 @@ mod tests {
 
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         tokio::spawn(async move {
-            let _ = serve_dot(listener, loaded.dot, s, async {
+            let _ = serve_dot(listener, loaded.dot, s, Arc::new(String::new()), async {
                 let _ = rx.await;
             })
             .await;
@@ -601,7 +674,7 @@ mod tests {
 
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         tokio::spawn(async move {
-            let _ = serve_dot(listener, loaded.dot, s, async {
+            let _ = serve_dot(listener, loaded.dot, s, Arc::new(String::new()), async {
                 let _ = rx.await;
             })
             .await;
@@ -635,5 +708,37 @@ mod tests {
         let back = Message::from_bytes(&out).unwrap();
         assert!(back.metadata.truncation);
         assert!(back.answers.is_empty());
+    }
+
+    #[test]
+    fn a_client_id_is_the_label_below_the_server_name() {
+        assert_eq!(
+            client_id_from_sni("kids-tablet.dns.example", "dns.example").as_deref(),
+            Some("kids-tablet")
+        );
+        assert_eq!(
+            client_id_from_sni("KIDS-TABLET.DNS.EXAMPLE.", "dns.example").as_deref(),
+            Some("kids-tablet"),
+            "case and a trailing dot do not matter"
+        );
+    }
+
+    #[test]
+    fn the_server_name_itself_carries_no_client_id() {
+        assert_eq!(client_id_from_sni("dns.example", "dns.example"), None);
+    }
+
+    #[test]
+    fn a_deeper_or_unrelated_name_yields_nothing() {
+        // Taking a label out of an unrelated name would let a client claim
+        // any identifier it liked.
+        assert_eq!(client_id_from_sni("a.b.dns.example", "dns.example"), None);
+        assert_eq!(client_id_from_sni("evil.example", "dns.example"), None);
+        assert_eq!(client_id_from_sni("xdns.example", "dns.example"), None);
+    }
+
+    #[test]
+    fn without_a_configured_name_no_identifier_is_taken() {
+        assert_eq!(client_id_from_sni("anything.example", ""), None);
     }
 }

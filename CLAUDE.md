@@ -37,6 +37,7 @@ installation.
 | Query log | JSON lines, keys `T,QH,QT,QC,CP,IP,Result,Elapsed,Upstream,Answer,…` |
 | Statistics | bbolt file, one bucket per hour named by big-endian `u64`, value a gob `unitDB` under key `[0]` |
 | HTTP API | 81 paths under `/control/*`, all routed |
+| Sessions | `<work>/data/sessions.db`, bucket `sessions-2`, 16-byte token key |
 | Web interface | single-page app served from the embedded filesystem at `/` |
 | Ports | 53 tcp/udp, 67–68 udp, 80, 443 tcp/udp, 853 tcp/udp, 3000, 5443, 6060 |
 
@@ -45,7 +46,7 @@ installation.
 ```bash
 cargo build --release            # fast to build and to run
 cargo build --profile dist       # fat LTO, panic=abort, stripped: ~8.9 MB
-cargo test --workspace           # 344 tests, no network or Go build needed
+cargo test --workspace           # 554 tests, no network or Go build needed
 cargo clippy --workspace --all-targets
 ```
 
@@ -120,21 +121,26 @@ Ten crates, layered so nothing depends upwards:
 
 ```
 agl-core                        Go-compatible primitives: durations, byte sizes,
-                                filtering reasons, Go's JSON time format
-agl-config    -> core           AdGuardHome.yaml, schema 34, and a YAML emitter
-                                that reproduces Go yaml.v3's output
+                                filtering reasons, Go's JSON time format, the
+                                weekly schedule
+agl-config    -> core           AdGuardHome.yaml, schema 34, a YAML emitter that
+                                reproduces Go yaml.v3's output, and the
+                                migrations from every older schema
 agl-filter    -> core, config   rule parser and matcher, list storage,
-                                blocked-services catalogue
-agl-dns       -> core, filter   wire codec, cache, upstreams, listeners, the
-                                resolver that orders every step
+                                blocked-services catalogue, safe-search rules
+agl-dns       -> core, filter   wire codec, cache, upstreams, listeners, EDNS,
+                                DNS64, DDR, client registry, the hash-prefix
+                                checker, and the resolver that orders every step
 agl-querylog  -> core           querylog.json
 agl-bolt                        a minimal bbolt reader and writer
 agl-gob                         Go `gob` for the statistics unit
 agl-stats     -> core, bolt,    collection, aggregation, persistence
                  gob
-agl-api       -> all of the     the control API and the embedded web interface
-                 above
-adguardlite   -> all            the binary: CLI, wiring, supervision
+agl-api       -> all, bolt      the control API, the embedded web interface, the
+                                HTTP/3 listener, session storage
+adguardlite   -> all            the binary: CLI, wiring, supervision, client
+                                discovery, ipset, logging, OS settings, service
+                                control
 ```
 
 `agl-api` and `agl-filter` deliberately hold no HTTP client. Downloading filter
@@ -153,11 +159,20 @@ is observable behaviour copied from `internal/dnsforward`:
 3. an access-blocked host is **dropped** on UDP and `REFUSED` on TCP — silence
    on a datagram transport is deliberate, so a spoofed source gains no
    amplification;
-4. rewrites apply *even when protection is off*;
-5. filtering, where an allowlist match sets the verdict but still resolves;
-6. `AAAA` suppression;
-7. cache;
-8. upstream.
+4. DDR (`_dns.resolver.arpa`) is answered locally;
+5. rewrites apply *even when protection is off*;
+6. filtering, in upstream's order: blocklists, then blocked services, then safe
+   browsing, then parental control, then safe search. An allowlist match sets
+   the verdict but still resolves, and short-circuits everything after it;
+7. `AAAA` suppression;
+8. a private `PTR` is routed to the local resolvers or answered `NXDOMAIN`;
+9. cache;
+10. upstream — which is where the client subnet, the DNSSEC `DO` bit,
+    request coalescing, `bogus_nxdomain` and DNS64 live.
+
+Which settings apply is decided *before* step 1, by `Resolver::effective`: a
+persistent client that does not use the global settings overrides the filtering
+toggles, its own blocked services and its own safe search.
 
 ### Things that look wrong but are not
 
@@ -181,6 +196,15 @@ is observable behaviour copied from `internal/dnsforward`:
 - **The binary target is named `AdGuardHome`**, so `module_path!` reports that,
   not the package name. A log filter spelled `adguardlite=info` compiles and
   matches nothing; `crates/adguardlite/src/main.rs` has a test guarding this.
+- **The blocked-services schedule is inverted.** A day range says when the
+  block is *paused*, not when it applies, so an empty schedule blocks around
+  the clock. `agl-core/src/schedule.rs` exposes `blocks_at` for that reason.
+- **Blocked services are a separate engine** from the blocklists, so the
+  schedule can pause them per request without rebuilding anything.
+- **The config is read before the tokio runtime starts.** Two of the things it
+  decides — where the log goes and which user to run as — must be settled while
+  the process is still single-threaded, because `setuid` acts on the calling
+  thread on Linux.
 
 ## Build speed
 
@@ -211,8 +235,8 @@ records what came from where; update it when adding anything else of theirs.
 
 ## Encrypted listeners
 
-DNS-over-TLS, DNS-over-HTTPS and DNS-over-QUIC are served. Three things about
-how they fit:
+DNS-over-TLS, DNS-over-HTTPS, DNS-over-QUIC and HTTP/3 are served. Five things
+about how they fit:
 
 - **DoH shares the router with the web interface**, because upstream serves
   both on the HTTPS port. `routes::router(state, secure)` takes whether the
@@ -223,29 +247,46 @@ how they fit:
   resolver, so it gets the same rate limiting, access control, query log and
   statistics as UDP and TCP. Anything added to that path applies to DoH for
   free; anything that bypasses it silently does not.
-
 - **DoQ reuses the same framing.** A query arrives on its own bidirectional
   stream carrying the two-byte length prefix that TCP and DoT use, so only the
   transport differs. `Proto` is exhaustively matched in the query-log mapping,
   so adding a transport there fails the build until it is given a name.
+- **HTTP/3 is a fourth listener on the HTTPS port**, over UDP rather than TCP,
+  and it hands requests to the same `Router`. `agl-api/src/http3.rs` inserts
+  `ConnectInfo` itself, because nothing does it for a hand-driven router.
+- **The certificate is reloadable.** The listeners are built around
+  `tls::Reloadable`, a `ResolvesServerCert` that reads from a shared slot, so
+  `/control/tls/configure` takes effect on the next handshake. Listener *ports*
+  still need a restart.
 
 `tests/compat/dns-oracle` is the check that matters: it drives AdGuard's own
 dnsproxy client against a listener, with the certificate verified rather than
 skipped.
 
-## DHCP is excluded on purpose
+## Three exclusions, all deliberate
 
-Not a missing feature: this build will not serve DHCP. The API reports the
-feature off and refuses every change, so the interface cannot store settings
-nothing acts on.
+DHCP, DNSCrypt and replacing the binary with an AdGuard Home release are
+decisions, not gaps. Each refuses clearly where a user would notice, and
+`TASK.md` records the reasoning for each.
 
-Two things follow that are easy to get wrong:
+**DHCP.** The API reports the feature off and refuses every change, so the
+interface cannot store settings nothing acts on. Two things follow that are
+easy to get wrong:
 
 - **`DhcpConfig` in `agl-config` stays.** The config file must round-trip byte
   for byte, and a user switching back to the Go build keeps their settings.
   Deleting the model breaks the golden test in `agl-config/src/file.rs`.
 - **`dhcp_status` must not echo the stored config.** Reporting a stored
   `enabled: true` tells the interface a server is running when none is.
+
+**DNSCrypt.** No listener, and an `sdns://` upstream is reported at startup and
+skipped. It is the only protocol left that needs cryptography the tree does not
+already carry, and a mistake in it fails silently.
+
+**`POST /control/update`.** The published releases are AdGuard Home's own Go
+binaries, so installing one would swap in a different implementation. The
+version *check* works, caches for eight hours, and reports
+`can_autoupdate: false` so the interface does not offer the button.
 
 ## Scope, and keeping it honest
 
@@ -257,4 +298,4 @@ looked like working features from the UI.
 
 When something lands, move it in `TASK.md` and say how it was verified. When
 something turns out to be deliberate rather than missing, record it under the
-deviations there instead of leaving it to be rediscovered.
+exclusions or the deviations there instead of leaving it to be rediscovered.

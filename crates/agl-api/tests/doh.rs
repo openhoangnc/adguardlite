@@ -73,6 +73,8 @@ fn state(insecure: bool) -> Shared {
         fetcher: Arc::new(NoFetcher),
         reloader: Arc::new(NoReloader),
         dns_addresses: parking_lot::RwLock::new(vec![]),
+        version: Arc::new(agl_api::state::NoVersionCheck),
+        version_cache: parking_lot::RwLock::new(None),
     })
 }
 

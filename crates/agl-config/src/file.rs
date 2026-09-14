@@ -33,19 +33,39 @@ pub enum Error {
         /// The newest version this build supports.
         supported: u32,
     },
+
+    /// An older schema could not be brought up to date.
+    #[error(transparent)]
+    Migrate(#[from] crate::migrate::Error),
 }
 
 /// Parses a configuration document from YAML text.
+///
+/// An older schema is migrated in memory first; see [`from_str_migrating`] for
+/// the form that says whether that happened.
 pub fn from_str(s: &str) -> Result<Config, Error> {
-    let cfg: Config = serde_yaml_ng::from_str(s)?;
-    if cfg.schema_version > agl_core::SCHEMA_VERSION {
+    Ok(from_str_migrating(s, &crate::migrate::Context::default())?.0)
+}
+
+/// Parses a configuration document, upgrading an older schema on the way.
+///
+/// Returns the configuration and whether a migration ran, so a caller that
+/// owns the file can write the upgraded form back, as upstream does.
+pub fn from_str_migrating(s: &str, ctx: &crate::migrate::Context) -> Result<(Config, bool), Error> {
+    let mut doc: serde_yaml_ng::Value = serde_yaml_ng::from_str(s)?;
+
+    let found = crate::migrate::schema_version(&doc);
+    if found > agl_core::SCHEMA_VERSION {
         return Err(Error::SchemaTooNew {
-            found: cfg.schema_version,
+            found,
             supported: agl_core::SCHEMA_VERSION,
         });
     }
 
-    Ok(cfg)
+    let migrated = crate::migrate::upgrade(&mut doc, agl_core::SCHEMA_VERSION, ctx)?;
+    let cfg: Config = serde_yaml_ng::from_value(doc)?;
+
+    Ok((cfg, migrated))
 }
 
 /// Renders a configuration document to YAML text in upstream's style.
@@ -61,6 +81,26 @@ pub fn load(path: &Path) -> Result<Config, Error> {
     })?;
 
     from_str(&text)
+}
+
+/// Reads the configuration file, upgrading an older schema and writing the
+/// upgraded form back.
+///
+/// Upstream rewrites the file after a migration, so the next start reads the
+/// current schema and a user editing the file sees the shape the documentation
+/// describes.
+pub fn load_migrating(path: &Path, ctx: &crate::migrate::Context) -> Result<Config, Error> {
+    let text = std::fs::read_to_string(path).map_err(|source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+
+    let (cfg, migrated) = from_str_migrating(&text, ctx)?;
+    if migrated {
+        save(path, &cfg)?;
+    }
+
+    Ok(cfg)
 }
 
 /// Writes `cfg` to `path` atomically: render to a sibling temporary file, then

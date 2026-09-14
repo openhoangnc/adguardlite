@@ -98,6 +98,20 @@ impl App {
             pool,
             settings(&config),
         ));
+        resolver.set_services(filters.build_services_engine());
+        resolver.set_safe_search(agl_filter::safesearch::engine(&safe_search(
+            &config.filtering.safe_search,
+        )));
+        resolver.set_clients(clients(&config));
+        resolver.runtime.set_sources(agl_dns::clients::Sources {
+            whois: config.clients.runtime_sources.whois,
+            arp: config.clients.runtime_sources.arp,
+            rdns: config.clients.runtime_sources.rdns,
+            // This build serves no DHCP, so there are no leases to read.
+            dhcp: false,
+            hosts: config.clients.runtime_sources.hosts,
+        });
+        resolver.set_private_pool(build_private_pool(&config).await);
 
         let limiter = Arc::new(Limiter::new(RlConfig {
             per_second: config.dns.ratelimit,
@@ -107,6 +121,7 @@ impl App {
         }));
 
         let server = Arc::new(Server::new(resolver.clone(), limiter, observer));
+        server.set_max_concurrent(config.dns.max_goroutines);
         *server.access.write() = Access {
             allowed: parse_ips(&config.dns.allowed_clients),
             disallowed: parse_ips(&config.dns.disallowed_clients),
@@ -196,12 +211,141 @@ pub fn read_system_hosts() -> String {
     }
 }
 
+/// Parses a list of addresses or CIDRs into networks.
+///
+/// A bare address becomes a host route, which is how upstream reads the
+/// `bogus_nxdomain` list.
+pub fn parse_networks(v: &[String]) -> Vec<(std::net::IpAddr, u8)> {
+    v.iter()
+        .filter_map(|s| {
+            let s = s.trim();
+            if let Some((net, bits)) = s.split_once('/') {
+                let a: std::net::IpAddr = net.parse().ok()?;
+                let b: u8 = bits.parse().ok()?;
+
+                return Some((a, b));
+            }
+
+            let a: std::net::IpAddr = s.parse().ok()?;
+            let bits = if a.is_ipv4() { 32 } else { 128 };
+
+            Some((a, bits))
+        })
+        .collect()
+}
+
+/// Builds the weekly schedule from its configured form.
+pub fn schedule(s: &agl_config::model::Schedule) -> agl_core::schedule::Weekly {
+    use agl_core::schedule::DayRange;
+
+    let day = |d: &Option<agl_config::model::DayRange>| -> Option<DayRange> {
+        d.as_ref().map(|r| DayRange {
+            start_ms: r.start.as_millis(),
+            end_ms: r.end.as_millis(),
+        })
+    };
+
+    agl_core::schedule::Weekly::new(
+        s.time_zone.clone(),
+        [
+            day(&s.mon),
+            day(&s.tue),
+            day(&s.wed),
+            day(&s.thu),
+            day(&s.fri),
+            day(&s.sat),
+            day(&s.sun),
+        ],
+    )
+}
+
+/// Converts the config's safe-search block into the filter crate's form.
+pub fn safe_search(c: &agl_config::model::SafeSearchConfig) -> agl_filter::safesearch::Config {
+    agl_filter::safesearch::Config {
+        enabled: c.enabled,
+        bing: c.bing,
+        duckduckgo: c.duckduckgo,
+        ecosia: c.ecosia,
+        google: c.google,
+        pixabay: c.pixabay,
+        yandex: c.yandex,
+        youtube: c.youtube,
+    }
+}
+
+/// Builds the persistent client registry from the configuration.
+pub fn clients(c: &Config) -> agl_dns::clients::Registry {
+    let specs: Vec<agl_dns::clients::PersistentSpec> = c
+        .clients
+        .persistent
+        .iter()
+        .map(|p| agl_dns::clients::PersistentSpec {
+            name: p.name.clone(),
+            ids: p.ids.clone(),
+            tags: p.tags.clone(),
+            upstreams: p.upstreams.clone(),
+            use_global_settings: p.use_global_settings,
+            filtering_enabled: p.filtering_enabled,
+            parental_enabled: p.parental_enabled,
+            safebrowsing_enabled: p.safebrowsing_enabled,
+            use_global_blocked_services: p.use_global_blocked_services,
+            blocked_services: p.blocked_services.ids.clone(),
+            schedule: schedule(&p.blocked_services.schedule),
+            safe_search: safe_search(&p.safe_search),
+            ignore_querylog: p.ignore_querylog,
+            ignore_statistics: p.ignore_statistics,
+        })
+        .collect();
+
+    agl_dns::clients::Registry::build(&specs)
+}
+
+/// Describes the encrypted endpoints DDR should advertise.
+///
+/// Returns `None` when DDR is off, no certificate names the server, or no
+/// encrypted listener is configured — there would be nothing to point at.
+pub fn ddr_endpoints(c: &Config) -> Option<agl_dns::ddr::Endpoints> {
+    if !c.dns.handle_ddr || !c.tls.enabled || c.tls.server_name.is_empty() {
+        return None;
+    }
+
+    let ep = agl_dns::ddr::Endpoints {
+        server_name: c.tls.server_name.clone(),
+        https: (c.tls.port_https != 0).then_some(c.tls.port_https),
+        // Upstream only advertises DoT when the certificate names IP
+        // addresses, because a client that found this resolver by address has
+        // no hostname to validate against.
+        tls: (c.tls.port_dns_over_tls != 0 && certificate_names_an_ip(c))
+            .then_some(c.tls.port_dns_over_tls),
+        quic: (c.tls.port_dns_over_quic != 0).then_some(c.tls.port_dns_over_quic),
+    };
+
+    (!ep.is_empty()).then_some(ep)
+}
+
+/// Reports whether the configured certificate carries an IP address.
+fn certificate_names_an_ip(c: &Config) -> bool {
+    let src = agl_dns::tls::Source {
+        certificate_chain: c.tls.certificate_chain.clone(),
+        private_key: c.tls.private_key.clone(),
+        certificate_path: c.tls.certificate_path.clone(),
+        private_key_path: c.tls.private_key_path.clone(),
+    };
+    if src.is_empty() {
+        return false;
+    }
+
+    agl_dns::tls::inspect(&src).has_ip_addresses
+}
+
 /// Derives resolver settings from the configuration.
 pub fn settings(c: &Config) -> Settings {
     Settings {
         protection_enabled: c.filtering.protection_enabled,
         filtering_enabled: c.filtering.filtering_enabled,
         rewrites_enabled: c.filtering.rewrites_enabled,
+        safebrowsing_enabled: c.filtering.safebrowsing_enabled,
+        parental_enabled: c.filtering.parental_enabled,
         blocking: BlockingConfig {
             mode: match c.filtering.blocking_mode {
                 CfgBlockingMode::Default => BlockingMode::Default,
@@ -225,6 +369,32 @@ pub fn settings(c: &Config) -> Settings {
         refuse_any: c.dns.refuse_any,
         cache_ttl_min: c.dns.cache_ttl_min,
         cache_ttl_max: c.dns.cache_ttl_max,
+        ecs_enabled: c.dns.edns_client_subnet.enabled,
+        ecs_custom: c
+            .dns
+            .edns_client_subnet
+            .use_custom
+            .then(|| c.dns.edns_client_subnet.custom_ip.get())
+            .flatten(),
+        dnssec_enabled: c.dns.enable_dnssec,
+        bogus_nxdomain: parse_networks(&c.dns.bogus_nxdomain),
+        dns64: agl_dns::dns64::Prefixes::new(
+            c.dns.use_dns64,
+            c.dns.dns64_prefixes.iter().map(|p| (p.addr, p.bits)),
+        ),
+        ddr: ddr_endpoints(c),
+        pending_enabled: c.dns.pending_requests.enabled,
+        services_schedule: schedule(&c.filtering.blocked_services.schedule),
+        private_networks: if c.dns.private_networks.is_empty() {
+            agl_dns::resolver::default_private_networks()
+        } else {
+            c.dns
+                .private_networks
+                .iter()
+                .map(|p| (p.addr, p.bits))
+                .collect()
+        },
+        use_private_ptr_resolvers: c.dns.use_private_ptr_resolvers,
     }
 }
 
@@ -252,8 +422,9 @@ pub async fn build_pool(c: &Config) -> Pool {
     let bootstrap = bootstrap_addrs(&c.dns.bootstrap_dns);
     let tls = tls_config();
 
+    let lines = upstream_lines(c);
     let (bad_lines, entries) = {
-        let (entries, bad) = addr::parse_list(c.dns.upstream_dns.iter().map(String::as_str));
+        let (entries, bad) = addr::parse_list(lines.iter().map(String::as_str));
         (bad, entries)
     };
     for (line, err) in bad_lines {
@@ -275,7 +446,7 @@ pub async fn build_pool(c: &Config) -> Pool {
             )
             .await
             {
-                Ok(cl) => out.push(Arc::new(cl)),
+                Ok(cl) => out.push(Arc::new(cl.with_http3(c.dns.use_http3_upstreams))),
                 Err(e) => tracing::warn!(upstream = %label, error = %e, "upstream unavailable"),
             }
         }
@@ -308,6 +479,118 @@ pub async fn build_pool(c: &Config) -> Pool {
     )
 }
 
+/// The upstream specifications to use, including any read from a file.
+///
+/// `upstream_dns_file` is read fresh at every reload rather than merged into
+/// the config: it exists so a script can maintain the list without rewriting
+/// `AdGuardHome.yaml`.
+pub fn upstream_lines(c: &Config) -> Vec<String> {
+    let mut out = c.dns.upstream_dns.clone();
+
+    if c.dns.upstream_dns_file.is_empty() {
+        return out;
+    }
+
+    match std::fs::read_to_string(&c.dns.upstream_dns_file) {
+        Ok(text) => out.extend(
+            text.lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+                .map(str::to_string),
+        ),
+        Err(e) => {
+            tracing::warn!(
+                path = %c.dns.upstream_dns_file,
+                error = %e,
+                "reading upstream_dns_file"
+            );
+        }
+    }
+
+    out
+}
+
+/// Builds the pool used for private reverse lookups.
+///
+/// When the feature is on but no resolvers are named, the ones the operating
+/// system is configured with are used, as upstream does: those are the
+/// resolvers that know the local network.
+pub async fn build_private_pool(c: &Config) -> Option<SharedPool> {
+    if !c.dns.use_private_ptr_resolvers {
+        return None;
+    }
+
+    let specs: Vec<String> = if c.dns.local_ptr_upstreams.is_empty() {
+        system_resolvers()
+    } else {
+        c.dns.local_ptr_upstreams.clone()
+    };
+    if specs.is_empty() {
+        return None;
+    }
+
+    let timeout = c.dns.upstream_timeout.to_std();
+    let bootstrap = bootstrap_addrs(&c.dns.bootstrap_dns);
+    let tls = tls_config();
+
+    let (entries, _) = addr::parse_list(specs.iter().map(String::as_str));
+    let (default_specs, _) = pool::partition(entries);
+
+    let mut clients = Vec::new();
+    for spec in default_specs {
+        let label = spec.original.clone();
+        match Client::connect(
+            spec,
+            &bootstrap,
+            timeout,
+            c.dns.bootstrap_prefer_ipv6,
+            tls.clone(),
+        )
+        .await
+        {
+            Ok(cl) => clients.push(Arc::new(cl)),
+            Err(e) => {
+                tracing::warn!(upstream = %label, error = %e, "private ptr resolver unavailable")
+            }
+        }
+    }
+
+    if clients.is_empty() {
+        return None;
+    }
+
+    Some(SharedPool::new(Pool::new(
+        clients,
+        vec![],
+        vec![],
+        Mode::LoadBalance,
+        timeout,
+        c.dns.fastest_timeout.to_std(),
+    )))
+}
+
+/// The resolvers the operating system is configured with.
+///
+/// Only `/etc/resolv.conf` is read; on a platform without one the list is
+/// empty and private reverse lookups are answered locally instead.
+pub fn system_resolvers() -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string("/etc/resolv.conf") else {
+        return Vec::new();
+    };
+
+    text.lines()
+        .filter_map(|l| {
+            let l = l.trim();
+            if l.starts_with('#') || l.starts_with(';') {
+                return None;
+            }
+
+            let rest = l.strip_prefix("nameserver")?.trim();
+            rest.parse::<std::net::IpAddr>().ok().map(|a| a.to_string())
+        })
+        .collect()
+}
+
 /// Turns bootstrap specifications into plain socket addresses.
 fn bootstrap_addrs(specs: &[String]) -> Vec<SocketAddr> {
     specs
@@ -329,6 +612,9 @@ fn parse_ips(v: &[String]) -> Vec<std::net::IpAddr> {
 }
 
 /// Loads the configuration, writing a default one on a fresh installation.
+///
+/// An older schema is migrated and the upgraded file written back, as upstream
+/// does, so the next start reads the current shape.
 pub fn load_or_init(paths: &Paths) -> Result<Config, Error> {
     if paths.is_first_run() {
         let c = Config::default();
@@ -338,7 +624,9 @@ pub fn load_or_init(paths: &Paths) -> Result<Config, Error> {
         return Ok(c);
     }
 
-    Ok(agl_config::load(&paths.config)?)
+    let ctx = agl_config::migrate::Context::new(paths.work.clone());
+
+    Ok(agl_config::file::load_migrating(&paths.config, &ctx)?)
 }
 
 /// A timeout used when downloading filter lists.

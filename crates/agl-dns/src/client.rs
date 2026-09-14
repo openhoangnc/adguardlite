@@ -1,4 +1,5 @@
-//! Upstream resolver clients: plain DNS, DNS-over-TLS and DNS-over-HTTPS.
+//! Upstream resolver clients: plain DNS, DNS-over-TLS, DNS-over-HTTPS and
+//! DNS-over-QUIC.
 //!
 //! Hostnames of encrypted upstreams are resolved through the configured
 //! bootstrap resolvers rather than the system resolver, as upstream does —
@@ -84,6 +85,19 @@ fn https_tls_config() -> Arc<rustls::ClientConfig> {
         .with_root_certificates(roots)
         .with_no_client_auth();
     cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+    Arc::new(cfg)
+}
+
+/// Builds a rustls configuration offering one application protocol.
+fn alpn_tls_config(alpn: &[u8]) -> Arc<rustls::ClientConfig> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    let mut cfg = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    cfg.alpn_protocols = vec![alpn.to_vec()];
 
     Arc::new(cfg)
 }
@@ -379,6 +393,184 @@ pub async fn https_exchange(
     Message::from_bytes(&resp_bytes).map_err(|e| Error::Decode(e.to_string()))
 }
 
+/// Sends a query over DNS-over-QUIC.
+///
+/// The framing is the two-byte length prefix TCP and DoT use, so only the
+/// transport differs.  RFC 9250 requires the message identifier to be zero on
+/// the wire, because QUIC's own stream multiplexing already tells answers
+/// apart; the caller's identifier is restored on the way back.
+pub async fn quic_exchange(
+    req: &Message,
+    server: SocketAddr,
+    server_name: &str,
+    timeout: Duration,
+) -> Result<Message, Error> {
+    let id = req.metadata.id;
+    let mut on_wire = req.clone();
+    on_wire.metadata.id = 0;
+
+    let wire = on_wire
+        .to_bytes()
+        .map_err(|e| Error::Decode(e.to_string()))?;
+    let len = u16::try_from(wire.len())
+        .map_err(|_| Error::Decode("request too large for quic framing".into()))?;
+
+    let conn = quic_connect(server, server_name, timeout).await?;
+
+    let mut resp = tokio::time::timeout(timeout, async {
+        let (mut send, mut recv) = conn
+            .open_bi()
+            .await
+            .map_err(|e| Error::Http(format!("opening a quic stream: {e}")))?;
+
+        send.write_all(&len.to_be_bytes())
+            .await
+            .map_err(|e| Error::Http(e.to_string()))?;
+        send.write_all(&wire)
+            .await
+            .map_err(|e| Error::Http(e.to_string()))?;
+        // Closing the send side is how a DoQ client signals a complete query.
+        send.finish().map_err(|e| Error::Http(e.to_string()))?;
+
+        let mut lenbuf = [0u8; 2];
+        recv.read_exact(&mut lenbuf)
+            .await
+            .map_err(|e| Error::Http(e.to_string()))?;
+        let n = usize::from(u16::from_be_bytes(lenbuf));
+        if n > MAX_MSG {
+            return Err(Error::Decode("response too large".into()));
+        }
+
+        let mut buf = vec![0u8; n];
+        recv.read_exact(&mut buf)
+            .await
+            .map_err(|e| Error::Http(e.to_string()))?;
+
+        Message::from_bytes(&buf).map_err(|e| Error::Decode(e.to_string()))
+    })
+    .await
+    .map_err(|_| Error::Timeout(timeout))??;
+
+    resp.metadata.id = id;
+
+    Ok(resp)
+}
+
+/// Opens a QUIC connection to a DoQ server.
+async fn quic_connect(
+    server: SocketAddr,
+    server_name: &str,
+    timeout: Duration,
+) -> Result<quinn::Connection, Error> {
+    quic_connect_alpn(server, server_name, timeout, b"doq").await
+}
+
+/// Opens a QUIC connection offering one application protocol.
+async fn quic_connect_alpn(
+    server: SocketAddr,
+    server_name: &str,
+    timeout: Duration,
+    alpn: &[u8],
+) -> Result<quinn::Connection, Error> {
+    let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(alpn_tls_config(alpn))
+        .map_err(|e| Error::Tls(e.to_string()))?;
+    let cfg = quinn::ClientConfig::new(Arc::new(crypto));
+
+    let bind: SocketAddr = if server.is_ipv4() {
+        "0.0.0.0:0".parse().expect("static addr")
+    } else {
+        "[::]:0".parse().expect("static addr")
+    };
+    let mut endpoint = quinn::Endpoint::client(bind).map_err(Error::Io)?;
+    endpoint.set_default_client_config(cfg);
+
+    let connecting = endpoint
+        .connect(server, server_name)
+        .map_err(|e| Error::Tls(e.to_string()))?;
+
+    tokio::time::timeout(timeout, connecting)
+        .await
+        .map_err(|_| Error::Timeout(timeout))?
+        .map_err(|e| Error::Http(format!("quic handshake: {e}")))
+}
+
+/// Sends a query over DNS-over-HTTPS carried by HTTP/3.
+///
+/// This is `use_http3_upstreams`.  The exchange is the same POST as over
+/// HTTP/2; only the transport underneath differs, so a server that does not
+/// speak HTTP/3 simply fails the handshake and the caller falls back.
+pub async fn https3_exchange(
+    req: &Message,
+    server: SocketAddr,
+    host: &str,
+    path: &str,
+    timeout: Duration,
+) -> Result<Message, Error> {
+    use bytes::Buf as _;
+
+    let wire = req.to_bytes().map_err(|e| Error::Decode(e.to_string()))?;
+
+    let conn = quic_connect_alpn(server, host, timeout, b"h3").await?;
+    let (mut driver, mut sender) = h3::client::new(h3_quinn::Connection::new(conn))
+        .await
+        .map_err(|e| Error::Http(format!("http/3 handshake: {e}")))?;
+
+    // The connection has to be driven while the request is in flight.
+    let task = tokio::spawn(async move {
+        let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
+    });
+
+    let out = tokio::time::timeout(timeout, async {
+        let request = hyper::Request::builder()
+            .method("POST")
+            .uri(format!("https://{host}{path}"))
+            .header("content-type", "application/dns-message")
+            .header("accept", "application/dns-message")
+            .body(())
+            .map_err(|e| Error::Http(e.to_string()))?;
+
+        let mut stream = sender
+            .send_request(request)
+            .await
+            .map_err(|e| Error::Http(e.to_string()))?;
+        stream
+            .send_data(bytes::Bytes::from(wire))
+            .await
+            .map_err(|e| Error::Http(e.to_string()))?;
+        stream
+            .finish()
+            .await
+            .map_err(|e| Error::Http(e.to_string()))?;
+
+        let resp = stream
+            .recv_response()
+            .await
+            .map_err(|e| Error::Http(e.to_string()))?;
+        if !resp.status().is_success() {
+            return Err(Error::Http(format!("upstream returned {}", resp.status())));
+        }
+
+        let mut body = Vec::new();
+        while let Some(mut chunk) = stream
+            .recv_data()
+            .await
+            .map_err(|e| Error::Http(e.to_string()))?
+        {
+            if body.len() + chunk.remaining() > MAX_MSG {
+                return Err(Error::Http("response body too large".into()));
+            }
+            body.extend_from_slice(chunk.copy_to_bytes(chunk.remaining()).as_ref());
+        }
+
+        Message::from_bytes(&body).map_err(|e| Error::Decode(e.to_string()))
+    })
+    .await;
+
+    task.abort();
+
+    out.map_err(|_| Error::Timeout(timeout))?
+}
+
 /// Reads and size-limits an HTTP response body.
 async fn read_body<B>(resp: hyper::Response<B>, timeout: Duration) -> Result<Vec<u8>, Error>
 where
@@ -414,6 +606,8 @@ pub struct Client {
     addrs: Vec<SocketAddr>,
     /// Shared TLS settings for DoT.
     tls: Arc<rustls::ClientConfig>,
+    /// Whether DNS-over-HTTPS should be tried over HTTP/3 first.
+    prefer_http3: bool,
 }
 
 impl Client {
@@ -435,7 +629,32 @@ impl Client {
             upstream,
             addrs,
             tls,
+            prefer_http3: false,
         })
+    }
+
+    /// Asks for DNS-over-HTTPS to be tried over HTTP/3 first.
+    ///
+    /// This is `use_http3_upstreams`.  A server that does not speak it fails
+    /// the handshake and the exchange falls back to HTTP/2, so the setting
+    /// cannot make an upstream unusable.
+    pub fn with_http3(mut self, yes: bool) -> Self {
+        self.prefer_http3 = yes;
+
+        self
+    }
+
+    /// Builds a client with no resolved addresses.
+    ///
+    /// Every exchange fails; used where a checker needs an upstream to hold
+    /// but the test never lets it reach the network.
+    pub fn offline(upstream: Upstream) -> Self {
+        Self {
+            upstream,
+            addrs: Vec::new(),
+            tls: tls_config(),
+            prefer_http3: false,
+        }
     }
 
     /// Sends a query and returns the reply.
@@ -454,11 +673,28 @@ impl Client {
                 Transport::Tls => {
                     tls_exchange(req, addr, &self.upstream.host, self.tls.clone(), timeout).await
                 }
+                Transport::Https if self.prefer_http3 => {
+                    let host = &self.upstream.host;
+                    let path = &self.upstream.path;
+                    match https3_exchange(req, addr, host, path, timeout).await {
+                        Ok(resp) => Ok(resp),
+                        Err(e) => {
+                            tracing::debug!(
+                                upstream = %self.upstream,
+                                error = %e,
+                                "http/3 failed; falling back to http/2"
+                            );
+
+                            https_exchange(req, addr, host, path, timeout).await
+                        }
+                    }
+                }
                 Transport::Https => {
                     https_exchange(req, addr, &self.upstream.host, &self.upstream.path, timeout)
                         .await
                 }
-                Transport::Quic | Transport::Stamp => {
+                Transport::Quic => quic_exchange(req, addr, &self.upstream.host, timeout).await,
+                Transport::Stamp => {
                     return Err(Error::Unsupported(self.upstream.original.clone()));
                 }
             };
@@ -535,8 +771,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unsupported_transports_are_rejected_up_front() {
-        let up = addr::parse("quic://dns.adguard.com")
+    async fn a_dnscrypt_stamp_is_rejected_up_front() {
+        // DNSCrypt is excluded by design; a stamp must be refused at startup
+        // rather than accepted and then silently never used.
+        let up = addr::parse("sdns://AQcAAAAAAAAAAAA")
             .unwrap()
             .upstream
             .unwrap();
@@ -544,6 +782,16 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, Error::Unsupported(_)));
+    }
+
+    #[tokio::test]
+    async fn quic_upstreams_are_accepted() {
+        let up = addr::parse("quic://dns.adguard.com")
+            .unwrap()
+            .upstream
+            .unwrap();
+        assert!(up.is_supported());
+        assert_eq!(up.port, 853);
     }
 
     #[tokio::test]

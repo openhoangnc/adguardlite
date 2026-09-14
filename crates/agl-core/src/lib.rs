@@ -6,6 +6,7 @@ pub mod duration;
 pub mod gotime;
 pub mod name;
 pub mod reason;
+pub mod schedule;
 
 pub use bytesize::ByteSize;
 pub use duration::GoDuration;

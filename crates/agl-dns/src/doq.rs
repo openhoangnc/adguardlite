@@ -70,6 +70,7 @@ pub fn endpoint(addr: SocketAddr, tls: Arc<rustls::ServerConfig>) -> Result<Endp
 pub async fn serve(
     endpoint: Endpoint,
     server: Arc<Server>,
+    server_name: Arc<String>,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) {
     tokio::pin!(shutdown);
@@ -89,11 +90,20 @@ pub async fn serve(
         };
 
         let server = server.clone();
+        let name = server_name.clone();
         tokio::spawn(async move {
             let Ok(conn) = incoming.await else {
                 return;
             };
             let peer = conn.remote_address();
+
+            // A client that connects as `<id>.<server_name>` is asking to be
+            // treated as the client named `<id>`, the same as over DoT.
+            let client_id = conn
+                .handshake_data()
+                .and_then(|d| d.downcast::<quinn::crypto::rustls::HandshakeData>().ok())
+                .and_then(|d| d.server_name.clone())
+                .and_then(|sni| crate::server::client_id_from_sni(&sni, &name));
 
             // Each stream is one query; serve them concurrently, which is the
             // point of using QUIC.
@@ -103,8 +113,9 @@ pub async fn serve(
                 };
 
                 let server = server.clone();
+                let id = client_id.clone();
                 tokio::spawn(async move {
-                    serve_stream(send, recv, server, peer).await;
+                    serve_stream(send, recv, server, peer, id).await;
                 });
             }
         });
@@ -117,6 +128,7 @@ async fn serve_stream(
     mut recv: quinn::RecvStream,
     server: Arc<Server>,
     peer: SocketAddr,
+    client_id: Option<String>,
 ) {
     // The client closes its send side after the query, so reading to the end
     // yields exactly one framed message.
@@ -134,7 +146,7 @@ async fn serve_stream(
     }
     let wire = &buf[2..2 + len];
 
-    let Some(resp) = server.handle(wire, peer, Proto::Quic).await else {
+    let Some(resp) = server.handle_as(wire, peer, Proto::Quic, client_id).await else {
         // Refused or dropped; closing without an answer is the DoQ equivalent
         // of not replying.
         let _ = send.finish();
@@ -277,7 +289,7 @@ mod tests {
 
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         tokio::spawn(async move {
-            serve(ep, server, async {
+            serve(ep, server, Arc::new(String::new()), async {
                 let _ = rx.await;
             })
             .await;

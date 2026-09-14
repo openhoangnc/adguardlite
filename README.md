@@ -6,13 +6,12 @@ same config file, the same on-disk data, the same HTTP API, the same web
 interface, and the same Docker contract — in a smaller image, with less memory
 and more throughput.
 
-It is not a complete reimplementation. The DNS filtering path, the web
-interface, the storage formats and the DNS-over-TLS, DNS-over-HTTPS and
-DNS-over-QUIC listeners are done and verified against the Go build.
-**DNSCrypt is deliberately excluded**, and several smaller features are not
-implemented.
-**DHCP is deliberately excluded** — see below.
-[What is not implemented](#what-is-not-implemented) lists every gap.
+The DNS filtering path, the web interface, the storage formats, the encrypted
+listeners and the operational surface are done and verified against the Go
+build. Three things are **deliberately excluded** rather than pending —
+DHCP, DNSCrypt, and replacing this binary with an AdGuard Home release — and
+each refuses clearly at the point a user would notice. [What is excluded, and
+why](#what-is-excluded-and-why) explains each one.
 
 ## Measured against the Go build
 
@@ -50,59 +49,43 @@ read off the source.
 | `stats.db` (bbolt + gob) | interoperable | The Rust server wrote a database; a Go AdGuardHome read it and reported the same counts. Go's own gob encoder is not byte-stable, so byte-equality is not the bar. |
 | Filter lists on disk | same files | The same `data/filters/<id>.txt` layout; an existing download is used as-is. |
 | DNS-over-TLS, -HTTPS and -QUIC | interoperable | AdGuard's own dnsproxy client, verifying the certificate, resolves through all three listeners. |
+| Config migration | all 34 steps | A port of `internal/configmigrate`; a config from any older schema is upgraded and the upgraded file written back. |
+| `sessions.db` | same layout | Sessions are stored the way the Go build stores them, so a restart signs nobody out and either build reads the other's file. |
 | Docker | same contract | Same binary path, working directory, ports and entrypoint arguments; run against a config and data directory a Go instance produced. |
 
 Reproduce it with `scripts/verify.sh` (see [Verifying](#verifying)).
 
-## What is not implemented
+## What is excluded, and why
 
-These are real gaps, not oversights in the documentation.
+Three features are decisions rather than gaps. Nothing else in the Go build's
+surface is missing; `TASK.md` records the full state and the smaller deviations
+(cited rule on ties, `gob` byte-equality, ipset through the command rather than
+netlink, and a few more).
 
-**Answer 501 rather than pretending to succeed:** every `/control/dhcp/*`
-write endpoint, `/control/tls/configure`, `/control/tls/validate`, and
-`/control/update`.
-
-**Excluded by design:**
-
-- **The DNSCrypt listener.** It is the one remaining protocol needing
-  cryptography this project does not already have — X25519, Ed25519 and NaCl
-  box — plus a signed-certificate protocol and AdGuard's provider-key file
-  format, and a mistake there fails silently rather than visibly.
-  `port_dnscrypt` and `dnscrypt_config_file` round-trip through the config
-  untouched; the port is never bound. DNSCrypt itself is still in use —
-  AdGuard's own provider list publishes stamps for it — so front adguardlite
-  with `dnscrypt-proxy` if you need it.
 - **DHCP.** This build will not serve DHCP; run it on your router or a
   dedicated service. `/control/dhcp/status` always reports the feature off and
-  every settings change is refused, so the web interface cannot store DHCP
+  every settings change answers **501**, so the web interface cannot store DHCP
   configuration that nothing would act on. The `dhcp:` section of the config
   file is still read and written unchanged, so switching back to the Go build
   keeps your settings.
 
-**Not implemented at all:**
+- **DNSCrypt.** It is the one remaining protocol needing cryptography this
+  project does not already have — X25519, Ed25519 and a NaCl-style secretbox —
+  plus a signed-certificate protocol and AdGuard's provider-key file format,
+  and a mistake there fails silently rather than visibly. `port_dnscrypt` and
+  `dnscrypt_config_file` round-trip through the config untouched; the port is
+  never bound, and an `sdns://` upstream is reported at startup and skipped.
+  DNSCrypt itself is still in use — AdGuard's own provider list publishes
+  stamps for it — so front adguardlite with `dnscrypt-proxy` if you need it.
 
-- **HTTP/3** for DNS-over-HTTPS. DNS-over-TLS, DNS-over-HTTPS, DNS-over-QUIC
-  and HTTPS for the web interface *are* served.
-- **DNS-over-QUIC and DNSCrypt upstreams.** A config naming one is reported at
-  startup and skipped.
-- **Safe browsing and parental control.** The toggles persist and the API
-  reports them; no hash-prefix lookups are performed.
-- **Safe search** rewriting.
-- **Per-client settings.** Persistent clients round-trip through the config and
-  the API, but per-client filtering, upstreams and tags do not affect
-  resolution.
-- **Runtime client discovery** — ARP, rDNS, WHOIS, DHCP leases.
-  `/control/clients` reports an empty `auto_clients`.
-- **The HTTP→HTTPS redirect.** `force_https` is stored and unread.
-- **Certificate reload without a restart.** A certificate replaced through the
-  API is stored, but the running listeners keep the one they started with.
-- **Automatic updates**, **ipset**, **DNS64**, **EDNS Client Subnet**,
-  `upstream_dns_file`, `bogus_nxdomain`, `trusted_proxies`, DDR handling, and
-  duplicate-request coalescing.
-- **Config migration** from schema versions below 34. A newer schema is
-  refused rather than misread.
-- **Session persistence.** Sessions live in memory, so a restart signs users
-  out. `sessions.db` is neither read nor written.
+- **Replacing its own binary.** `POST /control/update` answers **501**. The
+  releases the announcement server publishes are AdGuard Home's own Go
+  binaries; writing one over this executable would swap in a different
+  implementation, which is not an update. The version check itself works:
+  `/control/version.json` reports the latest release with
+  `can_autoupdate: false`, so the interface can tell you a new version exists
+  without offering to install it. Replace the binary through whatever installed
+  it.
 
 ## Layout
 
@@ -160,7 +143,7 @@ docker run -d --name adguardhome \
 
 ## Verifying
 
-`cargo test --workspace` runs 344 unit and integration tests, including the
+`cargo test --workspace` runs 554 unit and integration tests, including the
 differential against the real filter list and the query-log and gob golden
 files — none of which need a network or a running Go build.
 

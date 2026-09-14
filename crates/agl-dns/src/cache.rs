@@ -30,6 +30,10 @@ pub struct Key {
     /// The question class.
     pub qclass: u16,
     /// Whether the query asked for DNSSEC records.
+    ///
+    /// An answer to a query carrying the EDNS `DO` bit holds signatures that
+    /// an answer without it does not, so the two cannot share an entry: a
+    /// validating client served the stripped form would fail to validate.
     pub dnssec_ok: bool,
 }
 
@@ -46,7 +50,7 @@ impl Key {
                 .to_ascii_lowercase(),
             qtype: q.query_type().into(),
             qclass: q.query_class().into(),
-            dnssec_ok: req.metadata.authentic_data,
+            dnssec_ok: crate::edns::dnssec_ok(req) || req.metadata.authentic_data,
         })
     }
 
@@ -390,6 +394,19 @@ mod tests {
         let mut r = req("example.com.");
         r.metadata.authentic_data = true;
         assert_ne!(a, Key::from_request(&r).unwrap());
+    }
+
+    #[test]
+    fn the_dnssec_ok_bit_separates_entries() {
+        // Serving a signed answer's cache entry to a client that did not ask
+        // for signatures is harmless; the reverse is not, because a
+        // validating client cannot validate what it was not sent.
+        let plain = Key::from_request(&req("example.com.")).unwrap();
+
+        let mut signed = req("example.com.");
+        crate::edns::set_dnssec_ok(&mut signed, true);
+
+        assert_ne!(plain, Key::from_request(&signed).unwrap());
     }
 
     #[test]

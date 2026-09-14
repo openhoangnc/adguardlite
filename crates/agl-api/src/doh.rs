@@ -40,6 +40,7 @@ pub async fn get(
     state: State<Shared>,
     secure: axum::Extension<Secure>,
     conn: ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Query(p): Query<DnsParam>,
 ) -> Response {
     let Some(encoded) = p.dns else {
@@ -49,7 +50,7 @@ pub async fn get(
         return bad_request("the dns parameter is not valid base64url");
     };
 
-    answer(state, secure, conn, None, wire).await
+    answer(state, secure, conn, headers, None, wire).await
 }
 
 /// `GET /dns-query/{client_id}`
@@ -58,6 +59,7 @@ pub async fn get_with_client(
     secure: axum::Extension<Secure>,
     conn: ConnectInfo<SocketAddr>,
     Path(client_id): Path<String>,
+    headers: HeaderMap,
     Query(p): Query<DnsParam>,
 ) -> Response {
     let Some(encoded) = p.dns else {
@@ -67,7 +69,7 @@ pub async fn get_with_client(
         return bad_request("the dns parameter is not valid base64url");
     };
 
-    answer(state, secure, conn, Some(client_id), wire).await
+    answer(state, secure, conn, headers, Some(client_id), wire).await
 }
 
 /// `POST /dns-query`
@@ -82,7 +84,7 @@ pub async fn post(
         return r;
     }
 
-    answer(state, secure, conn, None, body.to_vec()).await
+    answer(state, secure, conn, headers, None, body.to_vec()).await
 }
 
 /// `POST /dns-query/{client_id}`
@@ -98,7 +100,7 @@ pub async fn post_with_client(
         return r;
     }
 
-    answer(state, secure, conn, Some(client_id), body.to_vec()).await
+    answer(state, secure, conn, headers, Some(client_id), body.to_vec()).await
 }
 
 /// Rejects a POST that does not carry a DNS message.
@@ -142,11 +144,40 @@ fn bad_request(why: &str) -> Response {
     (StatusCode::BAD_REQUEST, why.to_string()).into_response()
 }
 
+/// The client address to attribute a request to.
+///
+/// When the connection comes from a trusted proxy, the left-most address in
+/// `X-Forwarded-For` is the real client; from anywhere else the header is
+/// attacker-controlled and is ignored, which is the whole point of the
+/// `trusted_proxies` list.
+pub fn real_client(
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    trusted: &[agl_config::types::Prefix],
+) -> SocketAddr {
+    if !trusted.iter().any(|p| p.contains(peer.ip())) {
+        return peer;
+    }
+
+    let forwarded = headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .map(str::trim)
+        .and_then(|v| v.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok());
+
+    match forwarded {
+        Some(ip) => SocketAddr::new(ip, peer.port()),
+        None => peer,
+    }
+}
+
 /// Resolves a query and renders the reply.
 async fn answer(
     State(s): State<Shared>,
     axum::Extension(Secure(encrypted)): axum::Extension<Secure>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     client_id: Option<String>,
     wire: Vec<u8>,
 ) -> Response {
@@ -164,13 +195,16 @@ async fn answer(
         return bad_request("the query is too large");
     }
 
-    // A ClientID is carried in the path; it is not yet used for per-client
-    // settings, but it must not be mistaken for part of a hostname.
-    let _ = client_id;
+    let client = real_client(peer, &headers, &s.config.read().dns.trusted_proxies);
 
     let Some(resp) = s
         .dns_server
-        .handle(&wire, peer, agl_dns::resolver::Proto::Https)
+        .handle_as(
+            &wire,
+            client,
+            agl_dns::resolver::Proto::Https,
+            client_id.filter(|c| !c.is_empty()),
+        )
         .await
     else {
         // The query was refused or dropped: rate limited, blocked by access
@@ -206,6 +240,49 @@ mod tests {
     fn rejects_nonsense_and_oversized_input() {
         assert!(decode_query("!!!not base64!!!").is_none());
         assert!(decode_query(&"A".repeat(MAX_QUERY + 1)).is_none());
+    }
+
+    #[test]
+    fn an_untrusted_forwarded_header_is_ignored() {
+        // Anyone can send X-Forwarded-For; honouring it from an arbitrary
+        // peer would let a client claim any address, and with it any other
+        // client's per-client settings.
+        let peer: SocketAddr = "192.0.2.9:5000".parse().unwrap();
+        let mut h = HeaderMap::new();
+        h.insert("x-forwarded-for", "198.51.100.7".parse().unwrap());
+
+        assert_eq!(real_client(peer, &h, &[]), peer);
+    }
+
+    #[test]
+    fn a_trusted_proxy_supplies_the_real_client() {
+        let peer: SocketAddr = "192.0.2.9:5000".parse().unwrap();
+        let mut h = HeaderMap::new();
+        h.insert(
+            "x-forwarded-for",
+            "198.51.100.7, 203.0.113.1".parse().unwrap(),
+        );
+
+        let trusted = vec![agl_config::types::Prefix {
+            addr: "192.0.2.0".parse().unwrap(),
+            bits: 24,
+        }];
+        assert_eq!(
+            real_client(peer, &h, &trusted).ip(),
+            "198.51.100.7".parse::<std::net::IpAddr>().unwrap(),
+            "the left-most address is the client"
+        );
+    }
+
+    #[test]
+    fn a_trusted_proxy_without_the_header_keeps_the_peer() {
+        let peer: SocketAddr = "192.0.2.9:5000".parse().unwrap();
+        let trusted = vec![agl_config::types::Prefix {
+            addr: "192.0.2.0".parse().unwrap(),
+            bits: 24,
+        }];
+
+        assert_eq!(real_client(peer, &HeaderMap::new(), &trusted), peer);
     }
 
     #[test]

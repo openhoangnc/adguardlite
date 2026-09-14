@@ -2,6 +2,7 @@
 //! implementation.
 
 pub mod file;
+pub mod migrate;
 pub mod model;
 pub mod paths;
 pub mod types;
