@@ -150,6 +150,9 @@ dependencies = [
 name = "agl-stats"
 version = "0.107.79"
 dependencies = [
+ "agl-core",
+ "ahash",
+ "parking_lot",
  "serde",
  "serde_json",
  "thiserror",
