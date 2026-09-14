@@ -16,33 +16,36 @@ import sys
 import urllib.error
 import urllib.request
 
-# Endpoints the UI calls on load.  Anything here must match.
+# Endpoints the UI calls on load, each with the status a GET should produce.
+# A non-200 entry checks method routing rather than a response shape: upstream
+# defines /control/safesearch/settings as PUT-only, and a GET must be refused
+# the same way here.
 ENDPOINTS = [
-    "/control/status",
-    "/control/dns_info",
-    "/control/filtering/status",
-    "/control/querylog_info",
-    "/control/querylog/config",
-    "/control/stats_info",
-    "/control/stats/config",
-    "/control/stats",
-    "/control/clients",
-    "/control/access/list",
-    "/control/blocked_services/list",
-    "/control/blocked_services/get",
-    "/control/blocked_services/all",
-    "/control/rewrite/list",
-    "/control/rewrite/settings",
-    "/control/safebrowsing/status",
-    "/control/parental/status",
-    "/control/safesearch/status",
-    "/control/safesearch/settings",
-    "/control/tls/status",
-    "/control/dhcp/status",
-    "/control/profile",
-    "/control/querylog?limit=5",
-    "/control/filtering/check_host?name=doubleclick.net",
-    "/control/filtering/check_host?name=example.com",
+    ("/control/status", 200),
+    ("/control/dns_info", 200),
+    ("/control/filtering/status", 200),
+    ("/control/querylog_info", 200),
+    ("/control/querylog/config", 200),
+    ("/control/stats_info", 200),
+    ("/control/stats/config", 200),
+    ("/control/stats", 200),
+    ("/control/clients", 200),
+    ("/control/access/list", 200),
+    ("/control/blocked_services/list", 200),
+    ("/control/blocked_services/get", 200),
+    ("/control/blocked_services/all", 200),
+    ("/control/rewrite/list", 200),
+    ("/control/rewrite/settings", 200),
+    ("/control/safebrowsing/status", 200),
+    ("/control/parental/status", 200),
+    ("/control/safesearch/status", 200),
+    ("/control/safesearch/settings", 405),
+    ("/control/tls/status", 200),
+    ("/control/dhcp/status", 200),
+    ("/control/profile", 200),
+    ("/control/querylog?limit=5", 200),
+    ("/control/filtering/check_host?name=doubleclick.net", 200),
+    ("/control/filtering/check_host?name=example.com", 200),
 ]
 
 
@@ -186,7 +189,7 @@ def main():
     auth = base64.b64encode(f"{args.user}:{args.password}".encode()).decode()
 
     problems = 0
-    for ep in ENDPOINTS:
+    for ep, want_status in ENDPOINTS:
         gs, gv = get(args.go, ep, auth)
         rs, rv = get(args.rust, ep, auth)
 
@@ -197,7 +200,19 @@ def main():
             problems += 1
             continue
 
+        # Agreeing on an *unexpected* status is not agreement: both servers
+        # answering 401 because the credentials are wrong would otherwise look
+        # like a perfect match while comparing nothing at all.
+        if gs != want_status:
+            print(f"FAIL {ep}\n  both returned {gs}, expected {want_status}")
+            print(f"  body: {str(gv)[:160]}")
+            problems += 1
+            continue
+
         if gs != 200:
+            # A checked non-200: the statuses match and there is no body to
+            # compare.
+            print(f"ok   {ep} ({gs})")
             continue
 
         diffs = list(diff_shape(shape(gv), shape(rv)))
