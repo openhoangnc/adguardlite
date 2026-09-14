@@ -14,6 +14,15 @@ a behaviour looks odd, it is almost certainly odd because Go does it that way,
 and changing it breaks a real user's installation. Read the comments before
 "fixing" anything in a serialiser, a wire format or an API response shape.
 
+## Where things are written down
+
+- **`TASK.md`** — what is done, what is not, and the deliberate deviations.
+  **Read it before starting work, and update it when work lands**: it is the
+  handoff between sessions, and it is only worth anything if it stays true.
+- `README.md` — what this is, and what was measured against the Go build.
+- `NOTICE.md` — what came from AdGuard, and how to regenerate it.
+- This file — how to work in the repository.
+
 ## The drop-in contract
 
 What "drop-in" means, concretely. Changing any of these breaks an existing
@@ -200,9 +209,14 @@ This is a derivative work of a GPL-3.0 project and redistributes AdGuard's
 compiled frontend, their services catalogue and captured fixtures. `NOTICE.md`
 records what came from where; update it when adding anything else of theirs.
 
-## Scope
+## Scope, and keeping it honest
 
-`README.md` records what is and is not implemented. Endpoints for unimplemented
-features answer **501** rather than pretending to succeed — keep it that way; a
-setting that silently does nothing is worse than one that reports it cannot.
-`TASK.md` tracks the work item by item.
+Endpoints for unimplemented features answer **501** rather than pretending to
+succeed — keep it that way. A setting that silently does nothing is worse than
+one that reports it cannot: blocked services and the hosts file were both
+stored, exposed through the API and ignored by the resolver for a while, which
+looked like working features from the UI.
+
+When something lands, move it in `TASK.md` and say how it was verified. When
+something turns out to be deliberate rather than missing, record it under the
+deviations there instead of leaving it to be rediscovered.
