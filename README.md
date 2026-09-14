@@ -20,19 +20,23 @@ the same machine.
 
 | | Go v0.107.79 | adguardlite | |
 |---|---:|---:|---|
-| Docker image | 110 MB | **50.8 MB** | 2.2× smaller |
-| Binary (with web UI) | 33.6 MB | **15.9 MB** | 2.1× smaller |
-| Binary (`dist` profile) | 33.6 MB | **8.9 MB** | 3.8× smaller |
-| Memory, idle with lists loaded | 129.9 MB | **72.8 MB** | 1.8× less |
-| Memory, after load | 233.4 MB | **117.7 MB** | 2.0× less |
-| Throughput (blocked queries) | 44,184 q/s | **49,627 q/s** | 1.12× |
-| Latency p90 | 2.496 ms | **1.501 ms** | 1.7× better |
-| Latency p99 | 4.329 ms | **2.545 ms** | 1.7× better |
+| Docker image | 110 MB | **56.9 MB** | 1.9× smaller |
+| Binary (with web UI) | 33.6 MB | **20.3 MB** | 1.7× smaller |
+| Binary (`dist` profile) | 33.6 MB | **10.7 MB** | 3.1× smaller |
+| Memory, idle with lists loaded | 85.2 MB | **73.2 MB** | 1.2× less |
+| Memory, after load | 186.8 MB | **83.1 MB** | 2.2× less |
+| Throughput (blocked queries) | 39,059 q/s | **51,509 q/s** | 1.32× |
+| Latency p90 | 2.896 ms | **1.436 ms** | 2.0× better |
+| Latency p99 | 6.178 ms | **1.960 ms** | 3.2× better |
 
-Throughput was measured with the load generator in
-`crates/adguardlite/examples/loadgen.rs`, which runs on the same machine as the
-servers and so competes with them for CPU; treat the ratio as meaningful and
-the absolute numbers as a floor.
+Memory, throughput and latency were measured in one sitting with both servers
+running the same config and the same filter list, 15 seconds at concurrency 64
+against 5,000 blocked names. The load generator in
+`crates/adguardlite/examples/loadgen.rs` runs on the same machine as the
+servers and so competes with them for CPU; treat the ratios as meaningful and
+the absolute numbers as a floor. The binary sizes compare against AdGuard's
+published release, not a local `go build`, which is larger because it keeps
+its debug info.
 
 ## Compatibility, and how it was checked
 
@@ -106,7 +110,7 @@ crates/adguardlite   the binary
 
 ```bash
 cargo build --release            # fast to build, fast to run
-cargo build --profile dist       # fat LTO, stripped: the 8.9 MB binary
+cargo build --profile dist       # fat LTO, stripped: the 10.7 MB binary
 ```
 
 The workspace is split so `cargo` parallelises across crates, dependencies are

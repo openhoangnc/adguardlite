@@ -45,7 +45,7 @@ installation.
 
 ```bash
 cargo build --release            # fast to build and to run
-cargo build --profile dist       # fat LTO, panic=abort, stripped: ~8.9 MB
+cargo build --profile dist       # fat LTO, panic=abort, stripped: ~10.7 MB
 cargo test --workspace           # 554 tests, no network or Go build needed
 cargo clippy --workspace --all-targets
 ```

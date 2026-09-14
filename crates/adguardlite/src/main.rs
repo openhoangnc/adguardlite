@@ -57,6 +57,14 @@ fn main() -> std::process::ExitCode {
         };
     }
 
+    // Checking the configuration is a read-only action: it neither drops
+    // privileges nor needs a runtime.
+    if args.check_config {
+        println!("configuration at {} is valid", paths.config.display());
+
+        return std::process::ExitCode::SUCCESS;
+    }
+
     osconf::apply(&config.os);
 
     let runtime = match tokio::runtime::Builder::new_multi_thread()
@@ -143,12 +151,6 @@ async fn run(args: Args, paths: Paths, mut config: agl_config::Config) -> anyhow
         && let Ok(parsed) = addr.parse::<std::net::SocketAddr>()
     {
         config.http.address = agl_config::types::AddrPort(parsed);
-    }
-
-    if args.check_config {
-        println!("configuration at {} is valid", paths.config.display());
-
-        return Ok(());
     }
 
     tracing::info!(
