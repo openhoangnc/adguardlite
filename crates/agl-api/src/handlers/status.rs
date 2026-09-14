@@ -162,7 +162,12 @@ pub async fn dns_info(State(s): State<Shared>) -> Json<DnsConfigJson> {
         ratelimit_subnet_len_ipv4: Some(d.ratelimit_subnet_len_ipv4),
         ratelimit_subnet_len_ipv6: Some(d.ratelimit_subnet_len_ipv6),
         upstream_timeout: Some(d.upstream_timeout.as_secs() as u64),
-        ratelimit_whitelist: Some(d.ratelimit_whitelist.iter().map(|i| i.to_string()).collect()),
+        ratelimit_whitelist: Some(
+            d.ratelimit_whitelist
+                .iter()
+                .map(|i| i.to_string())
+                .collect(),
+        ),
         blocking_mode: Some(blocking_mode_str(cfg.filtering.blocking_mode).to_string()),
         edns_cs_enabled: Some(d.edns_client_subnet.enabled),
         edns_cs_use_custom: Some(d.edns_client_subnet.use_custom),
@@ -264,8 +269,7 @@ pub async fn set_dns_config(
             cfg.dns.edns_client_subnet.use_custom = v;
         }
         if let Some(v) = req.edns_cs_custom_ip {
-            cfg.dns.edns_client_subnet.custom_ip =
-                agl_config::types::OptAddr(v.parse().ok());
+            cfg.dns.edns_client_subnet.custom_ip = agl_config::types::OptAddr(v.parse().ok());
         }
         if let Some(v) = req.dnssec_enabled {
             cfg.dns.enable_dnssec = v;
@@ -326,7 +330,9 @@ fn validate_upstreams(v: &[String]) -> ApiResult<()> {
         if let Err(e) = agl_dns::addr::parse(line)
             && !matches!(e, agl_dns::addr::ParseError::Empty)
         {
-            return Err(ApiError::bad_request(format!("invalid upstream {line:?}: {e}")));
+            return Err(ApiError::bad_request(format!(
+                "invalid upstream {line:?}: {e}"
+            )));
         }
     }
 

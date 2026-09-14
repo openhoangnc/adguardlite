@@ -44,7 +44,11 @@ impl Observer for Recorder {
             return;
         };
 
-        let host = q.name().to_ascii().trim_end_matches('.').to_ascii_lowercase();
+        let host = q
+            .name()
+            .to_ascii()
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
         let client = if self.anonymize.load(Ordering::Relaxed) {
             anonymize_ip(ev.client.ip())
         } else {

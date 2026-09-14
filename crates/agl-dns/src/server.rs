@@ -80,7 +80,11 @@ pub struct Server {
 
 impl Server {
     /// Builds a server around a resolver.
-    pub fn new(resolver: Arc<Resolver>, limiter: Arc<Limiter>, observer: Arc<dyn Observer>) -> Self {
+    pub fn new(
+        resolver: Arc<Resolver>,
+        limiter: Arc<Limiter>,
+        observer: Arc<dyn Observer>,
+    ) -> Self {
         Self {
             resolver,
             limiter,
@@ -102,10 +106,19 @@ impl Server {
 
         let req = Message::from_bytes(wire).ok()?;
 
-        let info = ClientInfo { addr: Some(client.ip()), name: None, tags: Vec::new() };
+        let info = ClientInfo {
+            addr: Some(client.ip()),
+            name: None,
+            tags: Vec::new(),
+        };
         let outcome = self.resolver.resolve(&req, proto, &info).await;
 
-        self.observer.observe(&Event { request: &req, outcome: &outcome, client, proto });
+        self.observer.observe(&Event {
+            request: &req,
+            outcome: &outcome,
+            client,
+            proto,
+        });
 
         match &outcome.action {
             Action::Drop => None,
@@ -266,7 +279,10 @@ mod tests {
 
         Arc::new(Server::new(
             Arc::new(resolver),
-            Arc::new(Limiter::new(RlConfig { per_second, ..Default::default() })),
+            Arc::new(Limiter::new(RlConfig {
+                per_second,
+                ..Default::default()
+            })),
             Arc::new(NoopObserver),
         ))
     }
@@ -288,7 +304,11 @@ mod tests {
     async fn answers_a_blocked_query_over_udp() {
         let s = test_server("||ads.example.com^\n", 0);
         let out = s
-            .handle(&wire_query("ads.example.com.", RecordType::A), peer(), Proto::Udp)
+            .handle(
+                &wire_query("ads.example.com.", RecordType::A),
+                peer(),
+                Proto::Udp,
+            )
             .await
             .expect("should answer");
 
@@ -300,7 +320,11 @@ mod tests {
     #[tokio::test]
     async fn garbage_input_produces_no_response() {
         let s = test_server("", 0);
-        assert!(s.handle(b"not a dns message", peer(), Proto::Udp).await.is_none());
+        assert!(
+            s.handle(b"not a dns message", peer(), Proto::Udp)
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -308,9 +332,13 @@ mod tests {
         let s = test_server("||ads.example.com^\n", 0);
         s.access.write().disallowed = vec![peer().ip()];
         assert!(
-            s.handle(&wire_query("ads.example.com.", RecordType::A), peer(), Proto::Udp)
-                .await
-                .is_none()
+            s.handle(
+                &wire_query("ads.example.com.", RecordType::A),
+                peer(),
+                Proto::Udp
+            )
+            .await
+            .is_none()
         );
     }
 
@@ -319,16 +347,24 @@ mod tests {
         let s = test_server("||ads.example.com^\n", 0);
         s.access.write().allowed = vec!["10.0.0.1".parse().unwrap()];
         assert!(
-            s.handle(&wire_query("ads.example.com.", RecordType::A), peer(), Proto::Udp)
-                .await
-                .is_none()
+            s.handle(
+                &wire_query("ads.example.com.", RecordType::A),
+                peer(),
+                Proto::Udp
+            )
+            .await
+            .is_none()
         );
 
         s.access.write().allowed = vec![peer().ip()];
         assert!(
-            s.handle(&wire_query("ads.example.com.", RecordType::A), peer(), Proto::Udp)
-                .await
-                .is_some()
+            s.handle(
+                &wire_query("ads.example.com.", RecordType::A),
+                peer(),
+                Proto::Udp
+            )
+            .await
+            .is_some()
         );
     }
 
@@ -338,7 +374,10 @@ mod tests {
         let q = wire_query("ads.example.com.", RecordType::A);
         assert!(s.handle(&q, peer(), Proto::Udp).await.is_some());
         assert!(s.handle(&q, peer(), Proto::Udp).await.is_some());
-        assert!(s.handle(&q, peer(), Proto::Udp).await.is_none(), "third should be limited");
+        assert!(
+            s.handle(&q, peer(), Proto::Udp).await.is_none(),
+            "third should be limited"
+        );
     }
 
     #[tokio::test]
@@ -346,7 +385,10 @@ mod tests {
         let s = test_server("", 0);
         let q = wire_query("version.bind.", RecordType::TXT);
         assert!(s.handle(&q, peer(), Proto::Udp).await.is_none());
-        assert!(s.handle(&q, peer(), Proto::Tcp).await.is_some(), "TCP gets REFUSED");
+        assert!(
+            s.handle(&q, peer(), Proto::Tcp).await.is_some(),
+            "TCP gets REFUSED"
+        );
     }
 
     #[tokio::test]
@@ -365,7 +407,10 @@ mod tests {
 
         let client = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         client.connect(addr).await.unwrap();
-        client.send(&wire_query("ads.example.com.", RecordType::A)).await.unwrap();
+        client
+            .send(&wire_query("ads.example.com.", RecordType::A))
+            .await
+            .unwrap();
 
         let mut buf = vec![0u8; 4096];
         let n = tokio::time::timeout(Duration::from_secs(3), client.recv(&mut buf))
@@ -429,7 +474,10 @@ mod tests {
     fn oversized_responses_get_the_truncation_bit() {
         let mut m = Message::query();
         m.metadata.id = 5;
-        m.add_query(Query::query(Name::from_utf8("a.com.").unwrap(), RecordType::A));
+        m.add_query(Query::query(
+            Name::from_utf8("a.com.").unwrap(),
+            RecordType::A,
+        ));
         let wire = m.to_bytes().unwrap();
 
         // Pretend the limit is tiny so truncation kicks in.

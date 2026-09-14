@@ -76,12 +76,8 @@ impl Prefix {
     /// Reports whether `ip` falls inside the prefix.
     pub fn contains(&self, ip: IpAddr) -> bool {
         match (self.addr, ip) {
-            (IpAddr::V4(net), IpAddr::V4(a)) => {
-                mask_eq(&net.octets(), &a.octets(), self.bits)
-            }
-            (IpAddr::V6(net), IpAddr::V6(a)) => {
-                mask_eq(&net.octets(), &a.octets(), self.bits)
-            }
+            (IpAddr::V4(net), IpAddr::V4(a)) => mask_eq(&net.octets(), &a.octets(), self.bits),
+            (IpAddr::V6(net), IpAddr::V6(a)) => mask_eq(&net.octets(), &a.octets(), self.bits),
             _ => false,
         }
     }

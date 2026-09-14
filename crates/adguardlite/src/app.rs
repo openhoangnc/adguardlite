@@ -14,7 +14,9 @@ use agl_dns::pool::{self, Mode, Pool, SharedPool};
 use agl_dns::ratelimit::{Config as RlConfig, Limiter};
 use agl_dns::resolver::{Resolver, Settings};
 use agl_dns::rewrite::Table;
-use agl_dns::server::{Access, NoopObserver, Observer, Server, bind_tcp, bind_udp, serve_tcp, serve_udp};
+use agl_dns::server::{
+    Access, NoopObserver, Observer, Server, bind_tcp, bind_udp, serve_tcp, serve_udp,
+};
 
 use agl_config::Paths;
 use agl_filter::lists::Manager;
@@ -60,7 +62,11 @@ impl App {
     ///
     /// Upstream resolution happens here, so a misconfigured upstream is
     /// reported at startup rather than on the first query.
-    pub async fn build(paths: Paths, config: Config, observer: Arc<dyn Observer>) -> Result<Self, Error> {
+    pub async fn build(
+        paths: Paths,
+        config: Config,
+        observer: Arc<dyn Observer>,
+    ) -> Result<Self, Error> {
         paths.ensure()?;
 
         let mut filters = Manager::load(
@@ -85,7 +91,13 @@ impl App {
 
         let cache = Cache::new(cache_config(&config));
         let pool = SharedPool::new(build_pool(&config).await);
-        let resolver = Arc::new(Resolver::new(engine, rewrites, cache, pool, settings(&config)));
+        let resolver = Arc::new(Resolver::new(
+            engine,
+            rewrites,
+            cache,
+            pool,
+            settings(&config),
+        ));
 
         let limiter = Arc::new(Limiter::new(RlConfig {
             per_second: config.dns.ratelimit,
@@ -100,7 +112,13 @@ impl App {
             disallowed: parse_ips(&config.dns.disallowed_clients),
         };
 
-        Ok(Self { paths, config, filters, resolver, server })
+        Ok(Self {
+            paths,
+            config,
+            filters,
+            resolver,
+            server,
+        })
     }
 
     /// Builds an application with no query observer.
@@ -156,7 +174,6 @@ impl App {
 
         Ok(tasks)
     }
-
 }
 
 /// Reads the system hosts file, returning its contents or an empty string.
@@ -214,7 +231,11 @@ pub fn settings(c: &Config) -> Settings {
 /// Derives cache settings from the configuration.
 pub fn cache_config(c: &Config) -> CacheConfig {
     CacheConfig {
-        size_bytes: if c.dns.cache_enabled { c.dns.cache_size as usize } else { 0 },
+        size_bytes: if c.dns.cache_enabled {
+            c.dns.cache_size as usize
+        } else {
+            0
+        },
         ttl_min: c.dns.cache_ttl_min,
         ttl_max: c.dns.cache_ttl_max,
         optimistic: c.dns.cache_optimistic,
@@ -245,8 +266,14 @@ pub async fn build_pool(c: &Config) -> Pool {
         let mut out = Vec::new();
         for s in specs {
             let label = s.original.clone();
-            match Client::connect(s, &bootstrap, timeout, c.dns.bootstrap_prefer_ipv6, tls.clone())
-                .await
+            match Client::connect(
+                s,
+                &bootstrap,
+                timeout,
+                c.dns.bootstrap_prefer_ipv6,
+                tls.clone(),
+            )
+            .await
             {
                 Ok(cl) => out.push(Arc::new(cl)),
                 Err(e) => tracing::warn!(upstream = %label, error = %e, "upstream unavailable"),

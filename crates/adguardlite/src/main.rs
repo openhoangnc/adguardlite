@@ -21,7 +21,10 @@ fn main() -> std::process::ExitCode {
     let args = Args::parse();
     init_logging(&args);
 
-    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
         Ok(r) => r,
         Err(e) => {
             eprintln!("adguardlite: starting the runtime: {e}");

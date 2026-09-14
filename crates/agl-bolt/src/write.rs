@@ -106,8 +106,8 @@ pub fn build(buckets: &BTreeMap<Vec<u8>, BucketData>, page_size: usize) -> Resul
             (name.clone(), vec![0u8; len])
         })
         .collect();
-    let root_pages = build_leaf_page_flagged(ROOT, &sizing, page_size, BUCKET_LEAF_FLAG)?.len()
-        / page_size;
+    let root_pages =
+        build_leaf_page_flagged(ROOT, &sizing, page_size, BUCKET_LEAF_FLAG)?.len() / page_size;
 
     // Pass three: assign pages to the spilled buckets and build the real root.
     let mut next_page = ROOT + root_pages as u64;
@@ -118,7 +118,11 @@ pub fn build(buckets: &BTreeMap<Vec<u8>, BucketData>, page_size: usize) -> Resul
         match p {
             Planned::Inline(body) => {
                 let mut v = vec![0u8; BUCKET_HEADER];
-                BucketHeader { root: 0, sequence: 0 }.write(&mut v);
+                BucketHeader {
+                    root: 0,
+                    sequence: 0,
+                }
+                .write(&mut v);
                 v.extend_from_slice(&body);
                 root_entries.insert(name, v);
             }
@@ -130,10 +134,20 @@ pub fn build(buckets: &BTreeMap<Vec<u8>, BucketData>, page_size: usize) -> Resul
                 let overflow = u32::try_from(pages - 1)
                     .map_err(|_| Error::Unsupported("bucket spans too many pages".into()))?;
                 let count = u16::from_le_bytes(page[10..12].try_into().expect("2 bytes"));
-                PageHeader { id, flags: FLAG_LEAF, count, overflow }.write(&mut page);
+                PageHeader {
+                    id,
+                    flags: FLAG_LEAF,
+                    count,
+                    overflow,
+                }
+                .write(&mut page);
 
                 let mut v = vec![0u8; BUCKET_HEADER];
-                BucketHeader { root: id, sequence: 0 }.write(&mut v);
+                BucketHeader {
+                    root: id,
+                    sequence: 0,
+                }
+                .write(&mut v);
                 root_entries.insert(name, v);
                 spilled.push((id, page));
             }
@@ -153,8 +167,13 @@ pub fn build(buckets: &BTreeMap<Vec<u8>, BucketData>, page_size: usize) -> Resul
     // Free list: empty, since nothing is ever reused in a fresh file.
     {
         let off = FREELIST as usize * page_size;
-        PageHeader { id: FREELIST, flags: FLAG_FREELIST, count: 0, overflow: 0 }
-            .write(&mut out[off..]);
+        PageHeader {
+            id: FREELIST,
+            flags: FLAG_FREELIST,
+            count: 0,
+            overflow: 0,
+        }
+        .write(&mut out[off..]);
     }
 
     let put = |out: &mut Vec<u8>, id: u64, page: &[u8]| {
@@ -207,7 +226,13 @@ fn encode_leaf_body_flagged(data: &BucketData, elem_flags: u32) -> Result<Vec<u8
     let mut body = vec![0u8; table];
 
     // The inline page's own id is unused by readers; bbolt writes zero.
-    PageHeader { id: 0, flags: FLAG_LEAF, count, overflow: 0 }.write(&mut body);
+    PageHeader {
+        id: 0,
+        flags: FLAG_LEAF,
+        count,
+        overflow: 0,
+    }
+    .write(&mut body);
 
     for (i, (k, v)) in data.iter().enumerate() {
         let elem_off = PAGE_HEADER + i * LEAF_ELEM;
@@ -250,7 +275,13 @@ fn build_leaf_page_flagged(
 
     let overflow = u32::try_from(pages - 1)
         .map_err(|_| Error::Unsupported("bucket spans too many pages".into()))?;
-    PageHeader { id, flags: FLAG_LEAF, count: data.len() as u16, overflow }.write(&mut body);
+    PageHeader {
+        id,
+        flags: FLAG_LEAF,
+        count: data.len() as u16,
+        overflow,
+    }
+    .write(&mut body);
 
     Ok(body)
 }
@@ -261,7 +292,10 @@ mod tests {
     use crate::Db;
 
     fn bucket(pairs: &[(&[u8], &[u8])]) -> BucketData {
-        pairs.iter().map(|(k, v)| (k.to_vec(), v.to_vec())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_vec(), v.to_vec()))
+            .collect()
     }
 
     fn hour_name(h: u64) -> Vec<u8> {
@@ -279,8 +313,14 @@ mod tests {
         let back = db.buckets().unwrap();
 
         assert_eq!(back.len(), 2);
-        assert_eq!(back[&hour_name(497_049)][&vec![0u8]], b"first payload".to_vec());
-        assert_eq!(back[&hour_name(497_050)][&vec![0u8]], b"second payload".to_vec());
+        assert_eq!(
+            back[&hour_name(497_049)][&vec![0u8]],
+            b"first payload".to_vec()
+        );
+        assert_eq!(
+            back[&hour_name(497_050)][&vec![0u8]],
+            b"second payload".to_vec()
+        );
     }
 
     #[test]
@@ -304,7 +344,10 @@ mod tests {
         // A month of hourly units, the largest window the UI offers.
         let mut buckets = BTreeMap::new();
         for h in 0..24u64 * 30 {
-            buckets.insert(hour_name(500_000 + h), bucket(&[(&[0], format!("unit {h}").as_bytes())]));
+            buckets.insert(
+                hour_name(500_000 + h),
+                bucket(&[(&[0], format!("unit {h}").as_bytes())]),
+            );
         }
 
         let bytes = build(&buckets, 16384).unwrap();
@@ -339,7 +382,10 @@ mod tests {
     #[test]
     fn rejects_an_implausible_page_size() {
         assert!(build(&BTreeMap::new(), 100).is_err());
-        assert!(build(&BTreeMap::new(), 5000).is_err(), "must be a power of two");
+        assert!(
+            build(&BTreeMap::new(), 5000).is_err(),
+            "must be a power of two"
+        );
     }
 
     #[test]
@@ -353,7 +399,10 @@ mod tests {
         write_file(&p, &buckets, 4096).unwrap();
 
         let db = Db::open(&p).unwrap();
-        assert_eq!(db.buckets().unwrap()[&hour_name(42)][&vec![0u8]], b"payload".to_vec());
+        assert_eq!(
+            db.buckets().unwrap()[&hour_name(42)][&vec![0u8]],
+            b"payload".to_vec()
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

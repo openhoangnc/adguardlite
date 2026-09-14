@@ -6,8 +6,8 @@
 
 use std::path::PathBuf;
 
-use agl_config::model::FilterYaml;
 use crate::engine::Engine;
+use agl_config::model::FilterYaml;
 use jiff::Timestamp;
 
 use agl_config::Paths;
@@ -125,7 +125,12 @@ pub struct Manager {
 
 impl Manager {
     /// Builds a manager from the configured lists, loading contents from disk.
-    pub fn load(paths: &Paths, block: &[FilterYaml], allow: &[FilterYaml], user: &[String]) -> Self {
+    pub fn load(
+        paths: &Paths,
+        block: &[FilterYaml],
+        allow: &[FilterYaml],
+        user: &[String],
+    ) -> Self {
         let mut m = Manager {
             blocklists: block.iter().map(|f| List::from_config(f, false)).collect(),
             allowlists: allow.iter().map(|f| List::from_config(f, true)).collect(),
@@ -161,13 +166,13 @@ impl Manager {
             (ETC_HOSTS_LIST_ID, self.hosts_rules.as_str()),
         ]
         .into_iter()
-            .chain(
-                self.blocklists
-                    .iter()
-                    .filter(|l| l.enabled)
-                    .map(|l| (l.id, l.text.as_str())),
-            )
-            .collect();
+        .chain(
+            self.blocklists
+                .iter()
+                .filter(|l| l.enabled)
+                .map(|l| (l.id, l.text.as_str())),
+        )
+        .collect();
 
         let allow: Vec<(i64, &str)> = self
             .allowlists
@@ -229,7 +234,8 @@ impl Manager {
         list.text = text;
         list.rules_count = count;
         list.last_updated = Some(Timestamp::now());
-        list.save(paths).map_err(|e| RefreshError::Io(e.to_string()))?;
+        list.save(paths)
+            .map_err(|e| RefreshError::Io(e.to_string()))?;
 
         Ok(count)
     }
@@ -269,8 +275,13 @@ pub fn local_list_path(paths: &Paths, url: &str) -> Result<PathBuf, RefreshError
         paths.user_filters().join(candidate)
     };
 
-    if joined.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-        return Err(RefreshError::Io(format!("path {url:?} escapes the data directory")));
+    if joined
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(RefreshError::Io(format!(
+            "path {url:?} escapes the data directory"
+        )));
     }
 
     Ok(joined)
@@ -354,8 +365,14 @@ mod tests {
             .reason
         };
 
-        assert_eq!(matched("on.example.com"), agl_core::Reason::FilteredBlockList);
-        assert_eq!(matched("off.example.com"), agl_core::Reason::NotFilteredNotFound);
+        assert_eq!(
+            matched("on.example.com"),
+            agl_core::Reason::FilteredBlockList
+        );
+        assert_eq!(
+            matched("off.example.com"),
+            agl_core::Reason::NotFilteredNotFound
+        );
 
         std::fs::remove_dir_all(p.work.parent().unwrap()).ok();
     }

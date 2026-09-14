@@ -41,11 +41,7 @@ async fn serve_ui(headers: HeaderMap, req: Request) -> Response {
 }
 
 /// Rejects requests that carry no valid session, once a user exists.
-async fn require_auth(
-    State(s): State<Shared>,
-    req: Request,
-    next: Next,
-) -> Response {
+async fn require_auth(State(s): State<Shared>, req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
 
     // Before the wizard has run there is nobody to authenticate as.
@@ -85,14 +81,32 @@ fn control_router() -> Router<Shared> {
         .route("/filtering/set_rules", post(filtering::set_rules))
         .route("/filtering/check_host", get(filtering::check_host))
         // Safety toggles.
-        .route("/safebrowsing/enable", post(|State(s): State<Shared>| filtering::safebrowsing_set(s, true)))
-        .route("/safebrowsing/disable", post(|State(s): State<Shared>| filtering::safebrowsing_set(s, false)))
+        .route(
+            "/safebrowsing/enable",
+            post(|State(s): State<Shared>| filtering::safebrowsing_set(s, true)),
+        )
+        .route(
+            "/safebrowsing/disable",
+            post(|State(s): State<Shared>| filtering::safebrowsing_set(s, false)),
+        )
         .route("/safebrowsing/status", get(filtering::safebrowsing_status))
-        .route("/parental/enable", post(|State(s): State<Shared>| filtering::parental_set(s, true)))
-        .route("/parental/disable", post(|State(s): State<Shared>| filtering::parental_set(s, false)))
+        .route(
+            "/parental/enable",
+            post(|State(s): State<Shared>| filtering::parental_set(s, true)),
+        )
+        .route(
+            "/parental/disable",
+            post(|State(s): State<Shared>| filtering::parental_set(s, false)),
+        )
         .route("/parental/status", get(filtering::parental_status))
-        .route("/safesearch/enable", post(|State(s): State<Shared>| filtering::safesearch_set(s, true)))
-        .route("/safesearch/disable", post(|State(s): State<Shared>| filtering::safesearch_set(s, false)))
+        .route(
+            "/safesearch/enable",
+            post(|State(s): State<Shared>| filtering::safesearch_set(s, true)),
+        )
+        .route(
+            "/safesearch/disable",
+            post(|State(s): State<Shared>| filtering::safesearch_set(s, false)),
+        )
         // Upstream answers GET here with 405; only PUT is defined.
         .route("/safesearch/settings", put(filtering::safesearch_settings))
         .route("/safesearch/status", get(filtering::safesearch_status))
@@ -102,7 +116,10 @@ fn control_router() -> Router<Shared> {
         .route("/rewrite/delete", post(filtering::rewrite_delete))
         .route("/rewrite/update", put(filtering::rewrite_update))
         .route("/rewrite/settings", get(filtering::rewrite_settings))
-        .route("/rewrite/settings/update", put(filtering::rewrite_settings_update))
+        .route(
+            "/rewrite/settings/update",
+            put(filtering::rewrite_settings_update),
+        )
         // Query log.
         .route("/querylog", get(logs::querylog))
         .route("/querylog_info", get(logs::querylog_info))
@@ -123,7 +140,10 @@ fn control_router() -> Router<Shared> {
         .route("/clients/delete", post(misc::clients_delete))
         .route("/clients/update", post(misc::clients_update))
         .route("/clients/find", get(misc::clients_find))
-        .route("/clients/search", get(misc::clients_find).post(misc::clients_find))
+        .route(
+            "/clients/search",
+            get(misc::clients_find).post(misc::clients_find),
+        )
         .route("/access/list", get(misc::access_list))
         .route("/access/set", post(misc::access_set))
         // Blocked services.
@@ -231,11 +251,7 @@ fn mobileconfig(s: &Shared, proto: &str) -> ApiResult<Response> {
 "#
     );
 
-    Ok((
-        [(header::CONTENT_TYPE, "application/xml")],
-        plist,
-    )
-        .into_response())
+    Ok(([(header::CONTENT_TYPE, "application/xml")], plist).into_response())
 }
 
 /// A JSON body of `{"enabled": ...}`, used by several toggles.

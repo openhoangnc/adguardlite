@@ -107,7 +107,10 @@ pub async fn resolve_upstream(
         let authority = up.authority();
         let addrs = tokio::net::lookup_host(&authority)
             .await
-            .map_err(|e| Error::Bootstrap { host: up.host.clone(), reason: e.to_string() })?
+            .map_err(|e| Error::Bootstrap {
+                host: up.host.clone(),
+                reason: e.to_string(),
+            })?
             .collect::<Vec<_>>();
         if addrs.is_empty() {
             return Err(Error::Bootstrap {
@@ -238,7 +241,10 @@ where
         stream.read_exact(&mut lenbuf).await?;
         let n = usize::from(u16::from_be_bytes(lenbuf));
         if n > MAX_MSG {
-            return Err(io::Error::new(io::ErrorKind::InvalidData, "response too large"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "response too large",
+            ));
         }
 
         let mut buf = vec![0u8; n];
@@ -344,10 +350,11 @@ pub async fn https_exchange(
             let _ = conn.await;
         });
 
-        let resp = tokio::time::timeout(timeout, sender.send_request(build(Full::new(wire.into()))?))
-            .await
-            .map_err(|_| Error::Timeout(timeout))?
-            .map_err(|e| Error::Http(e.to_string()))?;
+        let resp =
+            tokio::time::timeout(timeout, sender.send_request(build(Full::new(wire.into()))?))
+                .await
+                .map_err(|_| Error::Timeout(timeout))?
+                .map_err(|e| Error::Http(e.to_string()))?;
         let out = read_body(resp, timeout).await;
         task.abort();
         out?
@@ -359,10 +366,11 @@ pub async fn https_exchange(
             let _ = conn.await;
         });
 
-        let resp = tokio::time::timeout(timeout, sender.send_request(build(Full::new(wire.into()))?))
-            .await
-            .map_err(|_| Error::Timeout(timeout))?
-            .map_err(|e| Error::Http(e.to_string()))?;
+        let resp =
+            tokio::time::timeout(timeout, sender.send_request(build(Full::new(wire.into()))?))
+                .await
+                .map_err(|_| Error::Timeout(timeout))?
+                .map_err(|e| Error::Http(e.to_string()))?;
         let out = read_body(resp, timeout).await;
         task.abort();
         out?
@@ -423,7 +431,11 @@ impl Client {
 
         let addrs = resolve_upstream(&upstream, bootstrap, timeout, prefer_ipv6).await?;
 
-        Ok(Self { upstream, addrs, tls })
+        Ok(Self {
+            upstream,
+            addrs,
+            tls,
+        })
     }
 
     /// Sends a query and returns the reply.
@@ -435,9 +447,7 @@ impl Client {
         for &addr in &self.addrs {
             let r = match self.upstream.transport {
                 Transport::Udp => match udp_exchange(req, addr, timeout).await {
-                    Ok(resp) if resp.metadata.truncation => {
-                        tcp_exchange(req, addr, timeout).await
-                    }
+                    Ok(resp) if resp.metadata.truncation => tcp_exchange(req, addr, timeout).await,
                     other => other,
                 },
                 Transport::Tcp => tcp_exchange(req, addr, timeout).await,
@@ -506,20 +516,30 @@ mod tests {
     #[tokio::test]
     async fn literal_addresses_skip_bootstrap() {
         let up = addr::parse("1.2.3.4:53").unwrap().upstream.unwrap();
-        let got = resolve_upstream(&up, &[], Duration::from_secs(1), false).await.unwrap();
+        let got = resolve_upstream(&up, &[], Duration::from_secs(1), false)
+            .await
+            .unwrap();
         assert_eq!(got, vec!["1.2.3.4:53".parse::<SocketAddr>().unwrap()]);
     }
 
     #[tokio::test]
     async fn ipv6_literals_resolve_to_themselves() {
         let up = addr::parse("[2620:fe::10]:853").unwrap().upstream.unwrap();
-        let got = resolve_upstream(&up, &[], Duration::from_secs(1), false).await.unwrap();
-        assert_eq!(got, vec!["[2620:fe::10]:853".parse::<SocketAddr>().unwrap()]);
+        let got = resolve_upstream(&up, &[], Duration::from_secs(1), false)
+            .await
+            .unwrap();
+        assert_eq!(
+            got,
+            vec!["[2620:fe::10]:853".parse::<SocketAddr>().unwrap()]
+        );
     }
 
     #[tokio::test]
     async fn unsupported_transports_are_rejected_up_front() {
-        let up = addr::parse("quic://dns.adguard.com").unwrap().upstream.unwrap();
+        let up = addr::parse("quic://dns.adguard.com")
+            .unwrap()
+            .upstream
+            .unwrap();
         let err = Client::connect(up, &[], Duration::from_secs(1), false, tls_config())
             .await
             .unwrap_err();
@@ -551,11 +571,7 @@ mod tests {
             let mut buf = vec![0u8; 4096];
             let (n, peer) = sock.recv_from(&mut buf).await.unwrap();
             let req = Message::from_bytes(&buf[..n]).unwrap();
-            let resp = crate::msg::with_addrs(
-                &req,
-                &["93.184.216.34".parse().unwrap()],
-                300,
-            );
+            let resp = crate::msg::with_addrs(&req, &["93.184.216.34".parse().unwrap()], 300);
             sock.send_to(&resp.to_bytes().unwrap(), peer).await.unwrap();
         });
 
@@ -580,7 +596,9 @@ mod tests {
             let req = Message::from_bytes(&buf).unwrap();
             let resp = crate::msg::with_addrs(&req, &["1.2.3.4".parse().unwrap()], 60);
             let wire = resp.to_bytes().unwrap();
-            s.write_all(&(wire.len() as u16).to_be_bytes()).await.unwrap();
+            s.write_all(&(wire.len() as u16).to_be_bytes())
+                .await
+                .unwrap();
             s.write_all(&wire).await.unwrap();
             s.flush().await.unwrap();
         });

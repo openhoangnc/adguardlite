@@ -26,7 +26,10 @@ pub struct Paths {
 impl Paths {
     /// Builds the layout for a working directory and config file.
     pub fn new(work: impl Into<PathBuf>, config: impl Into<PathBuf>) -> Self {
-        Self { work: work.into(), config: config.into() }
+        Self {
+            work: work.into(),
+            config: config.into(),
+        }
     }
 
     /// The data directory.
@@ -100,14 +103,20 @@ mod tests {
     use super::*;
 
     fn paths() -> Paths {
-        Paths::new("/opt/adguardhome/work", "/opt/adguardhome/conf/AdGuardHome.yaml")
+        Paths::new(
+            "/opt/adguardhome/work",
+            "/opt/adguardhome/conf/AdGuardHome.yaml",
+        )
     }
 
     #[test]
     fn matches_the_docker_image_layout() {
         let p = paths();
         assert_eq!(p.data().to_str().unwrap(), "/opt/adguardhome/work/data");
-        assert_eq!(p.filters().to_str().unwrap(), "/opt/adguardhome/work/data/filters");
+        assert_eq!(
+            p.filters().to_str().unwrap(),
+            "/opt/adguardhome/work/data/filters"
+        );
         assert_eq!(
             p.filter_file(1).to_str().unwrap(),
             "/opt/adguardhome/work/data/filters/1.txt"
@@ -120,7 +129,10 @@ mod tests {
             p.query_log_rotated("").to_str().unwrap(),
             "/opt/adguardhome/work/data/querylog.json.1"
         );
-        assert_eq!(p.stats_db("").to_str().unwrap(), "/opt/adguardhome/work/data/stats.db");
+        assert_eq!(
+            p.stats_db("").to_str().unwrap(),
+            "/opt/adguardhome/work/data/stats.db"
+        );
         assert_eq!(
             p.sessions_db().to_str().unwrap(),
             "/opt/adguardhome/work/data/sessions.db"
@@ -130,8 +142,14 @@ mod tests {
     #[test]
     fn honours_the_configured_override_directories() {
         let p = paths();
-        assert_eq!(p.query_log("/var/log/agh").to_str().unwrap(), "/var/log/agh/querylog.json");
-        assert_eq!(p.stats_db("/var/lib/agh").to_str().unwrap(), "/var/lib/agh/stats.db");
+        assert_eq!(
+            p.query_log("/var/log/agh").to_str().unwrap(),
+            "/var/log/agh/querylog.json"
+        );
+        assert_eq!(
+            p.stats_db("/var/lib/agh").to_str().unwrap(),
+            "/var/lib/agh/stats.db"
+        );
     }
 
     #[test]

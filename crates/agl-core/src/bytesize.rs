@@ -36,9 +36,7 @@ impl ByteSize {
             return Err(err());
         }
 
-        let split = t
-            .find(|c: char| !c.is_ascii_digit())
-            .unwrap_or(t.len());
+        let split = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
         let (num, unit) = t.split_at(split);
         if num.is_empty() {
             return Err(err());
@@ -78,7 +76,7 @@ impl fmt::Display for ByteSize {
             (MB, "MB"),
             (KB, "KB"),
         ] {
-            if v >= mult && v % mult == 0 {
+            if v >= mult && v.is_multiple_of(mult) {
                 return write!(f, "{}{}", v / mult, suffix);
             }
         }

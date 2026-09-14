@@ -152,7 +152,10 @@ impl Pool {
             defaults: wrap(defaults),
             groups: groups
                 .into_iter()
-                .map(|(domains, cs)| Group { domains, members: wrap(cs) })
+                .map(|(domains, cs)| Group {
+                    domains,
+                    members: wrap(cs),
+                })
                 .collect(),
             fallbacks: wrap(fallbacks),
             mode,
@@ -285,7 +288,10 @@ impl Pool {
                     return Ok(resp);
                 }
                 Ok(Ok(resp)) => {
-                    last = Some(Error::Http(format!("upstream returned {}", resp.metadata.response_code)));
+                    last = Some(Error::Http(format!(
+                        "upstream returned {}",
+                        resp.metadata.response_code
+                    )));
                 }
                 Ok(Err(e)) => last = Some(e),
                 Err(e) => last = Some(Error::Http(e.to_string())),
@@ -325,7 +331,10 @@ impl Pool {
             match joined {
                 Ok(Ok(resp)) if !is_failure(&resp) => responses.push(resp),
                 Ok(Ok(resp)) => {
-                    last = Some(Error::Http(format!("upstream returned {}", resp.metadata.response_code)))
+                    last = Some(Error::Http(format!(
+                        "upstream returned {}",
+                        resp.metadata.response_code
+                    )))
                 }
                 Ok(Err(e)) => last = Some(e),
                 Err(e) => last = Some(Error::Http(e.to_string())),
@@ -400,12 +409,15 @@ async fn fastest_of(addrs: &[IpAddr], timeout: Duration) -> Option<IpAddr> {
     best.map(|(_, ip)| ip)
 }
 
+/// A set of domains and the upstreams that serve them.
+pub type UpstreamGroup = (Vec<String>, Vec<Upstream>);
+
 /// Splits parsed upstream entries into default and domain-specific groups.
 ///
 /// Returns the default specs and the grouped ones, ready to be connected.
-pub fn partition(entries: Vec<UpstreamEntry>) -> (Vec<Upstream>, Vec<(Vec<String>, Vec<Upstream>)>) {
+pub fn partition(entries: Vec<UpstreamEntry>) -> (Vec<Upstream>, Vec<UpstreamGroup>) {
     let mut defaults = Vec::new();
-    let mut groups: Vec<(Vec<String>, Vec<Upstream>)> = Vec::new();
+    let mut groups: Vec<UpstreamGroup> = Vec::new();
 
     for e in entries {
         let Some(u) = e.upstream else {
@@ -492,7 +504,10 @@ mod tests {
 
     #[test]
     fn group_matching_prefers_the_most_specific_domain() {
-        let g = Group { domains: vec!["example.com".into()], members: vec![] };
+        let g = Group {
+            domains: vec!["example.com".into()],
+            members: vec![],
+        };
         assert_eq!(g.matches("example.com"), Some("example.com".len()));
         assert_eq!(g.matches("a.example.com"), Some("example.com".len()));
         assert_eq!(g.matches("notexample.com"), None);
@@ -501,7 +516,10 @@ mod tests {
 
     #[test]
     fn the_empty_domain_matches_only_unqualified_names() {
-        let g = Group { domains: vec![String::new()], members: vec![] };
+        let g = Group {
+            domains: vec![String::new()],
+            members: vec![],
+        };
         assert!(g.matches("printer").is_some());
         assert!(g.matches("printer.lan").is_none());
     }
@@ -519,7 +537,10 @@ mod tests {
         };
 
         assert!(dummy(1_000, 0) < dummy(5_000, 0), "faster wins");
-        assert!(dummy(1_000, 3) > dummy(5_000, 0), "repeated failures demote");
+        assert!(
+            dummy(1_000, 3) > dummy(5_000, 0),
+            "repeated failures demote"
+        );
     }
 
     /// A stand-in client for scoring tests, which never performs I/O.
@@ -551,16 +572,28 @@ mod tests {
 
     #[test]
     fn ewma_moves_towards_recent_samples() {
-        let m = Member { client: unsafe_placeholder(), rtt_ewma_us: AtomicU64::new(20_000), failures: AtomicU64::new(0) };
+        let m = Member {
+            client: unsafe_placeholder(),
+            rtt_ewma_us: AtomicU64::new(20_000),
+            failures: AtomicU64::new(0),
+        };
         for _ in 0..20 {
             m.record_success(Duration::from_micros(1_000));
         }
-        assert!(m.mean_rtt() < Duration::from_micros(3_000), "got {:?}", m.mean_rtt());
+        assert!(
+            m.mean_rtt() < Duration::from_micros(3_000),
+            "got {:?}",
+            m.mean_rtt()
+        );
     }
 
     #[test]
     fn success_clears_the_failure_penalty() {
-        let m = Member { client: unsafe_placeholder(), rtt_ewma_us: AtomicU64::new(1_000), failures: AtomicU64::new(5) };
+        let m = Member {
+            client: unsafe_placeholder(),
+            rtt_ewma_us: AtomicU64::new(1_000),
+            failures: AtomicU64::new(5),
+        };
         let before = m.score();
         m.record_success(Duration::from_micros(1_000));
         assert!(m.score() < before);
@@ -572,9 +605,15 @@ mod tests {
             let up = addr::parse(s).unwrap().upstream.unwrap();
 
             Arc::new(
-                Client::connect(up, &[], Duration::from_secs(1), false, crate::client::tls_config())
-                    .await
-                    .unwrap(),
+                Client::connect(
+                    up,
+                    &[],
+                    Duration::from_secs(1),
+                    false,
+                    crate::client::tls_config(),
+                )
+                .await
+                .unwrap(),
             )
         }
 
@@ -587,7 +626,10 @@ mod tests {
             Duration::from_secs(1),
         );
 
-        assert_eq!(pool.select("a.example.com")[0].client.upstream.host, "9.9.9.9");
+        assert_eq!(
+            pool.select("a.example.com")[0].client.upstream.host,
+            "9.9.9.9"
+        );
         assert_eq!(pool.select("other.org")[0].client.upstream.host, "1.1.1.1");
     }
 

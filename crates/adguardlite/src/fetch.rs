@@ -89,23 +89,30 @@ async fn get_once(
     max_bytes: u64,
     timeout: Duration,
 ) -> Result<(StatusCode, Option<String>, Vec<u8>), Error> {
-    let uri: Uri = url.parse().map_err(|e| Error::Url(url.into(), format!("{e}")))?;
+    let uri: Uri = url
+        .parse()
+        .map_err(|e| Error::Url(url.into(), format!("{e}")))?;
     let host = uri
         .host()
         .ok_or_else(|| Error::Url(url.into(), "no host".into()))?
         .to_string();
     let scheme = uri.scheme_str().unwrap_or("https");
-    let port = uri.port_u16().unwrap_or(if scheme == "http" { 80 } else { 443 });
+    let port = uri
+        .port_u16()
+        .unwrap_or(if scheme == "http" { 80 } else { 443 });
 
     let path = uri
         .path_and_query()
         .map(|p| p.as_str().to_string())
         .unwrap_or_else(|| "/".into());
 
-    let tcp = tokio::time::timeout(timeout, tokio::net::TcpStream::connect((host.as_str(), port)))
-        .await
-        .map_err(|_| Error::Connect(host.clone(), "timed out".into()))?
-        .map_err(|e| Error::Connect(host.clone(), e.to_string()))?;
+    let tcp = tokio::time::timeout(
+        timeout,
+        tokio::net::TcpStream::connect((host.as_str(), port)),
+    )
+    .await
+    .map_err(|_| Error::Connect(host.clone(), "timed out".into()))?
+    .map_err(|e| Error::Connect(host.clone(), e.to_string()))?;
     tcp.set_nodelay(true).ok();
 
     let req = |h: &str, p: &str| {
@@ -113,7 +120,10 @@ async fn get_once(
             .method("GET")
             .uri(p)
             .header("host", h)
-            .header("user-agent", concat!("AdGuardHome/", env!("CARGO_PKG_VERSION")))
+            .header(
+                "user-agent",
+                concat!("AdGuardHome/", env!("CARGO_PKG_VERSION")),
+            )
             .header("accept", "text/plain, */*")
             .body(Empty::<bytes::Bytes>::new())
             .map_err(|e| Error::Http(e.to_string()))
@@ -230,7 +240,9 @@ fn resolve_redirect(base: &str, location: &str) -> Result<String, Error> {
         return Ok(location.to_string());
     }
 
-    let base_uri: Uri = base.parse().map_err(|e| Error::Url(base.into(), format!("{e}")))?;
+    let base_uri: Uri = base
+        .parse()
+        .map_err(|e| Error::Url(base.into(), format!("{e}")))?;
     let scheme = base_uri.scheme_str().unwrap_or("https");
     let authority = base_uri
         .authority()
@@ -332,11 +344,18 @@ mod tests {
             let (mut s, _) = listener.accept().await.unwrap();
             let mut buf = [0u8; 1024];
             let _ = s.read(&mut buf).await;
-            let _ = s.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n").await;
+            let _ = s
+                .write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n")
+                .await;
         });
 
         let url = format!("http://127.0.0.1:{}/missing.txt", addr.port());
-        let err = get(&url, 1_000_000, Duration::from_secs(5)).await.unwrap_err();
-        assert!(matches!(err, Error::Status(StatusCode::NOT_FOUND)), "got {err:?}");
+        let err = get(&url, 1_000_000, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::Status(StatusCode::NOT_FOUND)),
+            "got {err:?}"
+        );
     }
 }

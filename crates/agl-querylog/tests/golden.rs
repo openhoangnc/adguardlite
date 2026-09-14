@@ -12,13 +12,21 @@ use agl_querylog::entry::Entry;
 const GOLDEN: &str = include_str!("../../../tests/fixtures/querylog/go-entries.jsonl");
 
 fn lines() -> Vec<&'static str> {
-    GOLDEN.lines().map(str::trim).filter(|l| !l.is_empty()).collect()
+    GOLDEN
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect()
 }
 
 #[test]
 fn every_real_line_round_trips_byte_for_byte() {
     let lines = lines();
-    assert!(lines.len() >= 40, "expected a broad fixture, got {}", lines.len());
+    assert!(
+        lines.len() >= 40,
+        "expected a broad fixture, got {}",
+        lines.len()
+    );
 
     let mut failures = Vec::new();
     for (i, line) in lines.iter().enumerate() {
@@ -26,7 +34,11 @@ fn every_real_line_round_trips_byte_for_byte() {
             Ok(e) => {
                 let out = e.to_line().expect("re-encoding must succeed");
                 if out.trim_end() != *line {
-                    failures.push(format!("line {}:\n  in : {line}\n  out: {}", i + 1, out.trim_end()));
+                    failures.push(format!(
+                        "line {}:\n  in : {line}\n  out: {}",
+                        i + 1,
+                        out.trim_end()
+                    ));
                 }
             }
             Err(e) => failures.push(format!("line {}: parse failed: {e}\n  {line}", i + 1)),

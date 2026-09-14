@@ -13,17 +13,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let u = UnitDb {
         n_result: vec![0, 1200, 340, 5, 0, 7],
         domains: vec![
-            CountPair { name: "example.com".into(), count: 512 },
-            CountPair { name: "en.wikipedia.org".into(), count: 128 },
-            CountPair { name: "xn--80ak6aa92e.com".into(), count: 1 },
+            CountPair {
+                name: "example.com".into(),
+                count: 512,
+            },
+            CountPair {
+                name: "en.wikipedia.org".into(),
+                count: 128,
+            },
+            CountPair {
+                name: "xn--80ak6aa92e.com".into(),
+                count: 1,
+            },
         ],
         blocked_domains: vec![
-            CountPair { name: "doubleclick.net".into(), count: 341 },
-            CountPair { name: "ads.example.com".into(), count: 9 },
+            CountPair {
+                name: "doubleclick.net".into(),
+                count: 341,
+            },
+            CountPair {
+                name: "ads.example.com".into(),
+                count: 9,
+            },
         ],
         clients: vec![
-            CountPair { name: "192.168.1.5".into(), count: 900 },
-            CountPair { name: "2001:db8::1".into(), count: 3 },
+            CountPair {
+                name: "192.168.1.5".into(),
+                count: 900,
+            },
+            CountPair {
+                name: "2001:db8::1".into(),
+                count: 3,
+            },
         ],
         upstreams_responses: vec![CountPair {
             name: "https://dns10.quad9.net:443/dns-query".into(),

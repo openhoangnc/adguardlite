@@ -157,12 +157,18 @@ pub fn parse(line: &str) -> Result<UpstreamEntry, ParseError> {
 
     // A bare `#` means "use the default upstreams for these domains".
     if rest == "#" {
-        return Ok(UpstreamEntry { domains, upstream: None });
+        return Ok(UpstreamEntry {
+            domains,
+            upstream: None,
+        });
     }
 
     let upstream = parse_address(rest)?;
 
-    Ok(UpstreamEntry { domains, upstream: Some(upstream) })
+    Ok(UpstreamEntry {
+        domains,
+        upstream: Some(upstream),
+    })
 }
 
 /// Splits an optional `[/a.com/b.com/]` prefix from the address.
@@ -233,7 +239,13 @@ fn parse_address(s: &str) -> Result<Upstream, ParseError> {
         path
     };
 
-    Ok(Upstream { transport, host, port, path, original: s.to_string() })
+    Ok(Upstream {
+        transport,
+        host,
+        port,
+        path,
+        original: s.to_string(),
+    })
 }
 
 /// Splits `host:port`, handling bracketed IPv6 literals and bare IPv6
@@ -254,7 +266,10 @@ fn split_host_port(a: &str, default_port: u16) -> Option<(String, u16)> {
 
     // A bare IPv6 literal has more than one colon and carries no port.
     if a.matches(':').count() > 1 {
-        return a.parse::<std::net::Ipv6Addr>().ok().map(|_| (a.to_string(), default_port));
+        return a
+            .parse::<std::net::Ipv6Addr>()
+            .ok()
+            .map(|_| (a.to_string(), default_port));
     }
 
     match a.rsplit_once(':') {
@@ -383,7 +398,10 @@ mod tests {
             parse("[/example.com 1.1.1.1"),
             Err(ParseError::UnterminatedDomains(_))
         ));
-        assert!(matches!(parse("ftp://example.com"), Err(ParseError::Invalid(..))));
+        assert!(matches!(
+            parse("ftp://example.com"),
+            Err(ParseError::Invalid(..))
+        ));
     }
 
     #[test]
@@ -394,7 +412,10 @@ mod tests {
             "https://dns10.quad9.net:443/dns-query"
         );
         assert_eq!(up("9.9.9.10").label(), "9.9.9.10:53");
-        assert_eq!(up("tls://dns.adguard.com").label(), "tls://dns.adguard.com:853");
+        assert_eq!(
+            up("tls://dns.adguard.com").label(),
+            "tls://dns.adguard.com:853"
+        );
         assert_eq!(up("2620:fe::10").label(), "[2620:fe::10]:53");
     }
 

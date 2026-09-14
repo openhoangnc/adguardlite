@@ -140,7 +140,10 @@ pub struct PprofConfig {
 
 impl Default for PprofConfig {
     fn default() -> Self {
-        Self { port: 6060, enabled: false }
+        Self {
+            port: 6060,
+            enabled: false,
+        }
     }
 }
 
@@ -520,7 +523,7 @@ impl Default for StatsConfig {
 }
 
 /// A filter list as stored in the configuration file.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FilterYaml {
     /// Whether the list is applied.
@@ -531,12 +534,6 @@ pub struct FilterYaml {
     pub name: String,
     /// The list's identifier.
     pub id: i64,
-}
-
-impl Default for FilterYaml {
-    fn default() -> Self {
-        Self { enabled: false, url: String::new(), name: String::new(), id: 0 }
-    }
 }
 
 impl FilterYaml {
@@ -783,8 +780,20 @@ pub struct Schedule {
 
 impl Default for Schedule {
     fn default() -> Self {
+        // Upstream writes `Local` rather than an empty zone, and the emitted
+        // config must match.
         Self {
             time_zone: "Local".into(),
+            ..Self::empty()
+        }
+    }
+}
+
+impl Schedule {
+    /// A schedule with no day ranges and no time zone.
+    fn empty() -> Self {
+        Self {
+            time_zone: String::new(),
             mon: None,
             tue: None,
             wed: None,
@@ -856,7 +865,11 @@ pub struct Rewrite {
 
 impl Default for Rewrite {
     fn default() -> Self {
-        Self { domain: String::new(), answer: String::new(), enabled: true }
+        Self {
+            domain: String::new(),
+            answer: String::new(),
+            enabled: true,
+        }
     }
 }
 
@@ -888,7 +901,13 @@ pub struct ClientSources {
 
 impl Default for ClientSources {
     fn default() -> Self {
-        Self { whois: true, arp: true, rdns: true, dhcp: true, hosts: true }
+        Self {
+            whois: true,
+            arp: true,
+            rdns: true,
+            dhcp: true,
+            hosts: true,
+        }
     }
 }
 

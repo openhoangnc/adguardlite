@@ -157,7 +157,10 @@ impl QueryLog {
             std::fs::create_dir_all(dir)?;
         }
 
-        let file = OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         let mut w = BufWriter::new(file);
         let mut written = 0;
         for e in &batch {
@@ -340,12 +343,21 @@ mod tests {
     #[test]
     fn buffers_then_flushes_to_disk() {
         let d = tmpdir("flush");
-        let l = log(&d, Config { size_memory: 3, ..Default::default() });
+        let l = log(
+            &d,
+            Config {
+                size_memory: 3,
+                ..Default::default()
+            },
+        );
 
         l.push(entry("a.com"));
         l.push(entry("b.com"));
         assert_eq!(l.buffered(), 2);
-        assert!(!d.join("querylog.json").exists(), "should not write before the buffer fills");
+        assert!(
+            !d.join("querylog.json").exists(),
+            "should not write before the buffer fills"
+        );
 
         l.push(entry("c.com"));
         assert_eq!(l.buffered(), 0, "the buffer should have flushed");
@@ -359,7 +371,13 @@ mod tests {
     #[test]
     fn a_disabled_log_records_nothing() {
         let d = tmpdir("disabled");
-        let l = log(&d, Config { enabled: false, ..Default::default() });
+        let l = log(
+            &d,
+            Config {
+                enabled: false,
+                ..Default::default()
+            },
+        );
         assert!(!l.push(entry("a.com")));
         assert!(l.read(0, 10).is_empty());
 
@@ -369,12 +387,23 @@ mod tests {
     #[test]
     fn memory_only_mode_keeps_entries_off_disk() {
         let d = tmpdir("memonly");
-        let l = log(&d, Config { file_enabled: false, size_memory: 1, ..Default::default() });
+        let l = log(
+            &d,
+            Config {
+                file_enabled: false,
+                size_memory: 1,
+                ..Default::default()
+            },
+        );
         assert!(l.push(entry("a.com")));
         l.flush().unwrap();
 
         assert!(!d.join("querylog.json").exists());
-        assert_eq!(l.read(0, 10).len(), 1, "but it is still readable by the API");
+        assert_eq!(
+            l.read(0, 10).len(),
+            1,
+            "but it is still readable by the API"
+        );
 
         std::fs::remove_dir_all(&d).ok();
     }
@@ -392,7 +421,10 @@ mod tests {
         );
 
         assert!(!l.push(entry("ads.example.com")));
-        assert!(!l.push(entry("sub.ads.example.com")), "subdomains are covered too");
+        assert!(
+            !l.push(entry("sub.ads.example.com")),
+            "subdomains are covered too"
+        );
         assert!(l.push(entry("other.com")));
 
         std::fs::remove_dir_all(&d).ok();
@@ -403,7 +435,11 @@ mod tests {
         let d = tmpdir("root");
         let l = log(
             &d,
-            Config { ignored: vec![".".into()], ignored_enabled: true, ..Default::default() },
+            Config {
+                ignored: vec![".".into()],
+                ignored_enabled: true,
+                ..Default::default()
+            },
         );
         assert!(!l.push(entry("anything.com")));
 
@@ -429,7 +465,13 @@ mod tests {
     #[test]
     fn reads_newest_first() {
         let d = tmpdir("order");
-        let l = log(&d, Config { size_memory: 1000, ..Default::default() });
+        let l = log(
+            &d,
+            Config {
+                size_memory: 1000,
+                ..Default::default()
+            },
+        );
         for h in ["first.com", "second.com", "third.com"] {
             l.push(entry(h));
         }
@@ -444,7 +486,13 @@ mod tests {
     #[test]
     fn paging_skips_with_the_offset() {
         let d = tmpdir("paging");
-        let l = log(&d, Config { size_memory: 1000, ..Default::default() });
+        let l = log(
+            &d,
+            Config {
+                size_memory: 1000,
+                ..Default::default()
+            },
+        );
         for i in 0..10 {
             l.push(entry(&format!("h{i}.com")));
         }
@@ -459,7 +507,13 @@ mod tests {
     #[test]
     fn rotation_moves_the_current_file_aside() {
         let d = tmpdir("rotate");
-        let l = log(&d, Config { size_memory: 1, ..Default::default() });
+        let l = log(
+            &d,
+            Config {
+                size_memory: 1,
+                ..Default::default()
+            },
+        );
         l.push(entry("a.com"));
         l.rotate().unwrap();
 
@@ -472,7 +526,13 @@ mod tests {
     #[test]
     fn clearing_removes_both_files_and_the_buffer() {
         let d = tmpdir("clear");
-        let l = log(&d, Config { size_memory: 1, ..Default::default() });
+        let l = log(
+            &d,
+            Config {
+                size_memory: 1,
+                ..Default::default()
+            },
+        );
         l.push(entry("a.com"));
         l.rotate().unwrap();
         l.push(entry("b.com"));
@@ -514,7 +574,13 @@ mod tests {
     #[test]
     fn entries_written_are_readable_by_the_parser() {
         let d = tmpdir("roundtrip");
-        let l = log(&d, Config { size_memory: 1, ..Default::default() });
+        let l = log(
+            &d,
+            Config {
+                size_memory: 1,
+                ..Default::default()
+            },
+        );
         let mut e = entry("example.com");
         e.upstream = "https://dns10.quad9.net:443/dns-query".into();
         e.cached = true;

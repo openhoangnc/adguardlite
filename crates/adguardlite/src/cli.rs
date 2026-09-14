@@ -134,14 +134,23 @@ mod tests {
         ]);
 
         assert!(a.no_check_update);
-        assert_eq!(a.config.unwrap().to_str().unwrap(), "/opt/adguardhome/conf/AdGuardHome.yaml");
-        assert_eq!(a.work_dir.unwrap().to_str().unwrap(), "/opt/adguardhome/work");
+        assert_eq!(
+            a.config.unwrap().to_str().unwrap(),
+            "/opt/adguardhome/conf/AdGuardHome.yaml"
+        );
+        assert_eq!(
+            a.work_dir.unwrap().to_str().unwrap(),
+            "/opt/adguardhome/work"
+        );
     }
 
     #[test]
     fn config_defaults_into_the_work_dir() {
         let a = Args::parse_from(["AdGuardHome", "-w", "/srv/agh"]);
-        assert_eq!(a.config_or_default().to_str().unwrap(), "/srv/agh/AdGuardHome.yaml");
+        assert_eq!(
+            a.config_or_default().to_str().unwrap(),
+            "/srv/agh/AdGuardHome.yaml"
+        );
     }
 
     #[test]

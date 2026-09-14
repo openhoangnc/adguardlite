@@ -153,6 +153,15 @@ scripts/verify.sh
 It builds the Go reference from `upstream/`, starts both, and runs the config,
 DNS, API and statistics comparisons described above.
 
+## Continuous integration
+
+`.github/workflows/ci.yml` runs three jobs: formatting, lints and the test
+suite; the cross-implementation differential against a freshly cloned AdGuard
+Home; and a Docker build whose image is then started and queried.
+
 ## Licence
 
-GPL-3.0, matching AdGuard Home.
+GPL-3.0, matching AdGuard Home. This is a derivative work: it redistributes
+AdGuard's compiled web interface, their blocked-services catalogue and
+fixtures captured from a running instance. [NOTICE.md](NOTICE.md) lists what
+came from where, and how to regenerate it.

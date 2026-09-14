@@ -50,10 +50,17 @@ fn a_rule_without_modifiers_allocates_no_options() {
         panic!("expected a network rule");
     };
 
-    assert!(n.rule.opts.is_none(), "a plain rule must carry no options block");
+    assert!(
+        n.rule.opts.is_none(),
+        "a plain rule must carry no options block"
+    );
 }
 
 #[test]
 fn a_host_rule_stays_small() {
-    assert!(size_of::<HostRule>() <= 96, "HostRule grew to {}", size_of::<HostRule>());
+    assert!(
+        size_of::<HostRule>() <= 96,
+        "HostRule grew to {}",
+        size_of::<HostRule>()
+    );
 }

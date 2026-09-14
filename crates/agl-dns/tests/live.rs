@@ -80,7 +80,10 @@ async fn dns_over_https_upstream_resolves() {
 #[tokio::test]
 #[ignore = "needs network"]
 async fn bootstrap_resolves_an_encrypted_upstreams_hostname() {
-    let up = addr::parse("tls://dns.quad9.net").unwrap().upstream.unwrap();
+    let up = addr::parse("tls://dns.quad9.net")
+        .unwrap()
+        .upstream
+        .unwrap();
     let bootstrap: Vec<SocketAddr> = vec!["9.9.9.10:53".parse().unwrap()];
     let c = Client::connect(up, &bootstrap, Duration::from_secs(10), false, tls_config())
         .await

@@ -9,6 +9,12 @@ use crate::page::{
 };
 use crate::{Error, Result};
 
+/// The keys one bucket holds, in order.
+pub type BucketKeys = BTreeMap<Vec<u8>, Vec<u8>>;
+
+/// Every top-level bucket, keyed by name.
+pub type Buckets = BTreeMap<Vec<u8>, BucketKeys>;
+
 /// An open database, held in memory.
 ///
 /// The files this reads are small — AdGuard Home's statistics database is a
@@ -36,11 +42,15 @@ impl Db {
         // is at offset 0 whatever the page size is.
         let m0 = Meta::parse(&data[..data.len().min(4096)])?;
         let page_size = m0.page_size as usize;
-        if page_size < 512 || page_size > 1 << 20 || !page_size.is_power_of_two() {
+        if !(512..=1 << 20).contains(&page_size) || !page_size.is_power_of_two() {
             return Err(Error::Corrupt(format!("implausible page size {page_size}")));
         }
 
-        let db = Db { data, page_size, root: 0 };
+        let db = Db {
+            data,
+            page_size,
+            root: 0,
+        };
 
         // Both meta pages are candidates; the newer valid one wins.
         let mut best: Option<Meta> = None;
@@ -57,7 +67,10 @@ impl Db {
 
         let meta = best.ok_or_else(|| Error::Corrupt("no valid meta page".into()))?;
 
-        Ok(Db { root: meta.root, ..db })
+        Ok(Db {
+            root: meta.root,
+            ..db
+        })
     }
 
     /// The page size this file uses.
@@ -74,7 +87,9 @@ impl Db {
             .checked_add(self.page_size)
             .ok_or_else(|| Error::Corrupt("page offset overflow".into()))?;
         if end > self.data.len() {
-            return Err(Error::Corrupt(format!("page {id} is past the end of the file")));
+            return Err(Error::Corrupt(format!(
+                "page {id} is past the end of the file"
+            )));
         }
 
         Ok(&self.data[start..end])
@@ -94,7 +109,7 @@ impl Db {
     ///
     /// The returned map is keyed by bucket name; each value maps the bucket's
     /// keys to their values.
-    pub fn buckets(&self) -> Result<BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, Vec<u8>>>> {
+    pub fn buckets(&self) -> Result<Buckets> {
         let mut out = BTreeMap::new();
         let mut entries = Vec::new();
         self.walk(self.root, &mut entries)?;
@@ -113,7 +128,7 @@ impl Db {
     }
 
     /// Reads a bucket's keys from its stored header and inline data.
-    fn read_bucket(&self, value: &[u8]) -> Result<BTreeMap<Vec<u8>, Vec<u8>>> {
+    fn read_bucket(&self, value: &[u8]) -> Result<BucketKeys> {
         let hdr = BucketHeader::parse(value)?;
 
         let mut entries = Vec::new();
@@ -173,7 +188,10 @@ impl Db {
             return Ok(());
         }
 
-        Err(Error::Corrupt(format!("unexpected page flags {:#x}", h.flags)))
+        Err(Error::Corrupt(format!(
+            "unexpected page flags {:#x}",
+            h.flags
+        )))
     }
 }
 
@@ -229,6 +247,9 @@ mod tests {
             Db::from_bytes(vec![0u8; 8192]),
             Err(Error::NotBolt(_))
         ));
-        assert!(matches!(Db::from_bytes(vec![1, 2, 3]), Err(Error::NotBolt(_))));
+        assert!(matches!(
+            Db::from_bytes(vec![1, 2, 3]),
+            Err(Error::NotBolt(_))
+        ));
     }
 }

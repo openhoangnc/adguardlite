@@ -12,9 +12,9 @@
 
 use std::net::IpAddr;
 
+use agl_core::Reason;
 use ahash::{AHashMap, AHashSet};
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
-use agl_core::Reason;
 
 use crate::pattern::Target;
 use crate::rule::{DnsRewrite, HostRule, MIN_SHORTCUT_LEN, NetworkRule, Pattern, Rule, parse};
@@ -373,7 +373,8 @@ impl Builder {
         self.rules_count += 1;
 
         if r.badfilter() {
-            self.badfilter.insert(canonical_text(&r.text).into_boxed_str());
+            self.badfilter
+                .insert(canonical_text(&r.text).into_boxed_str());
         }
 
         let idx = self.net.len() as u32;
@@ -455,7 +456,10 @@ impl Engine {
         block: impl IntoIterator<Item = (i64, &'a str)>,
         allow: impl IntoIterator<Item = (i64, &'a str)>,
     ) -> Self {
-        Self { allow: RuleSet::build(allow), block: RuleSet::build(block) }
+        Self {
+            allow: RuleSet::build(allow),
+            block: RuleSet::build(block),
+        }
     }
 
     /// The total number of loaded rules.
@@ -524,7 +528,11 @@ impl Engine {
                 Reason::FilteredBlockList
             };
 
-            return MatchResult { reason, rules: vec![to_matched(r)], rewrites: Vec::new() };
+            return MatchResult {
+                reason,
+                rules: vec![to_matched(r)],
+                rewrites: Vec::new(),
+            };
         }
 
         // 4. Host rules.
@@ -558,12 +566,20 @@ impl Engine {
 
 /// Converts a network rule into its reportable form.
 fn to_matched(r: &NetworkRule) -> MatchedRule {
-    MatchedRule { text: r.text.to_string(), list_id: r.list_id, ip: None }
+    MatchedRule {
+        text: r.text.to_string(),
+        list_id: r.list_id,
+        ip: None,
+    }
 }
 
 /// Converts a host rule into its reportable form.
 fn host_matched(h: &HostRule) -> MatchedRule {
-    MatchedRule { text: h.text.clone(), list_id: h.list_id, ip: Some(h.ip) }
+    MatchedRule {
+        text: h.text.clone(),
+        list_id: h.list_id,
+        ip: Some(h.ip),
+    }
 }
 
 #[cfg(test)]
@@ -579,7 +595,11 @@ mod tests {
     }
 
     fn req<'a>(host: &'a str, qtype: u16) -> Request<'a> {
-        Request { hostname: host, qtype, ..Default::default() }
+        Request {
+            hostname: host,
+            qtype,
+            ..Default::default()
+        }
     }
 
     fn matches(e: &Engine, host: &str) -> MatchResult {
@@ -589,10 +609,22 @@ mod tests {
     #[test]
     fn blocks_via_the_domain_anchor_fast_path() {
         let e = engine("||ads.example.com^\n");
-        assert_eq!(matches(&e, "ads.example.com").reason, Reason::FilteredBlockList);
-        assert_eq!(matches(&e, "x.ads.example.com").reason, Reason::FilteredBlockList);
-        assert_eq!(matches(&e, "example.com").reason, Reason::NotFilteredNotFound);
-        assert_eq!(matches(&e, "notads.example.com").reason, Reason::NotFilteredNotFound);
+        assert_eq!(
+            matches(&e, "ads.example.com").reason,
+            Reason::FilteredBlockList
+        );
+        assert_eq!(
+            matches(&e, "x.ads.example.com").reason,
+            Reason::FilteredBlockList
+        );
+        assert_eq!(
+            matches(&e, "example.com").reason,
+            Reason::NotFilteredNotFound
+        );
+        assert_eq!(
+            matches(&e, "notads.example.com").reason,
+            Reason::NotFilteredNotFound
+        );
     }
 
     #[test]
@@ -603,7 +635,10 @@ mod tests {
         assert_eq!(r.rules[0].ip, Some("0.0.0.0".parse().unwrap()));
 
         // Hosts rules are exact: subdomains are not covered.
-        assert_eq!(matches(&e, "x.ads.example.com").reason, Reason::NotFilteredNotFound);
+        assert_eq!(
+            matches(&e, "x.ads.example.com").reason,
+            Reason::NotFilteredNotFound
+        );
     }
 
     #[test]
@@ -621,8 +656,14 @@ mod tests {
     #[test]
     fn exception_rules_beat_blocking_rules() {
         let e = engine("||example.com^\n@@||good.example.com^\n");
-        assert_eq!(matches(&e, "bad.example.com").reason, Reason::FilteredBlockList);
-        assert_eq!(matches(&e, "good.example.com").reason, Reason::NotFilteredAllowList);
+        assert_eq!(
+            matches(&e, "bad.example.com").reason,
+            Reason::FilteredBlockList
+        );
+        assert_eq!(
+            matches(&e, "good.example.com").reason,
+            Reason::NotFilteredAllowList
+        );
     }
 
     #[test]
@@ -634,7 +675,10 @@ mod tests {
     #[test]
     fn important_exception_beats_important_block() {
         let e = engine("||example.com^$important\n@@||example.com^$important\n");
-        assert_eq!(matches(&e, "example.com").reason, Reason::NotFilteredAllowList);
+        assert_eq!(
+            matches(&e, "example.com").reason,
+            Reason::NotFilteredAllowList
+        );
     }
 
     #[test]
@@ -648,22 +692,40 @@ mod tests {
     #[test]
     fn badfilter_cancels_the_matching_rule() {
         let e = engine("||example.com^\n||example.com^$badfilter\n");
-        assert_eq!(matches(&e, "example.com").reason, Reason::NotFilteredNotFound);
+        assert_eq!(
+            matches(&e, "example.com").reason,
+            Reason::NotFilteredNotFound
+        );
     }
 
     #[test]
     fn dnstype_restricts_the_rule() {
         let e = engine("||example.com^$dnstype=AAAA\n");
-        assert_eq!(e.match_request(&req("example.com", AAAA)).reason, Reason::FilteredBlockList);
-        assert_eq!(e.match_request(&req("example.com", A)).reason, Reason::NotFilteredNotFound);
-        assert_eq!(e.match_request(&req("example.com", TXT)).reason, Reason::NotFilteredNotFound);
+        assert_eq!(
+            e.match_request(&req("example.com", AAAA)).reason,
+            Reason::FilteredBlockList
+        );
+        assert_eq!(
+            e.match_request(&req("example.com", A)).reason,
+            Reason::NotFilteredNotFound
+        );
+        assert_eq!(
+            e.match_request(&req("example.com", TXT)).reason,
+            Reason::NotFilteredNotFound
+        );
     }
 
     #[test]
     fn denyallow_exempts_listed_domains() {
         let e = engine("||example.com^$denyallow=good.example.com\n");
-        assert_eq!(matches(&e, "bad.example.com").reason, Reason::FilteredBlockList);
-        assert_eq!(matches(&e, "good.example.com").reason, Reason::NotFilteredNotFound);
+        assert_eq!(
+            matches(&e, "bad.example.com").reason,
+            Reason::FilteredBlockList
+        );
+        assert_eq!(
+            matches(&e, "good.example.com").reason,
+            Reason::NotFilteredNotFound
+        );
     }
 
     #[test]
@@ -683,11 +745,21 @@ mod tests {
     fn ctag_modifier_restricts_by_tag() {
         let e = engine("||example.com^$ctag=device_phone\n");
         let tags = vec!["device_phone".to_string()];
-        let r = Request { hostname: "example.com", qtype: A, client_tags: &tags, ..Default::default() };
+        let r = Request {
+            hostname: "example.com",
+            qtype: A,
+            client_tags: &tags,
+            ..Default::default()
+        };
         assert_eq!(e.match_request(&r).reason, Reason::FilteredBlockList);
 
         let other = vec!["device_pc".to_string()];
-        let r = Request { hostname: "example.com", qtype: A, client_tags: &other, ..Default::default() };
+        let r = Request {
+            hostname: "example.com",
+            qtype: A,
+            client_tags: &other,
+            ..Default::default()
+        };
         assert_eq!(e.match_request(&r).reason, Reason::NotFilteredNotFound);
     }
 
@@ -696,16 +768,28 @@ mod tests {
         let e = engine("||example.com^$dnsrewrite=1.2.3.4\n");
         let r = matches(&e, "example.com");
         assert_eq!(r.reason, Reason::RewrittenRule);
-        assert_eq!(r.rewrites, vec![DnsRewrite::Addr("1.2.3.4".parse().unwrap())]);
+        assert_eq!(
+            r.rewrites,
+            vec![DnsRewrite::Addr("1.2.3.4".parse().unwrap())]
+        );
     }
 
     #[test]
     fn regex_rules_match_against_the_hostname() {
         // For DNS, a `/regex/` pattern is applied to the bare hostname.
         let e = engine("/^ads[0-9]+\\./\n");
-        assert_eq!(matches(&e, "ads123.example.com").reason, Reason::FilteredBlockList);
-        assert_eq!(matches(&e, "example.com").reason, Reason::NotFilteredNotFound);
-        assert_eq!(matches(&e, "x.ads123.example.com").reason, Reason::NotFilteredNotFound);
+        assert_eq!(
+            matches(&e, "ads123.example.com").reason,
+            Reason::FilteredBlockList
+        );
+        assert_eq!(
+            matches(&e, "example.com").reason,
+            Reason::NotFilteredNotFound
+        );
+        assert_eq!(
+            matches(&e, "x.ads123.example.com").reason,
+            Reason::NotFilteredNotFound
+        );
     }
 
     #[test]
@@ -713,15 +797,27 @@ mod tests {
         // The case the Go differential test caught: `|foo.` anchors to the
         // hostname start, not to `http://`.
         let e = engine("|load.gtm.\n");
-        assert_eq!(matches(&e, "load.gtm.example.co.uk").reason, Reason::FilteredBlockList);
-        assert_eq!(matches(&e, "x.load.gtm.example.co.uk").reason, Reason::NotFilteredNotFound);
+        assert_eq!(
+            matches(&e, "load.gtm.example.co.uk").reason,
+            Reason::FilteredBlockList
+        );
+        assert_eq!(
+            matches(&e, "x.load.gtm.example.co.uk").reason,
+            Reason::NotFilteredNotFound
+        );
     }
 
     #[test]
     fn wildcard_text_rules_match() {
         let e = engine("||ad*.example.com^\n");
-        assert_eq!(matches(&e, "ads.example.com").reason, Reason::FilteredBlockList);
-        assert_eq!(matches(&e, "news.example.com").reason, Reason::NotFilteredNotFound);
+        assert_eq!(
+            matches(&e, "ads.example.com").reason,
+            Reason::FilteredBlockList
+        );
+        assert_eq!(
+            matches(&e, "news.example.com").reason,
+            Reason::NotFilteredNotFound
+        );
     }
 
     #[test]
@@ -734,6 +830,9 @@ mod tests {
     fn empty_engine_matches_nothing() {
         let e = Engine::default();
         assert!(e.is_empty());
-        assert_eq!(matches(&e, "example.com").reason, Reason::NotFilteredNotFound);
+        assert_eq!(
+            matches(&e, "example.com").reason,
+            Reason::NotFilteredNotFound
+        );
     }
 }

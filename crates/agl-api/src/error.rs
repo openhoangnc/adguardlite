@@ -18,27 +18,42 @@ pub struct ApiError {
 impl ApiError {
     /// A 400 with a message.
     pub fn bad_request(m: impl Into<String>) -> Self {
-        Self { status: StatusCode::BAD_REQUEST, message: m.into() }
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            message: m.into(),
+        }
     }
 
     /// A 401.
     pub fn unauthorized(m: impl Into<String>) -> Self {
-        Self { status: StatusCode::UNAUTHORIZED, message: m.into() }
+        Self {
+            status: StatusCode::UNAUTHORIZED,
+            message: m.into(),
+        }
     }
 
     /// A 403.
     pub fn forbidden(m: impl Into<String>) -> Self {
-        Self { status: StatusCode::FORBIDDEN, message: m.into() }
+        Self {
+            status: StatusCode::FORBIDDEN,
+            message: m.into(),
+        }
     }
 
     /// A 404.
     pub fn not_found(m: impl Into<String>) -> Self {
-        Self { status: StatusCode::NOT_FOUND, message: m.into() }
+        Self {
+            status: StatusCode::NOT_FOUND,
+            message: m.into(),
+        }
     }
 
     /// A 500.
     pub fn internal(m: impl Into<String>) -> Self {
-        Self { status: StatusCode::INTERNAL_SERVER_ERROR, message: m.into() }
+        Self {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: m.into(),
+        }
     }
 }
 

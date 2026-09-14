@@ -1,0 +1,6 @@
+# Pinned so a fresh checkout fails with a clear message rather than a wall of
+# errors about unstable syntax.  The code uses edition 2024, let-chains,
+# `Option::is_none_or` and `u64::is_multiple_of`.
+[toolchain]
+channel = "1.98"
+components = ["rustfmt", "clippy"]

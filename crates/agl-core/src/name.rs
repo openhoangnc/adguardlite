@@ -19,7 +19,10 @@ pub fn suffixes(host: &str) -> impl Iterator<Item = &str> {
     let mut cur = Some(host);
     std::iter::from_fn(move || {
         let c = cur?;
-        cur = c.split_once('.').map(|(_, rest)| rest).filter(|r| !r.is_empty());
+        cur = c
+            .split_once('.')
+            .map(|(_, rest)| rest)
+            .filter(|r| !r.is_empty());
 
         Some(c)
     })
@@ -107,7 +110,10 @@ mod tests {
     #[test]
     fn enumerates_parent_domains() {
         let got: Vec<_> = suffixes("a.b.example.com").collect();
-        assert_eq!(got, ["a.b.example.com", "b.example.com", "example.com", "com"]);
+        assert_eq!(
+            got,
+            ["a.b.example.com", "b.example.com", "example.com", "com"]
+        );
         assert_eq!(suffixes("com").collect::<Vec<_>>(), ["com"]);
     }
 

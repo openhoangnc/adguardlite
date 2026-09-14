@@ -187,7 +187,10 @@ fn to_json(e: &Entry) -> LogEntryJson {
             .result
             .rules
             .iter()
-            .map(|r| RuleJson { filter_list_id: r.filter_list_id, text: r.text.clone() })
+            .map(|r| RuleJson {
+                filter_list_id: r.filter_list_id,
+                text: r.text.clone(),
+            })
             .collect(),
         status,
         time: e.time.clone(),
@@ -369,7 +372,9 @@ fn apply_querylog_config(s: &Shared) {
 
 /// `POST /control/querylog_clear`
 pub async fn querylog_clear(State(s): State<Shared>) -> ApiResult<()> {
-    s.querylog.clear().map_err(|e| ApiError::internal(e.to_string()))
+    s.querylog
+        .clear()
+        .map_err(|e| ApiError::internal(e.to_string()))
 }
 
 /// `GET /control/stats`
@@ -492,7 +497,11 @@ mod tests {
             question_class: "IN".into(),
             ip: "192.168.1.5".into(),
             elapsed: 1_500_000,
-            result: EntryResult { reason, is_filtered: reason.is_filtered(), ..Default::default() },
+            result: EntryResult {
+                reason,
+                is_filtered: reason.is_filtered(),
+                ..Default::default()
+            },
             ..Default::default()
         }
     }
@@ -504,7 +513,10 @@ mod tests {
         assert!(matches_search(&e, Some("192.168")));
         assert!(!matches_search(&e, Some("nothing")));
         assert!(matches_search(&e, None), "no term matches everything");
-        assert!(matches_search(&e, Some("")), "an empty term matches everything");
+        assert!(
+            matches_search(&e, Some("")),
+            "an empty term matches everything"
+        );
     }
 
     #[test]

@@ -132,11 +132,18 @@ pub async fn add_url(State(s): State<Shared>, Json(req): Json<AddUrlReq>) -> Api
             .chain(&filters.allowlists)
             .any(|l| l.url == req.url)
         {
-            return Err(ApiError::bad_request("a filter with this url already exists"));
+            return Err(ApiError::bad_request(
+                "a filter with this url already exists",
+            ));
         }
 
         let id = filters.next_id();
-        let cfg = FilterYaml { enabled: true, url: req.url.clone(), name: req.name.clone(), id };
+        let cfg = FilterYaml {
+            enabled: true,
+            url: req.url.clone(),
+            name: req.name.clone(),
+            id,
+        };
         let list = agl_filter::lists::List::from_config(&cfg, req.whitelist);
         if req.whitelist {
             filters.allowlists.push(list);
@@ -349,7 +356,10 @@ pub async fn check_host(
     let rules: Vec<CheckHostRule> = m
         .rules
         .iter()
-        .map(|r| CheckHostRule { text: r.text.clone(), filter_list_id: r.list_id })
+        .map(|r| CheckHostRule {
+            text: r.text.clone(),
+            filter_list_id: r.list_id,
+        })
         .collect();
 
     let (rule, filter_id) = m
@@ -413,10 +423,7 @@ pub async fn rewrite_list(State(s): State<Shared>) -> Json<Vec<RewriteJson>> {
 }
 
 /// `POST /control/rewrite/add`
-pub async fn rewrite_add(
-    State(s): State<Shared>,
-    Json(req): Json<RewriteJson>,
-) -> ApiResult<()> {
+pub async fn rewrite_add(State(s): State<Shared>, Json(req): Json<RewriteJson>) -> ApiResult<()> {
     if req.domain.trim().is_empty() || req.answer.trim().is_empty() {
         return Err(ApiError::bad_request("both domain and answer are required"));
     }

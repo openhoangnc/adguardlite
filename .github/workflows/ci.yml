@@ -1,0 +1,136 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Keep CI logs readable and builds reproducible.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    name: Format, lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # rust-toolchain.toml pins the version; this action honours it.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Formatting
+        run: cargo fmt --all --check
+
+      - name: Lints
+        run: cargo clippy --workspace --all-targets
+
+      # The suite needs no network and no Go build: every compatibility check
+      # it runs is against fixtures captured from a real AdGuard Home.
+      - name: Tests
+        run: cargo test --workspace --locked
+
+      - name: Release build
+        run: cargo build --release --locked -p adguardlite
+
+  compatibility:
+    name: Differential against AdGuard Home
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: false
+
+      - name: Fetch the reference implementation
+        run: |
+          git clone --depth 1 --branch v0.107.79 \
+            https://github.com/AdguardTeam/AdGuardHome.git upstream
+
+      # Starts both servers on the same config and compares their config
+      # output, DNS answers, HTTP API and statistics database.
+      - name: Run the compatibility suite
+        run: scripts/verify.sh
+
+      - name: Logs on failure
+        if: failure()
+        run: |
+          for f in "${TMPDIR:-/tmp}"/adguardlite-verify/*.log; do
+            [ -e "$f" ] || continue
+            echo "::group::$f"
+            tail -100 "$f"
+            echo "::endgroup::"
+          done
+
+  docker:
+    name: Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          push: false
+          load: true
+          tags: adguardlite:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # The image is only useful if it starts and answers, so check that
+      # rather than just that it builds.
+      - name: Smoke test
+        run: |
+          set -eu
+          mkdir -p work conf
+          # A custom rule rather than a list file: it needs no download and no
+          # matching `filters:` entry to be loaded.
+          cat > conf/AdGuardHome.yaml <<'EOF'
+          http:
+            address: 0.0.0.0:3000
+          users:
+            - name: ci
+              password: $2a$10$yM2G0G0bbDkstqZFACqR.eZaAUfNTyCueDK0M8yiR5vfue1okoXmO
+          dns:
+            bind_hosts:
+              - 0.0.0.0
+            port: 53
+          filters: []
+          user_rules:
+            - '||blocked.example.com^'
+          schema_version: 34
+          EOF
+
+          docker run -d --name agl \
+            -v "$PWD/work:/opt/adguardhome/work" \
+            -v "$PWD/conf:/opt/adguardhome/conf" \
+            -p 15353:53/udp -p 3000:3000/tcp \
+            adguardlite:ci
+          sleep 8
+          docker logs agl
+
+          # The web interface must serve, and the API must answer.
+          curl -fsS -o /dev/null http://127.0.0.1:3000/
+          curl -fsS -u ci:verify123 http://127.0.0.1:3000/control/status
+
+          # And a blocked name must resolve to the null address.
+          sudo apt-get install -y --no-install-recommends dnsutils >/dev/null
+          got="$(dig @127.0.0.1 -p 15353 blocked.example.com A +short +timeout=5 | head -1)"
+          echo "blocked.example.com -> ${got:-<no answer>}"
+          [ "$got" = "0.0.0.0" ] || { docker logs agl; exit 1; }

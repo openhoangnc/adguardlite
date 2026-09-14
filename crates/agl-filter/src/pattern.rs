@@ -49,10 +49,13 @@ pub fn target_for(pattern: &str) -> Target {
     // Upstream treats a pattern that both starts with `/` and ends with `.`
     // as URL-specific; everything else matches the hostname.
     let b = pattern.as_bytes();
-    let url_specific =
-        b.len() >= MIN_PATTERN_LEN && b[0] == b'/' && b[b.len() - 1] == b'.';
+    let url_specific = b.len() >= MIN_PATTERN_LEN && b[0] == b'/' && b[b.len() - 1] == b'.';
 
-    if url_specific { Target::Url } else { Target::Hostname }
+    if url_specific {
+        Target::Url
+    } else {
+        Target::Hostname
+    }
 }
 
 /// Reports whether `p` is a `/regex/` pattern.
@@ -93,8 +96,10 @@ pub fn to_regex(pattern: &str) -> String {
 fn escape_special_chars(p: &str) -> String {
     let mut out = String::with_capacity(p.len() + 8);
     for c in p.chars() {
-        if matches!(c, '.' | '+' | '?' | '$' | '{' | '}' | '(' | ')' | '[' | ']' | '/' | '\\')
-        {
+        if matches!(
+            c,
+            '.' | '+' | '?' | '$' | '{' | '}' | '(' | ')' | '[' | ']' | '/' | '\\'
+        ) {
             out.push('\\');
         }
         out.push(c);
@@ -280,8 +285,14 @@ mod tests {
 
     #[test]
     fn extracts_shortcuts() {
-        assert_eq!(shortcut("||example.org^", 3).as_deref(), Some("example.org"));
-        assert_eq!(shortcut("ad*.example.com^", 3).as_deref(), Some(".example.com"));
+        assert_eq!(
+            shortcut("||example.org^", 3).as_deref(),
+            Some("example.org")
+        );
+        assert_eq!(
+            shortcut("ad*.example.com^", 3).as_deref(),
+            Some(".example.com")
+        );
         assert_eq!(shortcut("|a|", 3), None);
     }
 
@@ -297,7 +308,10 @@ mod tests {
             "||example.org^$",
         ] {
             let rx = to_regex(p);
-            assert!(Regex::new(&rx).is_ok(), "{p:?} produced invalid regex {rx:?}");
+            assert!(
+                Regex::new(&rx).is_ok(),
+                "{p:?} produced invalid regex {rx:?}"
+            );
         }
     }
 }

@@ -159,7 +159,13 @@ pub struct Resolver {
 
 impl Resolver {
     /// Builds a resolver.
-    pub fn new(engine: Engine, rewrites: Table, cache: Cache, pool: SharedPool, settings: Settings) -> Self {
+    pub fn new(
+        engine: Engine,
+        rewrites: Table,
+        cache: Cache,
+        pool: SharedPool,
+        settings: Settings,
+    ) -> Self {
         Self {
             engine: RwLock::new(Arc::new(engine)),
             rewrites: RwLock::new(Arc::new(rewrites)),
@@ -225,7 +231,11 @@ impl Resolver {
 
         let q = &req.queries[0];
         let qtype = q.query_type();
-        let host = q.name().to_ascii().trim_end_matches('.').to_ascii_lowercase();
+        let host = q
+            .name()
+            .to_ascii()
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
 
         // 2. `ANY` queries are refused as an amplification guard.
         if settings.refuse_any && qtype == RecordType::ANY {
@@ -320,7 +330,14 @@ impl Resolver {
             let resp = msg::nodata(req, settings.blocking.ttl);
             let (reason, rules) = allowed.clone().unwrap_or_default();
 
-            return done(Action::Respond(Box::new(resp)), reason, rules, None, false, None);
+            return done(
+                Action::Respond(Box::new(resp)),
+                reason,
+                rules,
+                None,
+                false,
+                None,
+            );
         }
 
         // 7. Cache.
@@ -332,7 +349,14 @@ impl Resolver {
             if freshness == Freshness::Fresh {
                 let (reason, rules) = allowed.clone().unwrap_or_default();
 
-                return done(Action::Respond(Box::new(cached)), reason, rules, None, true, None);
+                return done(
+                    Action::Respond(Box::new(cached)),
+                    reason,
+                    rules,
+                    None,
+                    true,
+                    None,
+                );
             }
         }
 
@@ -347,10 +371,20 @@ impl Resolver {
                     self.cache.put(k, &resp);
                 }
 
-                let upstream = pool.select(&host).first().map(|m| m.client.upstream.label());
+                let upstream = pool
+                    .select(&host)
+                    .first()
+                    .map(|m| m.client.upstream.label());
                 let (reason, rules) = allowed.unwrap_or_default();
 
-                done(Action::Respond(Box::new(resp)), reason, rules, upstream, false, None)
+                done(
+                    Action::Respond(Box::new(resp)),
+                    reason,
+                    rules,
+                    upstream,
+                    false,
+                    None,
+                )
             }
             Err(_) => {
                 let (reason, rules) = allowed.unwrap_or_default();
@@ -530,17 +564,25 @@ mod tests {
     }
 
     async fn resolve(r: &Resolver, name: &str, qt: RecordType, proto: Proto) -> Outcome {
-        r.resolve(&request(name, qt), proto, &ClientInfo::default()).await
+        r.resolve(&request(name, qt), proto, &ClientInfo::default())
+            .await
     }
 
     #[tokio::test]
     async fn blocks_a_filtered_host_with_a_null_address() {
-        let r = resolver("||ads.example.com^\n", Table::default(), Settings::default());
+        let r = resolver(
+            "||ads.example.com^\n",
+            Table::default(),
+            Settings::default(),
+        );
         let out = resolve(&r, "ads.example.com.", RecordType::A, Proto::Udp).await;
         assert_eq!(out.reason, Reason::FilteredBlockList);
         let resp = out.response().unwrap();
         assert_eq!(resp.metadata.response_code, ResponseCode::NoError);
-        assert_eq!(answer_addrs(resp), vec!["0.0.0.0".parse::<IpAddr>().unwrap()]);
+        assert_eq!(
+            answer_addrs(resp),
+            vec!["0.0.0.0".parse::<IpAddr>().unwrap()]
+        );
         assert_eq!(out.rules.len(), 1);
     }
 
@@ -550,7 +592,10 @@ mod tests {
         let mut req = Message::query();
         req.metadata.id = 7;
         let out = r.resolve(&req, Proto::Udp, &ClientInfo::default()).await;
-        assert_eq!(out.response().unwrap().metadata.response_code, ResponseCode::FormErr);
+        assert_eq!(
+            out.response().unwrap().metadata.response_code,
+            ResponseCode::FormErr
+        );
         assert_eq!(out.reason, Reason::FilteredInvalid);
     }
 
@@ -558,13 +603,22 @@ mod tests {
     async fn any_queries_are_refused_when_configured() {
         let r = resolver("", Table::default(), Settings::default());
         let out = resolve(&r, "example.com.", RecordType::ANY, Proto::Udp).await;
-        assert_eq!(out.response().unwrap().metadata.response_code, ResponseCode::NotImp);
+        assert_eq!(
+            out.response().unwrap().metadata.response_code,
+            ResponseCode::NotImp
+        );
 
-        let s = Settings { refuse_any: false, ..Default::default() };
+        let s = Settings {
+            refuse_any: false,
+            ..Default::default()
+        };
         let r = resolver("", Table::default(), s);
         let out = resolve(&r, "example.com.", RecordType::ANY, Proto::Udp).await;
         // Falls through to the upstream step, which has no upstreams.
-        assert_eq!(out.response().unwrap().metadata.response_code, ResponseCode::ServFail);
+        assert_eq!(
+            out.response().unwrap().metadata.response_code,
+            ResponseCode::ServFail
+        );
     }
 
     #[tokio::test]
@@ -572,10 +626,16 @@ mod tests {
         let r = resolver("", Table::default(), Settings::default());
 
         let out = resolve(&r, "version.bind.", RecordType::TXT, Proto::Udp).await;
-        assert!(matches!(out.action, Action::Drop), "UDP must not be answered");
+        assert!(
+            matches!(out.action, Action::Drop),
+            "UDP must not be answered"
+        );
 
         let out = resolve(&r, "version.bind.", RecordType::TXT, Proto::Tcp).await;
-        assert_eq!(out.response().unwrap().metadata.response_code, ResponseCode::Refused);
+        assert_eq!(
+            out.response().unwrap().metadata.response_code,
+            ResponseCode::Refused
+        );
     }
 
     #[tokio::test]
@@ -593,7 +653,10 @@ mod tests {
     #[tokio::test]
     async fn rewrites_apply_even_with_protection_off() {
         let t = Table::build([("nas.lan", "192.168.1.5", true)]);
-        let s = Settings { protection_enabled: false, ..Default::default() };
+        let s = Settings {
+            protection_enabled: false,
+            ..Default::default()
+        };
         let r = resolver("", t, s);
         let out = resolve(&r, "nas.lan.", RecordType::A, Proto::Udp).await;
         assert_eq!(out.reason, Reason::Rewritten);
@@ -601,7 +664,10 @@ mod tests {
 
     #[tokio::test]
     async fn protection_off_disables_blocking() {
-        let s = Settings { protection_enabled: false, ..Default::default() };
+        let s = Settings {
+            protection_enabled: false,
+            ..Default::default()
+        };
         let r = resolver("||ads.example.com^\n", Table::default(), s);
         let out = resolve(&r, "ads.example.com.", RecordType::A, Proto::Udp).await;
         assert_ne!(out.reason, Reason::FilteredBlockList);
@@ -609,17 +675,28 @@ mod tests {
 
     #[tokio::test]
     async fn allowlisted_hosts_are_resolved_not_blocked() {
-        let r = resolver("||example.com^\n@@||good.example.com^\n", Table::default(), Settings::default());
+        let r = resolver(
+            "||example.com^\n@@||good.example.com^\n",
+            Table::default(),
+            Settings::default(),
+        );
         let out = resolve(&r, "good.example.com.", RecordType::A, Proto::Udp).await;
         // No upstream is configured, so it reaches SERVFAIL rather than being blocked.
-        assert_eq!(out.response().unwrap().metadata.response_code, ResponseCode::ServFail);
+        assert_eq!(
+            out.response().unwrap().metadata.response_code,
+            ResponseCode::ServFail
+        );
     }
 
     #[tokio::test]
     async fn an_allowlist_match_stays_the_recorded_verdict() {
         // Upstream writes the `@@` rule and reason 1 into the query log even
         // though the query is then resolved normally, and the UI relies on it.
-        let r = resolver("||example.com^\n@@||good.example.com^\n", Table::default(), Settings::default());
+        let r = resolver(
+            "||example.com^\n@@||good.example.com^\n",
+            Table::default(),
+            Settings::default(),
+        );
         let out = resolve(&r, "good.example.com.", RecordType::A, Proto::Udp).await;
 
         assert_eq!(out.reason, Reason::NotFilteredAllowList);
@@ -637,7 +714,10 @@ mod tests {
 
     #[tokio::test]
     async fn aaaa_can_be_suppressed() {
-        let s = Settings { aaaa_disabled: true, ..Default::default() };
+        let s = Settings {
+            aaaa_disabled: true,
+            ..Default::default()
+        };
         let r = resolver("", Table::default(), s);
         let out = resolve(&r, "example.com.", RecordType::AAAA, Proto::Udp).await;
         let resp = out.response().unwrap();
@@ -647,22 +727,40 @@ mod tests {
 
     #[tokio::test]
     async fn dnsrewrite_rules_synthesise_answers() {
-        let r = resolver("||a.example.com^$dnsrewrite=1.2.3.4\n", Table::default(), Settings::default());
+        let r = resolver(
+            "||a.example.com^$dnsrewrite=1.2.3.4\n",
+            Table::default(),
+            Settings::default(),
+        );
         let out = resolve(&r, "a.example.com.", RecordType::A, Proto::Udp).await;
         assert_eq!(out.reason, Reason::RewrittenRule);
-        assert_eq!(answer_addrs(out.response().unwrap()), vec!["1.2.3.4".parse::<IpAddr>().unwrap()]);
+        assert_eq!(
+            answer_addrs(out.response().unwrap()),
+            vec!["1.2.3.4".parse::<IpAddr>().unwrap()]
+        );
     }
 
     #[tokio::test]
     async fn dnsrewrite_can_force_a_response_code() {
-        let r = resolver("||a.example.com^$dnsrewrite=REFUSED\n", Table::default(), Settings::default());
+        let r = resolver(
+            "||a.example.com^$dnsrewrite=REFUSED\n",
+            Table::default(),
+            Settings::default(),
+        );
         let out = resolve(&r, "a.example.com.", RecordType::A, Proto::Udp).await;
-        assert_eq!(out.response().unwrap().metadata.response_code, ResponseCode::Refused);
+        assert_eq!(
+            out.response().unwrap().metadata.response_code,
+            ResponseCode::Refused
+        );
     }
 
     #[tokio::test]
     async fn hosts_rules_answer_with_their_own_address() {
-        let r = resolver("192.168.1.7 printer.lan\n", Table::default(), Settings::default());
+        let r = resolver(
+            "192.168.1.7 printer.lan\n",
+            Table::default(),
+            Settings::default(),
+        );
         let out = resolve(&r, "printer.lan.", RecordType::A, Proto::Udp).await;
         assert_eq!(out.reason, Reason::FilteredBlockList);
         assert_eq!(

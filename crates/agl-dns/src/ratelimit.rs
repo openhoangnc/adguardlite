@@ -57,7 +57,10 @@ const SWEEP_AT: usize = 16_384;
 impl Limiter {
     /// Builds a limiter.
     pub fn new(cfg: Config) -> Self {
-        Self { cfg, buckets: Mutex::new(AHashMap::new()) }
+        Self {
+            cfg,
+            buckets: Mutex::new(AHashMap::new()),
+        }
     }
 
     /// Reports whether limiting is switched off.
@@ -80,7 +83,10 @@ impl Limiter {
             map.retain(|_, b| now.duration_since(b.last) < IDLE_TTL);
         }
 
-        let b = map.entry(key).or_insert(Bucket { tokens: cap, last: now });
+        let b = map.entry(key).or_insert(Bucket {
+            tokens: cap,
+            last: now,
+        });
 
         // Refill for the time that has passed, then spend one token.
         let elapsed = now.duration_since(b.last).as_secs_f64();
@@ -114,7 +120,9 @@ fn subnet_key(ip: IpAddr, v4: u8, v6: u8) -> IpAddr {
             let bits = v4.min(32);
             let masked = mask_bytes(&a.octets(), bits);
 
-            IpAddr::V4(std::net::Ipv4Addr::from(<[u8; 4]>::try_from(&masked[..]).unwrap_or([0; 4])))
+            IpAddr::V4(std::net::Ipv4Addr::from(
+                <[u8; 4]>::try_from(&masked[..]).unwrap_or([0; 4]),
+            ))
         }
         IpAddr::V6(a) => {
             let bits = v6.min(128);
@@ -153,18 +161,27 @@ mod tests {
 
     #[test]
     fn allows_up_to_the_limit_then_blocks() {
-        let l = Limiter::new(Config { per_second: 5, ..Default::default() });
+        let l = Limiter::new(Config {
+            per_second: 5,
+            ..Default::default()
+        });
         let ip: IpAddr = "192.168.1.10".parse().unwrap();
 
         for i in 0..5 {
             assert!(l.allow(ip), "query {i} should be allowed");
         }
-        assert!(!l.allow(ip), "the sixth query in the same instant should be limited");
+        assert!(
+            !l.allow(ip),
+            "the sixth query in the same instant should be limited"
+        );
     }
 
     #[test]
     fn a_zero_limit_disables_limiting() {
-        let l = Limiter::new(Config { per_second: 0, ..Default::default() });
+        let l = Limiter::new(Config {
+            per_second: 0,
+            ..Default::default()
+        });
         let ip: IpAddr = "192.168.1.10".parse().unwrap();
         for _ in 0..1000 {
             assert!(l.allow(ip));
@@ -173,10 +190,17 @@ mod tests {
 
     #[test]
     fn clients_in_the_same_subnet_share_a_bucket() {
-        let l = Limiter::new(Config { per_second: 2, subnet_len_v4: 24, ..Default::default() });
+        let l = Limiter::new(Config {
+            per_second: 2,
+            subnet_len_v4: 24,
+            ..Default::default()
+        });
         assert!(l.allow("192.168.1.1".parse().unwrap()));
         assert!(l.allow("192.168.1.2".parse().unwrap()));
-        assert!(!l.allow("192.168.1.3".parse().unwrap()), "same /24 shares the budget");
+        assert!(
+            !l.allow("192.168.1.3".parse().unwrap()),
+            "same /24 shares the budget"
+        );
 
         // A different /24 has its own budget.
         assert!(l.allow("192.168.2.1".parse().unwrap()));
@@ -185,16 +209,27 @@ mod tests {
 
     #[test]
     fn ipv6_clients_are_grouped_by_prefix() {
-        let l = Limiter::new(Config { per_second: 1, subnet_len_v6: 56, ..Default::default() });
+        let l = Limiter::new(Config {
+            per_second: 1,
+            subnet_len_v6: 56,
+            ..Default::default()
+        });
         assert!(l.allow("2001:db8:0:0::1".parse().unwrap()));
         assert!(!l.allow("2001:db8:0:0::2".parse().unwrap()), "same /56");
-        assert!(l.allow("2001:db8:0:ff00::1".parse().unwrap()), "different /56");
+        assert!(
+            l.allow("2001:db8:0:ff00::1".parse().unwrap()),
+            "different /56"
+        );
     }
 
     #[test]
     fn the_allowlist_is_exempt() {
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
-        let l = Limiter::new(Config { per_second: 1, allowlist: vec![ip], ..Default::default() });
+        let l = Limiter::new(Config {
+            per_second: 1,
+            allowlist: vec![ip],
+            ..Default::default()
+        });
         for _ in 0..100 {
             assert!(l.allow(ip));
         }
@@ -202,7 +237,10 @@ mod tests {
 
     #[test]
     fn tokens_refill_over_time() {
-        let l = Limiter::new(Config { per_second: 10, ..Default::default() });
+        let l = Limiter::new(Config {
+            per_second: 10,
+            ..Default::default()
+        });
         let ip: IpAddr = "192.168.1.10".parse().unwrap();
         for _ in 0..10 {
             assert!(l.allow(ip));
@@ -217,7 +255,10 @@ mod tests {
                 b.last = Instant::now() - Duration::from_secs(1);
             }
         }
-        assert!(l.allow(ip), "a second later the bucket should have refilled");
+        assert!(
+            l.allow(ip),
+            "a second later the bucket should have refilled"
+        );
     }
 
     #[test]
@@ -243,7 +284,10 @@ mod tests {
 
     #[test]
     fn clearing_drops_state() {
-        let l = Limiter::new(Config { per_second: 1, ..Default::default() });
+        let l = Limiter::new(Config {
+            per_second: 1,
+            ..Default::default()
+        });
         l.allow("1.2.3.4".parse().unwrap());
         assert_eq!(l.tracked(), 1);
         l.clear();

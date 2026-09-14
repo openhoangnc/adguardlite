@@ -49,7 +49,9 @@ pub fn get_uint(b: &mut &[u8]) -> Result<u64> {
 
     let n = (0u8).wrapping_sub(first) as usize;
     if n == 0 || n > 8 {
-        return Err(Error::Invalid(format!("bad integer length byte {first:#x}")));
+        return Err(Error::Invalid(format!(
+            "bad integer length byte {first:#x}"
+        )));
     }
     if b.len() < n {
         return Err(Error::Truncated);
@@ -185,7 +187,12 @@ mod tests {
 
     #[test]
     fn strings_round_trip() {
-        for s in ["", "example.com", "https://dns10.quad9.net:443/dns-query", "日本"] {
+        for s in [
+            "",
+            "example.com",
+            "https://dns10.quad9.net:443/dns-query",
+            "日本",
+        ] {
             let mut out = Vec::new();
             put_string(&mut out, s);
             let mut r = out.as_slice();

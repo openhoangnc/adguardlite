@@ -2,9 +2,7 @@
 
 use std::collections::HashMap;
 
-use crate::codec::{
-    frame, get_int, get_string, get_uint, put_int, put_string, put_uint, unframe,
-};
+use crate::codec::{frame, get_int, get_string, get_uint, put_int, put_string, put_uint, unframe};
 use crate::{Error, Result};
 
 /// Gob's built-in type identifier for a string.
@@ -307,7 +305,9 @@ fn parse_type_def(id: i64, b: &mut &[u8]) -> Result<(i64, TypeDef)> {
 fn expect_delta(b: &mut &[u8], want: u64) -> Result<()> {
     let got = get_uint(b)?;
     if got != want {
-        return Err(Error::Invalid(format!("expected field delta {want}, got {got}")));
+        return Err(Error::Invalid(format!(
+            "expected field delta {want}, got {got}"
+        )));
     }
 
     Ok(())
@@ -354,7 +354,9 @@ const fn static_assert_two_fields() {}
 fn skip_struct_end(b: &mut &[u8]) -> Result<()> {
     let end = get_uint(b)?;
     if end != 0 {
-        return Err(Error::Invalid(format!("expected a struct terminator, got {end}")));
+        return Err(Error::Invalid(format!(
+            "expected a struct terminator, got {end}"
+        )));
     }
 
     Ok(())
@@ -383,7 +385,9 @@ fn parse_field(b: &mut &[u8]) -> Result<(String, i64)> {
 /// Decodes the value message into a unit.
 fn decode_value(id: i64, types: &HashMap<i64, TypeDef>, b: &mut &[u8]) -> Result<UnitDb> {
     let Some(TypeDef::Struct { fields }) = types.get(&id) else {
-        return Err(Error::Invalid(format!("value names type {id}, which is not a known struct")));
+        return Err(Error::Invalid(format!(
+            "value names type {id}, which is not a known struct"
+        )));
     };
 
     let mut u = UnitDb::default();
@@ -397,7 +401,9 @@ fn decode_value(id: i64, types: &HashMap<i64, TypeDef>, b: &mut &[u8]) -> Result
         seen += delta as usize;
 
         let Some((name, _)) = fields.get(seen - 1) else {
-            return Err(Error::Invalid(format!("field index {seen} is past the type's fields")));
+            return Err(Error::Invalid(format!(
+                "field index {seen} is past the type's fields"
+            )));
         };
 
         match name.as_str() {
@@ -417,7 +423,9 @@ fn decode_value(id: i64, types: &HashMap<i64, TypeDef>, b: &mut &[u8]) -> Result
             "NTotal" => u.n_total = get_uint(b)?,
             "TimeAvg" => u.time_avg = get_uint(b)? as u32,
             other => {
-                return Err(Error::Unsupported(format!("unknown unitDB field {other:?}")));
+                return Err(Error::Unsupported(format!(
+                    "unknown unitDB field {other:?}"
+                )));
             }
         }
     }
@@ -470,17 +478,38 @@ mod tests {
         UnitDb {
             n_result: vec![0, 1200, 340, 5, 0, 7],
             domains: vec![
-                CountPair { name: "example.com".into(), count: 512 },
-                CountPair { name: "en.wikipedia.org".into(), count: 128 },
-                CountPair { name: "xn--80ak6aa92e.com".into(), count: 1 },
+                CountPair {
+                    name: "example.com".into(),
+                    count: 512,
+                },
+                CountPair {
+                    name: "en.wikipedia.org".into(),
+                    count: 128,
+                },
+                CountPair {
+                    name: "xn--80ak6aa92e.com".into(),
+                    count: 1,
+                },
             ],
             blocked_domains: vec![
-                CountPair { name: "doubleclick.net".into(), count: 341 },
-                CountPair { name: "ads.example.com".into(), count: 9 },
+                CountPair {
+                    name: "doubleclick.net".into(),
+                    count: 341,
+                },
+                CountPair {
+                    name: "ads.example.com".into(),
+                    count: 9,
+                },
             ],
             clients: vec![
-                CountPair { name: "192.168.1.5".into(), count: 900 },
-                CountPair { name: "2001:db8::1".into(), count: 3 },
+                CountPair {
+                    name: "192.168.1.5".into(),
+                    count: 900,
+                },
+                CountPair {
+                    name: "2001:db8::1".into(),
+                    count: 3,
+                },
             ],
             upstreams_responses: vec![CountPair {
                 name: "https://dns10.quad9.net:443/dns-query".into(),
@@ -542,7 +571,10 @@ mod tests {
         let u = UnitDb {
             n_total: u64::MAX,
             time_avg: u32::MAX,
-            clients: vec![CountPair { name: "c".into(), count: u64::MAX }],
+            clients: vec![CountPair {
+                name: "c".into(),
+                count: u64::MAX,
+            }],
             ..Default::default()
         };
         assert_eq!(decode_unit(&encode_unit(&u)).unwrap(), u);
@@ -551,7 +583,10 @@ mod tests {
     #[test]
     fn unicode_names_survive() {
         let u = UnitDb {
-            domains: vec![CountPair { name: "日本.example".into(), count: 3 }],
+            domains: vec![CountPair {
+                name: "日本.example".into(),
+                count: 3,
+            }],
             ..Default::default()
         };
         assert_eq!(decode_unit(&encode_unit(&u)).unwrap(), u);
@@ -561,7 +596,10 @@ mod tests {
     fn truncated_streams_are_rejected() {
         let full = encode_unit(&sample());
         for cut in [1, 10, full.len() / 2, full.len() - 1] {
-            assert!(decode_unit(&full[..cut]).is_err(), "cut at {cut} should fail");
+            assert!(
+                decode_unit(&full[..cut]).is_err(),
+                "cut at {cut} should fail"
+            );
         }
     }
 

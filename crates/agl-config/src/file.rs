@@ -70,10 +70,15 @@ pub fn save(path: &Path, cfg: &Config) -> Result<(), Error> {
     let dir = path.parent().unwrap_or(Path::new("."));
     let tmp = dir.join(format!(
         ".{}.tmp",
-        path.file_name().and_then(|s| s.to_str()).unwrap_or("AdGuardHome.yaml")
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("AdGuardHome.yaml")
     ));
 
-    let io = |source| Error::Io { path: path.to_path_buf(), source };
+    let io = |source| Error::Io {
+        path: path.to_path_buf(),
+        source,
+    };
 
     std::fs::create_dir_all(dir).map_err(io)?;
     std::fs::write(&tmp, text.as_bytes()).map_err(io)?;
@@ -127,7 +132,10 @@ mod tests {
     #[test]
     fn rejects_a_future_schema() {
         let newer = REFERENCE.replace("schema_version: 34", "schema_version: 999");
-        assert!(matches!(from_str(&newer), Err(Error::SchemaTooNew { found: 999, .. })));
+        assert!(matches!(
+            from_str(&newer),
+            Err(Error::SchemaTooNew { found: 999, .. })
+        ));
     }
 
     #[test]

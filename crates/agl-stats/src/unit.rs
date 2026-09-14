@@ -140,9 +140,14 @@ impl Unit {
             if u.cached || u.failed {
                 continue;
             }
-            *self.upstreams_responses.entry(u.address.clone()).or_insert(0) += 1;
-            *self.upstreams_time_sum.entry(u.address.clone()).or_insert(0) +=
-                u.duration.as_micros() as u64;
+            *self
+                .upstreams_responses
+                .entry(u.address.clone())
+                .or_insert(0) += 1;
+            *self
+                .upstreams_time_sum
+                .entry(u.address.clone())
+                .or_insert(0) += u.duration.as_micros() as u64;
         }
     }
 
@@ -157,11 +162,7 @@ impl Unit {
             upstreams_time_sum: to_pairs(&self.upstreams_time_sum, MAX_CLIENTS),
             n_total: self.n_total,
             // Upstream stores the mean, not the sum.
-            time_avg: if self.n_total == 0 {
-                0
-            } else {
-                (self.time_sum / self.n_total) as u32
-            },
+            time_avg: self.time_sum.checked_div(self.n_total).unwrap_or(0) as u32,
         }
     }
 
@@ -229,7 +230,10 @@ pub struct UnitDb {
 pub fn to_pairs(m: &AHashMap<String, u64>, max: usize) -> Vec<CountPair> {
     let mut v: Vec<CountPair> = m
         .iter()
-        .map(|(k, c)| CountPair { name: k.clone(), count: *c })
+        .map(|(k, c)| CountPair {
+            name: k.clone(),
+            count: *c,
+        })
         .collect();
 
     // Sort by count descending, then by name so the output is deterministic.
@@ -290,11 +294,23 @@ mod tests {
         use agl_core::Reason as R;
 
         assert_eq!(Result::from_reason(R::FilteredBlockList), Result::Filtered);
-        assert_eq!(Result::from_reason(R::FilteredBlockedService), Result::Filtered);
-        assert_eq!(Result::from_reason(R::FilteredSafeBrowsing), Result::SafeBrowsing);
+        assert_eq!(
+            Result::from_reason(R::FilteredBlockedService),
+            Result::Filtered
+        );
+        assert_eq!(
+            Result::from_reason(R::FilteredSafeBrowsing),
+            Result::SafeBrowsing
+        );
         assert_eq!(Result::from_reason(R::FilteredParental), Result::Parental);
-        assert_eq!(Result::from_reason(R::NotFilteredNotFound), Result::NotFiltered);
-        assert_eq!(Result::from_reason(R::NotFilteredAllowList), Result::NotFiltered);
+        assert_eq!(
+            Result::from_reason(R::NotFilteredNotFound),
+            Result::NotFiltered
+        );
+        assert_eq!(
+            Result::from_reason(R::NotFilteredAllowList),
+            Result::NotFiltered
+        );
     }
 
     #[test]
@@ -306,7 +322,10 @@ mod tests {
 
         assert_eq!(u.domains.get("good.com"), Some(&1));
         assert_eq!(u.blocked_domains.get("ads.com"), Some(&2));
-        assert!(!u.domains.contains_key("ads.com"), "blocked domains do not count as queried");
+        assert!(
+            !u.domains.contains_key("ads.com"),
+            "blocked domains do not count as queried"
+        );
         assert_eq!(u.clients.get("1.1.1.1"), Some(&3));
         assert_eq!(u.n_total, 3);
         assert_eq!(u.n_result[Result::Filtered as usize], 2);

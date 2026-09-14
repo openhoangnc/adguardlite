@@ -40,7 +40,10 @@ impl Sessions {
         let token = new_token();
         self.by_token.lock().insert(
             token.clone(),
-            Session { user: user.to_string(), expires: SystemTime::now() + ttl },
+            Session {
+                user: user.to_string(),
+                expires: SystemTime::now() + ttl,
+            },
         );
 
         token
@@ -118,8 +121,12 @@ pub fn token_from_cookies(header: &str) -> Option<&str> {
 pub fn basic_credentials(header: &str) -> Option<(String, String)> {
     use base64::Engine as _;
 
-    let b64 = header.strip_prefix("Basic ").or_else(|| header.strip_prefix("basic "))?;
-    let raw = base64::engine::general_purpose::STANDARD.decode(b64.trim()).ok()?;
+    let b64 = header
+        .strip_prefix("Basic ")
+        .or_else(|| header.strip_prefix("basic "))?;
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim())
+        .ok()?;
     let text = String::from_utf8(raw).ok()?;
     let (user, pass) = text.split_once(':')?;
 
@@ -149,7 +156,11 @@ pub struct LoginLimiter {
 impl LoginLimiter {
     /// Creates a limiter allowing `max` failures before a `block`-long pause.
     pub fn new(max: u32, block: Duration) -> Self {
-        Self { attempts: Mutex::new(AHashMap::new()), max, block }
+        Self {
+            attempts: Mutex::new(AHashMap::new()),
+            max,
+            block,
+        }
     }
 
     /// Reports whether the client is currently blocked.
@@ -232,7 +243,10 @@ mod tests {
     #[test]
     fn parses_the_session_token_from_a_cookie_header() {
         assert_eq!(token_from_cookies("agh_session=abc123"), Some("abc123"));
-        assert_eq!(token_from_cookies("other=x; agh_session=abc123; more=y"), Some("abc123"));
+        assert_eq!(
+            token_from_cookies("other=x; agh_session=abc123; more=y"),
+            Some("abc123")
+        );
         assert_eq!(token_from_cookies("other=x"), None);
     }
 

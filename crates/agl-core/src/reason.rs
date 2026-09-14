@@ -203,7 +203,10 @@ mod tests {
     #[test]
     fn api_names_match_upstream() {
         // These strings are what the HTTP API emits; renaming them breaks the UI.
-        assert_eq!(Reason::NotFilteredAllowList.as_str(), "NotFilteredWhiteList");
+        assert_eq!(
+            Reason::NotFilteredAllowList.as_str(),
+            "NotFilteredWhiteList"
+        );
         assert_eq!(Reason::FilteredBlockList.as_str(), "FilteredBlackList");
         assert_eq!(Reason::Rewritten.as_str(), "Rewrite");
         assert_eq!(Reason::RewrittenAutoHosts.as_str(), "RewriteEtcHosts");

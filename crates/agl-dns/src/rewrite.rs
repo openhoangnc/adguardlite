@@ -41,7 +41,7 @@ impl Rewrite {
         let a = match answer.trim() {
             "A" => Answer::Exclude(RecordType::A),
             "AAAA" => Answer::Exclude(RecordType::AAAA),
-            other if other.is_empty() => return None,
+            "" => return None,
             other => match other.parse::<IpAddr>() {
                 Ok(ip) => Answer::Addr(ip),
                 Err(_) if agl_core::name::is_valid(other) => {
@@ -126,7 +126,9 @@ impl Table {
 
         // A CNAME that points at the queried name itself would loop; upstream
         // treats that as "no rewrite".
-        if let Some(r) = matched.iter().find(|r| matches!(&r.answer, Answer::CName(c) if c == host))
+        if let Some(r) = matched
+            .iter()
+            .find(|r| matches!(&r.answer, Answer::CName(c) if c == host))
         {
             let _ = r;
 
@@ -141,8 +143,13 @@ impl Table {
             return Some((Outcome::Empty, matched));
         }
 
-        if let Some(r) = matched.iter().find(|r| matches!(r.answer, Answer::CName(_))) {
-            let Answer::CName(c) = &r.answer else { unreachable!("checked above") };
+        if let Some(r) = matched
+            .iter()
+            .find(|r| matches!(r.answer, Answer::CName(_)))
+        {
+            let Answer::CName(c) = &r.answer else {
+                unreachable!("checked above")
+            };
 
             return Some((Outcome::CName(c.clone()), matched));
         }
@@ -240,13 +247,19 @@ mod tests {
     #[test]
     fn a_domain_with_no_answer_of_this_type_gets_an_empty_answer() {
         let t = table(&[("v4only.lan", "1.2.3.4")]);
-        assert_eq!(t.apply("v4only.lan", RecordType::AAAA).unwrap().0, Outcome::Empty);
+        assert_eq!(
+            t.apply("v4only.lan", RecordType::AAAA).unwrap().0,
+            Outcome::Empty
+        );
     }
 
     #[test]
     fn the_special_values_suppress_a_type() {
         let t = table(&[("noa.lan", "AAAA")]);
-        assert_eq!(t.apply("noa.lan", RecordType::AAAA).unwrap().0, Outcome::Empty);
+        assert_eq!(
+            t.apply("noa.lan", RecordType::AAAA).unwrap().0,
+            Outcome::Empty
+        );
     }
 
     #[test]

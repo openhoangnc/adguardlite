@@ -96,15 +96,27 @@ fn is_zero_u16(v: &u16) -> bool {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Result {
     /// The `$dnsrewrite` outcome, if any.
-    #[serde(rename = "DNSRewriteResult", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "DNSRewriteResult",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub dns_rewrite_result: Option<DnsRewriteResult>,
 
     /// The canonical name a rewrite produced.
-    #[serde(rename = "CanonName", default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        rename = "CanonName",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub canon_name: String,
 
     /// The blocked service's name.
-    #[serde(rename = "ServiceName", default, skip_serializing_if = "String::is_empty")]
+    #[serde(
+        rename = "ServiceName",
+        default,
+        skip_serializing_if = "String::is_empty"
+    )]
     pub service_name: String,
 
     /// Addresses produced by a rewrite.
@@ -167,7 +179,11 @@ pub struct Entry {
     pub answer: Option<String>,
 
     /// The upstream's original answer, when filtering replaced it.
-    #[serde(rename = "OrigAnswer", default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "OrigAnswer",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
     pub orig_answer: Option<String>,
 
     /// The client's address.
@@ -247,7 +263,11 @@ mod tests {
     fn re_encodes_a_real_line_byte_for_byte() {
         let e = Entry::from_line(REAL_LINE).unwrap();
         let out = e.to_line().unwrap();
-        assert_eq!(out.trim_end(), REAL_LINE, "the log format must round-trip exactly");
+        assert_eq!(
+            out.trim_end(),
+            REAL_LINE,
+            "the log format must round-trip exactly"
+        );
     }
 
     #[test]
@@ -263,8 +283,19 @@ mod tests {
         };
 
         let line = e.to_line().unwrap();
-        for absent in ["ECS", "CID", "Upstream", "Answer", "OrigAnswer", "Cached", "AD"] {
-            assert!(!line.contains(absent), "{absent} should be omitted, got {line}");
+        for absent in [
+            "ECS",
+            "CID",
+            "Upstream",
+            "Answer",
+            "OrigAnswer",
+            "Cached",
+            "AD",
+        ] {
+            assert!(
+                !line.contains(absent),
+                "{absent} should be omitted, got {line}"
+            );
         }
         // A zero reason and a false IsFiltered are omitted inside Result too.
         assert!(line.contains(r#""Result":{}"#), "got {line}");

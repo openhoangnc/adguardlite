@@ -26,7 +26,12 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self { enabled: true, limit_hours: 24, ignored: Vec::new(), ignored_enabled: false }
+        Self {
+            enabled: true,
+            limit_hours: 24,
+            ignored: Vec::new(),
+            ignored_enabled: false,
+        }
     }
 }
 
@@ -112,7 +117,10 @@ pub struct Stats {
 impl Stats {
     /// Creates an empty collector.
     pub fn new(cfg: Config) -> Self {
-        Self { cfg: Mutex::new(cfg), units: Mutex::new(BTreeMap::new()) }
+        Self {
+            cfg: Mutex::new(cfg),
+            units: Mutex::new(BTreeMap::new()),
+        }
     }
 
     /// Replaces the settings.
@@ -154,7 +162,11 @@ impl Stats {
 
     /// Returns every unit in serialisable form, for persistence.
     pub fn snapshot(&self) -> Vec<(u32, UnitDb)> {
-        self.units.lock().iter().map(|(id, u)| (*id, u.to_db())).collect()
+        self.units
+            .lock()
+            .iter()
+            .map(|(id, u)| (*id, u.to_db()))
+            .collect()
     }
 
     /// Discards units older than the configured window.
@@ -209,10 +221,8 @@ impl Stats {
 
         let mut resp = StatsResp::empty();
 
-        resp.top_queried_domains =
-            merge_top(&units, MAX_DOMAINS, &ignored, |u| &u.domains);
-        resp.top_blocked_domains =
-            merge_top(&units, MAX_DOMAINS, &ignored, |u| &u.blocked_domains);
+        resp.top_queried_domains = merge_top(&units, MAX_DOMAINS, &ignored, |u| &u.domains);
+        resp.top_blocked_domains = merge_top(&units, MAX_DOMAINS, &ignored, |u| &u.blocked_domains);
         resp.top_clients = merge_top(&units, MAX_CLIENTS, &AHashSet::new(), |u| &u.clients);
 
         let (responses, avg_time) = merge_upstreams(&units);
@@ -229,10 +239,10 @@ impl Stats {
 
         for u in &units {
             n_total += u.n_total;
-            for i in 0..RESULT_COUNT {
-                n_result[i] += u.n_result[i];
+            for (slot, v) in n_result.iter_mut().zip(&u.n_result) {
+                *slot += v;
             }
-            let avg = if u.n_total == 0 { 0 } else { u.time_sum / u.n_total };
+            let avg = u.time_sum.checked_div(u.n_total).unwrap_or(0);
             if avg != 0 {
                 time_avg_sum += avg;
                 time_units_counted += 1;
@@ -247,7 +257,8 @@ impl Stats {
 
         if time_units_counted != 0 {
             // Upstream averages the per-hour means, then converts to seconds.
-            resp.avg_processing_time = (time_avg_sum / time_units_counted) as f64 / 1_000_000.0;
+            resp.avg_processing_time =
+                time_avg_sum.checked_div(time_units_counted).unwrap_or(0) as f64 / 1_000_000.0;
         }
 
         resp
@@ -282,12 +293,18 @@ fn fill_per_unit(resp: &mut StatsResp, units: &[Unit]) {
 
     resp.time_units = "hours";
     resp.dns_queries = units.iter().map(|u| u.n_total).collect();
-    resp.blocked_filtering =
-        units.iter().map(|u| u.n_result[Result::Filtered as usize]).collect();
-    resp.replaced_safebrowsing =
-        units.iter().map(|u| u.n_result[Result::SafeBrowsing as usize]).collect();
-    resp.replaced_parental =
-        units.iter().map(|u| u.n_result[Result::Parental as usize]).collect();
+    resp.blocked_filtering = units
+        .iter()
+        .map(|u| u.n_result[Result::Filtered as usize])
+        .collect();
+    resp.replaced_safebrowsing = units
+        .iter()
+        .map(|u| u.n_result[Result::SafeBrowsing as usize])
+        .collect();
+    resp.replaced_parental = units
+        .iter()
+        .map(|u| u.n_result[Result::Parental as usize])
+        .collect();
 }
 
 /// Merges one counter map across units and returns the top `max` entries.
@@ -329,11 +346,9 @@ fn merge_upstreams(units: &[Unit]) -> (Vec<TopAddrs>, Vec<TopAddrsFloat>) {
         .iter()
         .map(|p| {
             let total = time_sum.get(&p.name).copied().unwrap_or(0);
-            let mean = if p.count == 0 {
-                0.0
-            } else {
-                total as f64 / p.count as f64 / 1_000_000.0
-            };
+            let mean = total
+                .checked_div(p.count)
+                .map_or(0.0, |micros| micros as f64 / 1_000_000.0);
 
             TopAddrsFloat::from([(p.name.clone(), mean)])
         })
@@ -384,7 +399,10 @@ mod tests {
 
     #[test]
     fn reports_hours_for_a_day_long_window() {
-        let s = Stats::new(Config { limit_hours: 24, ..Default::default() });
+        let s = Stats::new(Config {
+            limit_hours: 24,
+            ..Default::default()
+        });
         s.add(&entry("a.com", "c", Result::NotFiltered, 10));
 
         let d = s.data();
@@ -398,7 +416,10 @@ mod tests {
     #[test]
     fn collapses_to_days_past_a_week() {
         // 30 days of hours.
-        let s = Stats::new(Config { limit_hours: 24 * 30, ..Default::default() });
+        let s = Stats::new(Config {
+            limit_hours: 24 * 30,
+            ..Default::default()
+        });
         s.add(&entry("a.com", "c", Result::NotFiltered, 10));
 
         let d = s.data();
@@ -409,7 +430,10 @@ mod tests {
 
     #[test]
     fn a_week_still_reports_hours() {
-        let s = Stats::new(Config { limit_hours: 24 * 7, ..Default::default() });
+        let s = Stats::new(Config {
+            limit_hours: 24 * 7,
+            ..Default::default()
+        });
         let d = s.data();
         assert_eq!(d.time_units, "hours", "7 days is not more than 7, so hours");
         assert_eq!(d.dns_queries.len(), 24 * 7);
@@ -446,7 +470,10 @@ mod tests {
 
         let d = s.data();
         assert_eq!(d.top_upstreams_responses[0].get("9.9.9.10:53"), Some(&2));
-        let mean = d.top_upstreams_avg_time[0].get("9.9.9.10:53").copied().unwrap();
+        let mean = d.top_upstreams_avg_time[0]
+            .get("9.9.9.10:53")
+            .copied()
+            .unwrap();
         assert!((mean - 0.25).abs() < 1e-9, "expected 0.25 s, got {mean}");
     }
 
@@ -461,7 +488,11 @@ mod tests {
         s.add(&entry("public.com", "c", Result::NotFiltered, 10));
 
         let d = s.data();
-        let names: Vec<&String> = d.top_queried_domains.iter().flat_map(|m| m.keys()).collect();
+        let names: Vec<&String> = d
+            .top_queried_domains
+            .iter()
+            .flat_map(|m| m.keys())
+            .collect();
         assert!(!names.iter().any(|n| n.as_str() == "secret.com"));
         assert!(names.iter().any(|n| n.as_str() == "public.com"));
         // The query still counts towards the totals.
@@ -470,14 +501,20 @@ mod tests {
 
     #[test]
     fn disabled_statistics_record_nothing() {
-        let s = Stats::new(Config { enabled: false, ..Default::default() });
+        let s = Stats::new(Config {
+            enabled: false,
+            ..Default::default()
+        });
         assert!(!s.add(&entry("a.com", "c", Result::NotFiltered, 10)));
         assert_eq!(s.data().num_dns_queries, 0);
     }
 
     #[test]
     fn a_zero_window_returns_the_empty_response() {
-        let s = Stats::new(Config { limit_hours: 0, ..Default::default() });
+        let s = Stats::new(Config {
+            limit_hours: 0,
+            ..Default::default()
+        });
         s.add(&entry("a.com", "c", Result::NotFiltered, 10));
 
         let d = s.data();
@@ -514,7 +551,10 @@ mod tests {
 
     #[test]
     fn pruning_drops_units_outside_the_window() {
-        let s = Stats::new(Config { limit_hours: 2, ..Default::default() });
+        let s = Stats::new(Config {
+            limit_hours: 2,
+            ..Default::default()
+        });
         let cur = current_hour();
         s.load([
             (cur - 10, Unit::new(cur - 10).to_db()),
@@ -548,7 +588,10 @@ mod tests {
             "num_replaced_parental",
             "avg_processing_time",
         ] {
-            assert!(json.contains(&format!("\"{key}\"")), "missing {key} in {json}");
+            assert!(
+                json.contains(&format!("\"{key}\"")),
+                "missing {key} in {json}"
+            );
         }
     }
 }

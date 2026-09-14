@@ -172,6 +172,17 @@ Committed pre-built and gzip-compressed under `web/build` (9.7 MB of assets →
 bytes to clients that accept gzip and decompresses for those that do not.
 Rebuild it with `scripts/build-frontend.sh` after changing the pinned release.
 
+## Housekeeping
+
+`rust-toolchain.toml` pins the compiler; the code needs edition 2024,
+let-chains, `Option::is_none_or` and `u64::is_multiple_of`. CI enforces
+`cargo fmt --all --check` and a clippy run with `-D warnings`, and both are
+clean — keep them that way rather than adding `allow`s.
+
+This is a derivative work of a GPL-3.0 project and redistributes AdGuard's
+compiled frontend, their services catalogue and captured fixtures. `NOTICE.md`
+records what came from where; update it when adding anything else of theirs.
+
 ## Scope
 
 `README.md` records what is and is not implemented. Endpoints for unimplemented

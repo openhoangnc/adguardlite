@@ -33,7 +33,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .lines()
             .map(str::trim)
             .filter(|l| !l.is_empty())
-            .map(|l| if l.ends_with('.') { l.to_string() } else { format!("{l}.") })
+            .map(|l| {
+                if l.ends_with('.') {
+                    l.to_string()
+                } else {
+                    format!("{l}.")
+                }
+            })
             .collect(),
     );
     if names.is_empty() {
@@ -64,8 +70,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut workers = Vec::with_capacity(concurrency);
     for w in 0..concurrency {
-        let (wire, sent, ok, lost, latencies) =
-            (wire.clone(), sent.clone(), ok.clone(), lost.clone(), latencies.clone());
+        let (wire, sent, ok, lost, latencies) = (
+            wire.clone(),
+            sent.clone(),
+            ok.clone(),
+            lost.clone(),
+            latencies.clone(),
+        );
 
         workers.push(tokio::spawn(async move {
             let sock = match tokio::net::UdpSocket::bind("0.0.0.0:0").await {

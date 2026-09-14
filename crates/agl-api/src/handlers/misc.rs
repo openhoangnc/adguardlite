@@ -135,13 +135,17 @@ pub async fn clients_add(State(s): State<Shared>, Json(req): Json<ClientJson>) -
         return Err(ApiError::bad_request("the client name must not be empty"));
     }
     if req.ids.is_empty() {
-        return Err(ApiError::bad_request("a client needs at least one identifier"));
+        return Err(ApiError::bad_request(
+            "a client needs at least one identifier",
+        ));
     }
 
     {
         let mut cfg = s.config.write();
         if cfg.clients.persistent.iter().any(|c| c.name == req.name) {
-            return Err(ApiError::bad_request("a client with this name already exists"));
+            return Err(ApiError::bad_request(
+                "a client with this name already exists",
+            ));
         }
         cfg.clients.persistent.push(to_persistent(&req));
     }
@@ -189,7 +193,12 @@ pub async fn clients_update(
 ) -> ApiResult<()> {
     {
         let mut cfg = s.config.write();
-        let Some(slot) = cfg.clients.persistent.iter_mut().find(|c| c.name == req.name) else {
+        let Some(slot) = cfg
+            .clients
+            .persistent
+            .iter_mut()
+            .find(|c| c.name == req.name)
+        else {
             return Err(ApiError::not_found("no client with that name"));
         };
         *slot = to_persistent(&req.data);
@@ -238,10 +247,7 @@ pub struct AccessSetReq {
 }
 
 /// `POST /control/access/set`
-pub async fn access_set(
-    State(s): State<Shared>,
-    Json(req): Json<AccessSetReq>,
-) -> ApiResult<()> {
+pub async fn access_set(State(s): State<Shared>, Json(req): Json<AccessSetReq>) -> ApiResult<()> {
     {
         let mut cfg = s.config.write();
         if let Some(v) = req.allowed_clients {
@@ -282,10 +288,7 @@ pub async fn services_list(State(s): State<Shared>) -> Json<Vec<String>> {
 }
 
 /// `POST /control/blocked_services/set`
-pub async fn services_set(
-    State(s): State<Shared>,
-    Json(ids): Json<Vec<String>>,
-) -> ApiResult<()> {
+pub async fn services_set(State(s): State<Shared>, Json(ids): Json<Vec<String>>) -> ApiResult<()> {
     s.config.write().filtering.blocked_services.ids = ids.clone();
     s.filters.write().set_blocked_services(&ids);
 
@@ -427,7 +430,10 @@ pub async fn change_language(State(s): State<Shared>, body: String) -> ApiResult
 pub async fn profile(State(s): State<Shared>, headers: HeaderMap) -> Json<serde_json::Value> {
     let cfg = s.config.read();
     let name = current_user(&s, &headers).unwrap_or_else(|| {
-        cfg.users.first().map(|u| u.name.clone()).unwrap_or_default()
+        cfg.users
+            .first()
+            .map(|u| u.name.clone())
+            .unwrap_or_default()
     });
 
     Json(json!({
@@ -608,10 +614,14 @@ pub async fn install_configure(
     Json(req): Json<InstallReq>,
 ) -> ApiResult<()> {
     if req.username.trim().is_empty() || req.password.is_empty() {
-        return Err(ApiError::bad_request("a username and password are required"));
+        return Err(ApiError::bad_request(
+            "a username and password are required",
+        ));
     }
     if !s.needs_install() {
-        return Err(ApiError::forbidden("this installation is already configured"));
+        return Err(ApiError::forbidden(
+            "this installation is already configured",
+        ));
     }
 
     let hash = auth::hash_password(&req.password)
@@ -619,7 +629,10 @@ pub async fn install_configure(
 
     {
         let mut cfg = s.config.write();
-        cfg.users = vec![agl_config::model::WebUser { name: req.username, password: hash }];
+        cfg.users = vec![agl_config::model::WebUser {
+            name: req.username,
+            password: hash,
+        }];
 
         if let Some(p) = req.dns.port {
             cfg.dns.port = p;
@@ -628,7 +641,10 @@ pub async fn install_configure(
             cfg.dns.bind_hosts = vec![ip];
         }
         if let (Some(ip), Some(port)) = (
-            req.web.ip.as_deref().and_then(|i| i.parse::<std::net::IpAddr>().ok()),
+            req.web
+                .ip
+                .as_deref()
+                .and_then(|i| i.parse::<std::net::IpAddr>().ok()),
             req.web.port,
         ) {
             cfg.http.address = agl_config::types::AddrPort(std::net::SocketAddr::new(ip, port));
@@ -649,6 +665,9 @@ mod tests {
         assert!(SUPPORTED_TAGS.contains(&"device_phone"));
         assert!(SUPPORTED_TAGS.contains(&"os_windows"));
         assert!(SUPPORTED_TAGS.contains(&"user_child"));
-        assert!(SUPPORTED_TAGS.windows(2).all(|w| w[0] < w[1]), "kept sorted");
+        assert!(
+            SUPPORTED_TAGS.windows(2).all(|w| w[0] < w[1]),
+            "kept sorted"
+        );
     }
 }

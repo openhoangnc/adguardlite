@@ -56,12 +56,20 @@ pub fn catalogue() -> &'static Catalogue {
 
         let gz: &[u8] = include_bytes!("../data/blocked-services.json.gz");
         let mut s = String::new();
-        if flate2::read::GzDecoder::new(gz).read_to_string(&mut s).is_err() {
-            return Catalogue { blocked_services: Vec::new(), groups: Vec::new() };
+        if flate2::read::GzDecoder::new(gz)
+            .read_to_string(&mut s)
+            .is_err()
+        {
+            return Catalogue {
+                blocked_services: Vec::new(),
+                groups: Vec::new(),
+            };
         }
 
-        serde_json::from_str(&s)
-            .unwrap_or(Catalogue { blocked_services: Vec::new(), groups: Vec::new() })
+        serde_json::from_str(&s).unwrap_or(Catalogue {
+            blocked_services: Vec::new(),
+            groups: Vec::new(),
+        })
     })
 }
 
@@ -72,7 +80,11 @@ pub fn service(id: &str) -> Option<&'static Service> {
 
 /// Returns every identifier in the catalogue.
 pub fn ids() -> Vec<String> {
-    catalogue().blocked_services.iter().map(|s| s.id.clone()).collect()
+    catalogue()
+        .blocked_services
+        .iter()
+        .map(|s| s.id.clone())
+        .collect()
 }
 
 /// Collects the rules that block the named services.
@@ -108,7 +120,10 @@ mod tests {
     #[test]
     fn services_carry_rules_and_icons() {
         let s = service("youtube").expect("youtube should be catalogued");
-        assert!(!s.rules.is_empty(), "a service must bring rules to be blockable");
+        assert!(
+            !s.rules.is_empty(),
+            "a service must bring rules to be blockable"
+        );
         assert!(!s.icon_svg.is_empty(), "the UI shows an icon");
         assert!(!s.group_id.is_empty());
     }
@@ -153,7 +168,12 @@ mod tests {
             unparsed.is_empty(),
             "{} catalogue rules do not parse:\n{}",
             unparsed.len(),
-            unparsed.iter().take(10).cloned().collect::<Vec<_>>().join("\n")
+            unparsed
+                .iter()
+                .take(10)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
 }

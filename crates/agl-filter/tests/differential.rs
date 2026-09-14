@@ -91,13 +91,9 @@ fn matches_the_go_engine_on_the_real_adguard_dns_filter() {
         let got_rule = res.rules.first().map(|r| r.text.as_str()).unwrap_or("");
 
         if got_reason != want_reason {
-            verdict_mismatches.push(format!(
-                "{dom}: go={want_reason:?} rust={got_reason:?}"
-            ));
+            verdict_mismatches.push(format!("{dom}: go={want_reason:?} rust={got_reason:?}"));
         } else if got_rule != want_rule {
-            rule_mismatches.push(format!(
-                "{dom}: go={want_rule:?} rust={got_rule:?}"
-            ));
+            rule_mismatches.push(format!("{dom}: go={want_rule:?} rust={got_rule:?}"));
         }
     }
 
@@ -116,7 +112,12 @@ fn matches_the_go_engine_on_the_real_adguard_dns_filter() {
         "only {:.2}% of cited rules match ({} ties out of {compared}):\n{}",
         agreement * 100.0,
         rule_mismatches.len(),
-        rule_mismatches.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
+        rule_mismatches
+            .iter()
+            .take(20)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 
     eprintln!(

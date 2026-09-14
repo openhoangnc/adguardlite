@@ -20,7 +20,11 @@ struct Assets;
 /// handle its own routing, which is what upstream's file server does.
 pub fn serve(path: &str, headers: &HeaderMap) -> Response {
     let clean = path.trim_start_matches('/');
-    let candidate = if clean.is_empty() { "index.html" } else { clean };
+    let candidate = if clean.is_empty() {
+        "index.html"
+    } else {
+        clean
+    };
 
     if let Some(r) = lookup(candidate, headers) {
         return r;
@@ -65,7 +69,10 @@ fn lookup(name: &str, headers: &HeaderMap) -> Option<Response> {
 
         return Some(
             (
-                [(header::CONTENT_TYPE, mime), (header::VARY, "Accept-Encoding")],
+                [
+                    (header::CONTENT_TYPE, mime),
+                    (header::VARY, "Accept-Encoding"),
+                ],
                 Body::from(plain),
             )
                 .into_response(),
@@ -75,7 +82,13 @@ fn lookup(name: &str, headers: &HeaderMap) -> Option<Response> {
     // Stored as-is.
     let f = Assets::get(name)?;
 
-    Some(([(header::CONTENT_TYPE, mime)], Body::from(f.data.into_owned())).into_response())
+    Some(
+        (
+            [(header::CONTENT_TYPE, mime)],
+            Body::from(f.data.into_owned()),
+        )
+            .into_response(),
+    )
 }
 
 /// Decompresses a stored asset.
@@ -83,7 +96,9 @@ fn decompress(data: &[u8]) -> Option<Vec<u8>> {
     use std::io::Read as _;
 
     let mut out = Vec::new();
-    flate2::read::GzDecoder::new(data).read_to_end(&mut out).ok()?;
+    flate2::read::GzDecoder::new(data)
+        .read_to_end(&mut out)
+        .ok()?;
 
     Some(out)
 }
@@ -123,7 +138,10 @@ mod tests {
 
     #[test]
     fn the_interface_is_embedded() {
-        assert!(is_embedded(), "the built web interface should be compiled in");
+        assert!(
+            is_embedded(),
+            "the built web interface should be compiled in"
+        );
     }
 
     #[test]
@@ -147,7 +165,11 @@ mod tests {
     #[test]
     fn the_login_and_install_pages_are_present() {
         for p in ["/login.html", "/install.html"] {
-            assert_eq!(serve(p, &gzip_headers()).status(), StatusCode::OK, "missing {p}");
+            assert_eq!(
+                serve(p, &gzip_headers()).status(),
+                StatusCode::OK,
+                "missing {p}"
+            );
         }
     }
 

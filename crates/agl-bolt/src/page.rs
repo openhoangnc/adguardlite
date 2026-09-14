@@ -141,7 +141,13 @@ impl Meta {
 
     /// Writes the meta page, including its header and checksum.
     pub fn write(&self, page: &mut [u8], page_id: u64) {
-        PageHeader { id: page_id, flags: FLAG_META, count: 0, overflow: 0 }.write(page);
+        PageHeader {
+            id: page_id,
+            flags: FLAG_META,
+            count: 0,
+            overflow: 0,
+        }
+        .write(page);
 
         let b = &mut page[PAGE_HEADER..];
         b[0..4].copy_from_slice(&self.magic.to_le_bytes());
@@ -267,7 +273,12 @@ mod tests {
 
     #[test]
     fn page_headers_round_trip() {
-        let h = PageHeader { id: 42, flags: FLAG_LEAF, count: 3, overflow: 1 };
+        let h = PageHeader {
+            id: 42,
+            flags: FLAG_LEAF,
+            count: 3,
+            overflow: 1,
+        };
         let mut b = [0u8; PAGE_HEADER];
         h.write(&mut b);
         assert_eq!(PageHeader::parse(&b).unwrap(), h);
@@ -275,7 +286,12 @@ mod tests {
 
     #[test]
     fn leaf_elements_round_trip() {
-        let e = LeafElem { flags: BUCKET_LEAF_FLAG, pos: 32, ksize: 8, vsize: 309 };
+        let e = LeafElem {
+            flags: BUCKET_LEAF_FLAG,
+            pos: 32,
+            ksize: 8,
+            vsize: 309,
+        };
         let mut b = [0u8; LEAF_ELEM];
         e.write(&mut b);
         let back = LeafElem::parse(&b).unwrap();
@@ -287,12 +303,21 @@ mod tests {
 
     #[test]
     fn bucket_headers_round_trip() {
-        let h = BucketHeader { root: 0, sequence: 7 };
+        let h = BucketHeader {
+            root: 0,
+            sequence: 7,
+        };
         let mut b = [0u8; BUCKET_HEADER];
         h.write(&mut b);
         assert_eq!(BucketHeader::parse(&b).unwrap(), h);
         assert!(h.is_inline());
-        assert!(!BucketHeader { root: 5, sequence: 0 }.is_inline());
+        assert!(
+            !BucketHeader {
+                root: 5,
+                sequence: 0
+            }
+            .is_inline()
+        );
     }
 
     #[test]

@@ -39,7 +39,11 @@ impl Key {
         let q = req.queries.first()?;
 
         Some(Key {
-            name: q.name().to_ascii().trim_end_matches('.').to_ascii_lowercase(),
+            name: q
+                .name()
+                .to_ascii()
+                .trim_end_matches('.')
+                .to_ascii_lowercase(),
             qtype: q.query_type().into(),
             qclass: q.query_class().into(),
             dnssec_ok: req.metadata.authentic_data,
@@ -126,7 +130,9 @@ impl Shard {
     /// Evicts oldest entries until the shard fits its budget.
     fn evict_to_fit(&mut self) {
         while self.bytes > self.budget {
-            let Some(k) = self.order.pop_front() else { break };
+            let Some(k) = self.order.pop_front() else {
+                break;
+            };
             if let Some(e) = self.map.remove(&k) {
                 self.bytes = self.bytes.saturating_sub(e.weight);
             }
@@ -182,21 +188,28 @@ impl Cache {
         let age = e.age(now);
         let expired = e.is_expired(now);
 
-        if expired {
-            if !self.cfg.optimistic || age > self.cfg.optimistic_max_age {
-                let weight = e.weight;
-                sh.map.remove(k);
-                sh.bytes = sh.bytes.saturating_sub(weight);
+        // An expired entry is dropped unless optimistic serving is on and it
+        // is still inside the stale window.
+        if expired && (!self.cfg.optimistic || age > self.cfg.optimistic_max_age) {
+            let weight = e.weight;
+            sh.map.remove(k);
+            sh.bytes = sh.bytes.saturating_sub(weight);
 
-                return None;
-            }
+            return None;
         }
 
         let mut msg = e.msg.clone();
         let elapsed = age.as_secs() as u32;
         decrement_ttls(&mut msg, elapsed);
 
-        Some((msg, if expired { Freshness::Stale } else { Freshness::Fresh }))
+        Some((
+            msg,
+            if expired {
+                Freshness::Stale
+            } else {
+                Freshness::Fresh
+            },
+        ))
     }
 
     /// Stores a response, if it is cacheable.
@@ -221,7 +234,12 @@ impl Cache {
 
         if let Some(old) = sh.map.insert(
             k.clone(),
-            Entry { msg: msg.clone(), stored: Instant::now(), ttl, weight },
+            Entry {
+                msg: msg.clone(),
+                stored: Instant::now(),
+                ttl,
+                weight,
+            },
         ) {
             sh.bytes = sh.bytes.saturating_sub(old.weight);
         } else {
@@ -289,7 +307,12 @@ impl Cache {
 /// Reduces every record's TTL by `secs`, flooring at one second so a cached
 /// answer never claims to be already expired.
 fn decrement_ttls(msg: &mut Message, secs: u32) {
-    for r in msg.answers.iter_mut().chain(&mut msg.authorities).chain(&mut msg.additionals) {
+    for r in msg
+        .answers
+        .iter_mut()
+        .chain(&mut msg.authorities)
+        .chain(&mut msg.additionals)
+    {
         r.ttl = r.ttl.saturating_sub(secs).max(1);
     }
 }
@@ -316,7 +339,10 @@ pub fn is_cacheable_type(qt: RecordType) -> bool {
 
 /// Convenience for building a cache with a non-zero size.
 pub fn with_size(bytes: NonZeroUsize) -> Cache {
-    Cache::new(Config { size_bytes: bytes.get(), ..Default::default() })
+    Cache::new(Config {
+        size_bytes: bytes.get(),
+        ..Default::default()
+    })
 }
 
 #[cfg(test)]
@@ -377,7 +403,10 @@ mod tests {
     #[test]
     fn a_miss_returns_nothing() {
         let c = Cache::new(Config::default());
-        assert!(c.get(&Key::from_request(&req("absent.com.")).unwrap()).is_none());
+        assert!(
+            c.get(&Key::from_request(&req("absent.com.")).unwrap())
+                .is_none()
+        );
     }
 
     #[test]
@@ -399,16 +428,31 @@ mod tests {
 
     #[test]
     fn applies_the_configured_ttl_bounds() {
-        let c = Cache::new(Config { ttl_min: 60, ..Default::default() });
-        assert_eq!(c.cache_ttl_for(&resp("a.com.", 5)), Some(Duration::from_secs(60)));
+        let c = Cache::new(Config {
+            ttl_min: 60,
+            ..Default::default()
+        });
+        assert_eq!(
+            c.cache_ttl_for(&resp("a.com.", 5)),
+            Some(Duration::from_secs(60))
+        );
 
-        let c = Cache::new(Config { ttl_max: 30, ..Default::default() });
-        assert_eq!(c.cache_ttl_for(&resp("a.com.", 300)), Some(Duration::from_secs(30)));
+        let c = Cache::new(Config {
+            ttl_max: 30,
+            ..Default::default()
+        });
+        assert_eq!(
+            c.cache_ttl_for(&resp("a.com.", 300)),
+            Some(Duration::from_secs(30))
+        );
     }
 
     #[test]
     fn a_disabled_cache_stores_nothing() {
-        let c = Cache::new(Config { size_bytes: 0, ..Default::default() });
+        let c = Cache::new(Config {
+            size_bytes: 0,
+            ..Default::default()
+        });
         assert!(c.is_disabled());
         let k = Key::from_request(&req("example.com.")).unwrap();
         assert!(!c.put(k.clone(), &resp("example.com.", 300)));
@@ -418,15 +462,25 @@ mod tests {
     #[test]
     fn evicts_when_over_budget() {
         // A tiny budget so a handful of entries forces eviction.
-        let c = Cache::new(Config { size_bytes: SHARDS * 400, ..Default::default() });
+        let c = Cache::new(Config {
+            size_bytes: SHARDS * 400,
+            ..Default::default()
+        });
         for i in 0..500 {
             let name = format!("host{i}.example.com.");
             let k = Key::from_request(&req(&name)).unwrap();
             c.put(k, &resp(&name, 300));
         }
 
-        assert!(c.len() < 500, "eviction should have dropped entries, got {}", c.len());
-        assert!(c.bytes() <= SHARDS * 400 + 4096, "bytes should stay near budget");
+        assert!(
+            c.len() < 500,
+            "eviction should have dropped entries, got {}",
+            c.len()
+        );
+        assert!(
+            c.bytes() <= SHARDS * 400 + 4096,
+            "bytes should stay near budget"
+        );
     }
 
     #[test]

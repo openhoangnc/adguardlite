@@ -69,12 +69,18 @@ pub fn reply(req: &Message, rcode: ResponseCode) -> Message {
 
 /// The question's name, or the root when there is no question.
 fn qname(req: &Message) -> Name {
-    req.queries.first().map(|q| q.name().clone()).unwrap_or_else(Name::root)
+    req.queries
+        .first()
+        .map(|q| q.name().clone())
+        .unwrap_or_else(Name::root)
 }
 
 /// The question's type, or `A` when there is no question.
 fn qtype(req: &Message) -> RecordType {
-    req.queries.first().map(|q| q.query_type()).unwrap_or(RecordType::A)
+    req.queries
+        .first()
+        .map(|q| q.query_type())
+        .unwrap_or(RecordType::A)
 }
 
 /// Builds the negative-caching SOA record upstream attaches to NODATA and
@@ -140,11 +146,7 @@ pub fn with_addrs(req: &Message, addrs: &[IpAddr], ttl: u32) -> Message {
         RecordType::A => addrs
             .iter()
             .filter_map(|a| match a {
-                IpAddr::V4(v4) => Some(Record::from_rdata(
-                    name.clone(),
-                    ttl,
-                    RData::A(A(*v4)),
-                )),
+                IpAddr::V4(v4) => Some(Record::from_rdata(name.clone(), ttl, RData::A(A(*v4)))),
                 IpAddr::V6(_) => None,
             })
             .collect(),
@@ -189,7 +191,11 @@ pub fn with_cname(req: &Message, cname: &str, addrs: &[IpAddr], ttl: u32) -> Mes
                 answers.push(Record::from_rdata(target.clone(), ttl, RData::A(A(*v4))));
             }
             (RecordType::AAAA, IpAddr::V6(v6)) => {
-                answers.push(Record::from_rdata(target.clone(), ttl, RData::AAAA(AAAA(*v6))));
+                answers.push(Record::from_rdata(
+                    target.clone(),
+                    ttl,
+                    RData::AAAA(AAAA(*v6)),
+                ));
             }
             _ => {}
         }
@@ -235,7 +241,12 @@ pub fn blocked(req: &Message, cfg: &BlockingConfig, rule_addrs: &[IpAddr]) -> Me
             let usable: Vec<IpAddr> = rule_addrs
                 .iter()
                 .copied()
-                .filter(|a| matches!((qt, a), (RecordType::A, IpAddr::V4(_)) | (RecordType::AAAA, IpAddr::V6(_))))
+                .filter(|a| {
+                    matches!(
+                        (qt, a),
+                        (RecordType::A, IpAddr::V4(_)) | (RecordType::AAAA, IpAddr::V6(_))
+                    )
+                })
                 .collect();
 
             if usable.is_empty() {
@@ -273,7 +284,12 @@ pub fn clamp_ttls(msg: &mut Message, min: u32, max: u32) {
         t
     };
 
-    for r in msg.answers.iter_mut().chain(&mut msg.authorities).chain(&mut msg.additionals) {
+    for r in msg
+        .answers
+        .iter_mut()
+        .chain(&mut msg.authorities)
+        .chain(&mut msg.additionals)
+    {
         r.ttl = clamp(r.ttl);
     }
 }
@@ -349,7 +365,10 @@ mod tests {
 
     #[test]
     fn null_ip_mode_ignores_the_rules_address() {
-        let cfg = BlockingConfig { mode: BlockingMode::NullIp, ..Default::default() };
+        let cfg = BlockingConfig {
+            mode: BlockingMode::NullIp,
+            ..Default::default()
+        };
         let addr: IpAddr = "192.168.1.5".parse().unwrap();
         let r = blocked(&query("nas.lan.", RecordType::A), &cfg, &[addr]);
         assert_eq!(first_addr(&r), Some(IpAddr::V4(Ipv4Addr::UNSPECIFIED)));
@@ -372,12 +391,22 @@ mod tests {
 
     #[test]
     fn nxdomain_and_refused_modes() {
-        let cfg = BlockingConfig { mode: BlockingMode::Nxdomain, ..Default::default() };
+        let cfg = BlockingConfig {
+            mode: BlockingMode::Nxdomain,
+            ..Default::default()
+        };
         let r = blocked(&query("ads.example.com.", RecordType::A), &cfg, &[]);
         assert_eq!(r.metadata.response_code, ResponseCode::NXDomain);
-        assert_eq!(r.authorities.len(), 1, "NXDOMAIN carries a negative-caching SOA");
+        assert_eq!(
+            r.authorities.len(),
+            1,
+            "NXDOMAIN carries a negative-caching SOA"
+        );
 
-        let cfg = BlockingConfig { mode: BlockingMode::Refused, ..Default::default() };
+        let cfg = BlockingConfig {
+            mode: BlockingMode::Refused,
+            ..Default::default()
+        };
         let r = blocked(&query("ads.example.com.", RecordType::A), &cfg, &[]);
         assert_eq!(r.metadata.response_code, ResponseCode::Refused);
     }
@@ -391,7 +420,10 @@ mod tests {
         assert_eq!(r.authorities.len(), 1);
 
         // In null-IP mode upstream returns a bare NOERROR with no SOA.
-        let cfg = BlockingConfig { mode: BlockingMode::NullIp, ..Default::default() };
+        let cfg = BlockingConfig {
+            mode: BlockingMode::NullIp,
+            ..Default::default()
+        };
         let r = blocked(&query("ads.example.com.", RecordType::TXT), &cfg, &[]);
         assert!(r.authorities.is_empty());
     }
@@ -401,7 +433,9 @@ mod tests {
         let q = query("ads.example.com.", RecordType::A);
         let rec = soa_record(&q, 10);
         assert_eq!(rec.ttl, 10);
-        let RData::SOA(soa) = rec.data else { panic!("expected SOA") };
+        let RData::SOA(soa) = rec.data else {
+            panic!("expected SOA")
+        };
         assert_eq!(soa.mname.to_ascii(), NEG_CACHE_NS);
         assert_eq!(soa.rname.to_ascii(), "hostmaster.ads.example.com.");
         assert_eq!(soa.serial, 100_500);
@@ -429,15 +463,27 @@ mod tests {
 
     #[test]
     fn ttl_clamping_respects_zero_as_unbounded() {
-        let mut m = with_addrs(&query("a.com.", RecordType::A), &["1.2.3.4".parse().unwrap()], 5);
+        let mut m = with_addrs(
+            &query("a.com.", RecordType::A),
+            &["1.2.3.4".parse().unwrap()],
+            5,
+        );
         clamp_ttls(&mut m, 60, 0);
         assert_eq!(m.answers[0].ttl, 60);
 
-        let mut m = with_addrs(&query("a.com.", RecordType::A), &["1.2.3.4".parse().unwrap()], 9999);
+        let mut m = with_addrs(
+            &query("a.com.", RecordType::A),
+            &["1.2.3.4".parse().unwrap()],
+            9999,
+        );
         clamp_ttls(&mut m, 0, 300);
         assert_eq!(m.answers[0].ttl, 300);
 
-        let mut m = with_addrs(&query("a.com.", RecordType::A), &["1.2.3.4".parse().unwrap()], 100);
+        let mut m = with_addrs(
+            &query("a.com.", RecordType::A),
+            &["1.2.3.4".parse().unwrap()],
+            100,
+        );
         clamp_ttls(&mut m, 0, 0);
         assert_eq!(m.answers[0].ttl, 100);
     }

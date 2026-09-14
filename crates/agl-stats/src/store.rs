@@ -93,7 +93,10 @@ fn name_from_hour(hour: u32) -> Vec<u8> {
 fn from_gob(u: &agl_gob::UnitDb) -> UnitDb {
     let pairs = |v: &[agl_gob::CountPair]| -> Vec<CountPair> {
         v.iter()
-            .map(|p| CountPair { name: p.name.clone(), count: p.count })
+            .map(|p| CountPair {
+                name: p.name.clone(),
+                count: p.count,
+            })
             .collect()
     };
 
@@ -113,7 +116,10 @@ fn from_gob(u: &agl_gob::UnitDb) -> UnitDb {
 fn to_gob(u: &UnitDb) -> agl_gob::UnitDb {
     let pairs = |v: &[CountPair]| -> Vec<agl_gob::CountPair> {
         v.iter()
-            .map(|p| agl_gob::CountPair { name: p.name.clone(), count: p.count })
+            .map(|p| agl_gob::CountPair {
+                name: p.name.clone(),
+                count: p.count,
+            })
             .collect()
     };
 
@@ -144,9 +150,18 @@ mod tests {
     fn unit(total: u64) -> UnitDb {
         UnitDb {
             n_result: vec![0, total, 0, 0, 0, 0],
-            domains: vec![CountPair { name: "example.com".into(), count: total }],
-            blocked_domains: vec![CountPair { name: "doubleclick.net".into(), count: 3 }],
-            clients: vec![CountPair { name: "192.168.1.5".into(), count: total }],
+            domains: vec![CountPair {
+                name: "example.com".into(),
+                count: total,
+            }],
+            blocked_domains: vec![CountPair {
+                name: "doubleclick.net".into(),
+                count: 3,
+            }],
+            clients: vec![CountPair {
+                name: "192.168.1.5".into(),
+                count: total,
+            }],
             upstreams_responses: vec![CountPair {
                 name: "https://dns10.quad9.net:443/dns-query".into(),
                 count: total,
@@ -165,7 +180,11 @@ mod tests {
         let d = tmpdir("roundtrip");
         let p = d.join("stats.db");
 
-        let units = vec![(497_049u32, unit(10)), (497_050, unit(20)), (497_051, unit(0))];
+        let units = vec![
+            (497_049u32, unit(10)),
+            (497_050, unit(20)),
+            (497_051, unit(0)),
+        ];
         save(&p, &units).unwrap();
 
         let mut back = load(&p).unwrap();
@@ -221,10 +240,16 @@ mod tests {
 
         let mut u = unit(5000);
         u.domains = (0..100)
-            .map(|i| CountPair { name: format!("domain{i}.example.com"), count: 100 - i })
+            .map(|i| CountPair {
+                name: format!("domain{i}.example.com"),
+                count: 100 - i,
+            })
             .collect();
         u.clients = (0..100)
-            .map(|i| CountPair { name: format!("10.0.0.{i}"), count: 100 - i })
+            .map(|i| CountPair {
+                name: format!("10.0.0.{i}"),
+                count: 100 - i,
+            })
             .collect();
 
         save(&p, &[(1u32, u.clone())]).unwrap();
@@ -247,7 +272,9 @@ mod tests {
 
         let gz: &[u8] = include_bytes!("../../../tests/fixtures/stats/go-stats.db.gz");
         let mut data = Vec::new();
-        flate2::read::GzDecoder::new(gz).read_to_end(&mut data).unwrap();
+        flate2::read::GzDecoder::new(gz)
+            .read_to_end(&mut data)
+            .unwrap();
 
         let d = tmpdir("gofile");
         let p = d.join("stats.db");

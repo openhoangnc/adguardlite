@@ -195,7 +195,10 @@ impl StrList {
 
     /// Reports whether any of `vs` satisfies the list.
     pub fn matches_any(&self, vs: &[String]) -> bool {
-        if vs.iter().any(|v| self.excluded.iter().any(|e| e.eq_ignore_ascii_case(v))) {
+        if vs
+            .iter()
+            .any(|v| self.excluded.iter().any(|e| e.eq_ignore_ascii_case(v)))
+        {
             return false;
         }
         if self.included.is_empty() {
@@ -346,7 +349,12 @@ fn parse_host_rule(t: &str, list_id: i64) -> Option<HostRule> {
         return None;
     }
 
-    Some(HostRule { text: t.to_string(), ip, hostnames, list_id })
+    Some(HostRule {
+        text: t.to_string(),
+        ip,
+        hostnames,
+        list_id,
+    })
 }
 
 /// Parses an adblock-style rule.
@@ -455,8 +463,8 @@ fn parse_options(s: &str) -> Result<Options, ParseError> {
             // Modifiers that are meaningful for HTTP filtering but inert for
             // DNS.  Accept and ignore them rather than dropping the rule.
             "domain" | "third-party" | "~third-party" | "3p" | "~3p" | "first-party"
-            | "~first-party" | "app" | "network" | "popup" | "document" | "doc"
-            | "all" | "method" | "to" | "extension" | "~extension" => {}
+            | "~first-party" | "app" | "network" | "popup" | "document" | "doc" | "all"
+            | "method" | "to" | "extension" | "~extension" => {}
             other => return Err(ParseError::UnsupportedModifier(other.to_string())),
         }
     }
@@ -541,7 +549,11 @@ fn parse_dnsrewrite(s: &str) -> Result<DnsRewrite, ParseError> {
         [one] => {
             if let Some(rc) = rcode_from_str(one) {
                 // NOERROR alone means "do not rewrite".
-                return Ok(if rc == 0 { DnsRewrite::Exclude } else { DnsRewrite::RCode(rc) });
+                return Ok(if rc == 0 {
+                    DnsRewrite::Exclude
+                } else {
+                    DnsRewrite::RCode(rc)
+                });
             }
             if let Ok(ip) = one.parse::<IpAddr>() {
                 return Ok(DnsRewrite::Addr(ip));
@@ -566,7 +578,10 @@ fn parse_dnsrewrite(s: &str) -> Result<DnsRewrite, ParseError> {
                     .map(DnsRewrite::Addr)
                     .map_err(|_| ParseError::Invalid(format!("bad address {value:?}"))),
                 5 => Ok(DnsRewrite::CName(value.to_ascii_lowercase())),
-                _ => Ok(DnsRewrite::Record { rtype: t, value: value.to_string() }),
+                _ => Ok(DnsRewrite::Record {
+                    rtype: t,
+                    value: value.to_string(),
+                }),
             }
         }
         [rcode, ..] if parts.len() == 2 => {
@@ -599,7 +614,13 @@ fn parse_pattern(s: &str) -> Result<(Pattern, Option<String>), ParseError> {
     let re = Regex::new(&src)
         .map_err(|e| ParseError::Invalid(format!("pattern {s:?} -> {src:?}: {e}")))?;
 
-    Ok((Pattern::Rx { re: Arc::new(re), target: pattern::target_for(s) }, None))
+    Ok((
+        Pattern::Rx {
+            re: Arc::new(re),
+            target: pattern::target_for(s),
+        },
+        None,
+    ))
 }
 
 /// Returns the domain of a `||domain^` pattern, if `s` is exactly that shape.
@@ -652,7 +673,11 @@ mod tests {
 
     #[test]
     fn skips_cosmetic_rules() {
-        for s in ["example.org##.ad", "example.org#@#.ad", "example.org#%#//scriptlet()"] {
+        for s in [
+            "example.org##.ad",
+            "example.org#@#.ad",
+            "example.org#%#//scriptlet()",
+        ] {
             assert_eq!(parse(s, 1).unwrap_err(), ParseError::Cosmetic, "for {s:?}");
         }
     }
@@ -699,7 +724,11 @@ mod tests {
 
     #[test]
     fn patterns_that_are_not_plain_domains_compile_to_a_regex() {
-        for rule in ["||example.org/path", "||exa*ple.org^", "|http://example.org"] {
+        for rule in [
+            "||example.org/path",
+            "||exa*ple.org^",
+            "|http://example.org",
+        ] {
             assert!(
                 matches!(net(rule).pattern, Pattern::Rx { .. }),
                 "{rule} should compile to a regex"
@@ -711,7 +740,10 @@ mod tests {
     fn a_domain_anchor_without_a_separator_is_not_the_fast_path() {
         // `||example.org` is a prefix match, so it must not use the suffix walk.
         assert!(matches!(net("||example.org").pattern, Pattern::Rx { .. }));
-        assert!(matches!(net("||example.org^").pattern, Pattern::DomainAnchor));
+        assert!(matches!(
+            net("||example.org^").pattern,
+            Pattern::DomainAnchor
+        ));
     }
 
     #[test]
@@ -728,9 +760,17 @@ mod tests {
         let t = opts("||example.org^$dnstype=A|AAAA").dnstype.unwrap();
         assert_eq!(t.included, [1, 28]);
 
-        assert_eq!(opts("||example.org^$dnstype=~TXT").dnstype.unwrap().excluded, [16]);
+        assert_eq!(
+            opts("||example.org^$dnstype=~TXT")
+                .dnstype
+                .unwrap()
+                .excluded,
+            [16]
+        );
 
-        let c = opts("||example.org^$client=192.168.1.1|~Laptop").client.unwrap();
+        let c = opts("||example.org^$client=192.168.1.1|~Laptop")
+            .client
+            .unwrap();
         assert_eq!(c.included, ["192.168.1.1"]);
         assert_eq!(c.excluded, ["Laptop"]);
 
@@ -739,7 +779,10 @@ mod tests {
             ["good.example.org"]
         );
         assert_eq!(
-            opts("||example.org^$ctag=device_phone").ctag.unwrap().included,
+            opts("||example.org^$ctag=device_phone")
+                .ctag
+                .unwrap()
+                .included,
             ["device_phone"]
         );
 
@@ -750,8 +793,14 @@ mod tests {
     #[test]
     fn parses_dnsrewrite_forms() {
         let cases: [(&str, DnsRewrite); 5] = [
-            ("||a^$dnsrewrite=1.2.3.4", DnsRewrite::Addr("1.2.3.4".parse().unwrap())),
-            ("||a^$dnsrewrite=example.net", DnsRewrite::CName("example.net".into())),
+            (
+                "||a^$dnsrewrite=1.2.3.4",
+                DnsRewrite::Addr("1.2.3.4".parse().unwrap()),
+            ),
+            (
+                "||a^$dnsrewrite=example.net",
+                DnsRewrite::CName("example.net".into()),
+            ),
             ("||a^$dnsrewrite=REFUSED", DnsRewrite::RCode(5)),
             ("||a^$dnsrewrite=NXDOMAIN", DnsRewrite::RCode(3)),
             (

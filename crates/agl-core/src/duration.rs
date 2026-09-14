@@ -158,9 +158,7 @@ fn parse_go_duration(orig: &str) -> Result<i128, DurationParseError> {
         } else {
             int_part.parse::<i128>().map_err(|_| err())?
         };
-        let mut nanos = whole
-            .checked_mul(unit_nanos)
-            .ok_or_else(err)?;
+        let mut nanos = whole.checked_mul(unit_nanos).ok_or_else(err)?;
 
         if !frac_part.is_empty() {
             // Scale the fraction without floating point to stay exact.
@@ -332,8 +330,14 @@ mod tests {
             GoDuration::parse("1h30m").unwrap(),
             GoDuration(3_600_000_000_000 + 1_800_000_000_000)
         );
-        assert_eq!(GoDuration::parse("1.5s").unwrap(), GoDuration(1_500_000_000));
-        assert_eq!(GoDuration::parse("-5m").unwrap(), GoDuration(-300_000_000_000));
+        assert_eq!(
+            GoDuration::parse("1.5s").unwrap(),
+            GoDuration(1_500_000_000)
+        );
+        assert_eq!(
+            GoDuration::parse("-5m").unwrap(),
+            GoDuration(-300_000_000_000)
+        );
         assert_eq!(GoDuration::parse("100ns").unwrap(), GoDuration(100));
     }
 

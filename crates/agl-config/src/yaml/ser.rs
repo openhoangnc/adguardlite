@@ -102,7 +102,9 @@ impl ser::Serializer for Serializer {
     }
 
     fn serialize_bytes(self, v: &[u8]) -> Result<Yaml, Error> {
-        Ok(Yaml::Seq(v.iter().map(|b| Yaml::UInt((*b).into())).collect()))
+        Ok(Yaml::Seq(
+            v.iter().map(|b| Yaml::UInt((*b).into())).collect(),
+        ))
     }
 
     fn serialize_none(self) -> Result<Yaml, Error> {
@@ -159,11 +161,7 @@ impl ser::Serializer for Serializer {
         self.serialize_seq(Some(len))
     }
 
-    fn serialize_tuple_struct(
-        self,
-        _name: &'static str,
-        len: usize,
-    ) -> Result<SeqBuilder, Error> {
+    fn serialize_tuple_struct(self, _name: &'static str, len: usize) -> Result<SeqBuilder, Error> {
         self.serialize_seq(Some(len))
     }
 
@@ -337,7 +335,8 @@ impl ser::SerializeStruct for MapBuilder {
         key: &'static str,
         v: &T,
     ) -> Result<(), Error> {
-        self.entries.push((key.to_string(), v.serialize(Serializer)?));
+        self.entries
+            .push((key.to_string(), v.serialize(Serializer)?));
 
         Ok(())
     }
@@ -386,7 +385,10 @@ mod tests {
     #[test]
     fn preserves_struct_field_order() {
         let o = Outer {
-            pprof: Inner { port: 6060, enabled: false },
+            pprof: Inner {
+                port: 6060,
+                enabled: false,
+            },
             routes: vec!["GET /dns-query".into()],
             address: "127.0.0.1:13000".into(),
             empty: vec![],
@@ -408,6 +410,9 @@ mod tests {
             LoadBalance,
         }
 
-        assert_eq!(to_yaml(&Mode::LoadBalance).unwrap(), Yaml::Str("load_balance".into()));
+        assert_eq!(
+            to_yaml(&Mode::LoadBalance).unwrap(),
+            Yaml::Str("load_balance".into())
+        );
     }
 }

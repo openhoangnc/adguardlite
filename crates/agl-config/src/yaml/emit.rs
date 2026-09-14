@@ -182,17 +182,28 @@ fn needs_quoting(s: &str) -> bool {
     let first = b[0];
     if matches!(
         first,
-        b',' | b'[' | b']' | b'{' | b'}' | b'#' | b'&' | b'*' | b'!' | b'|' | b'>'
-            | b'\'' | b'"' | b'%' | b'@' | b'`'
+        b',' | b'['
+            | b']'
+            | b'{'
+            | b'}'
+            | b'#'
+            | b'&'
+            | b'*'
+            | b'!'
+            | b'|'
+            | b'>'
+            | b'\''
+            | b'"'
+            | b'%'
+            | b'@'
+            | b'`'
     ) {
         return true;
     }
 
     // `-`, `?` and `:` only act as indicators when a space follows, so
     // `::1/128` and `-foo` stay plain, matching upstream.
-    if matches!(first, b'-' | b'?' | b':')
-        && (b.len() == 1 || matches!(b[1], b' ' | b'\t'))
-    {
+    if matches!(first, b'-' | b'?' | b':') && (b.len() == 1 || matches!(b[1], b' ' | b'\t')) {
         return true;
     }
 
@@ -220,8 +231,8 @@ fn resolves_to_non_string(s: &str) -> bool {
     // Nulls and booleans.  The YAML 1.1 spellings (`yes`, `on`, ...) are not
     // bools in yaml.v3, but quoting them is the safe choice.
     const RESERVED: &[&str] = &[
-        "true", "True", "TRUE", "false", "False", "FALSE", "null", "Null", "NULL", "~",
-        "yes", "Yes", "YES", "no", "No", "NO", "on", "On", "ON", "off", "Off", "OFF",
+        "true", "True", "TRUE", "false", "False", "FALSE", "null", "Null", "NULL", "~", "yes",
+        "Yes", "YES", "no", "No", "NO", "on", "On", "ON", "off", "Off", "OFF",
     ];
     if RESERVED.contains(&s) {
         return true;
@@ -247,13 +258,22 @@ fn is_yaml_int(s: &str) -> bool {
         return false;
     }
 
-    if let Some(hex) = cleaned.strip_prefix("0x").or_else(|| cleaned.strip_prefix("0X")) {
+    if let Some(hex) = cleaned
+        .strip_prefix("0x")
+        .or_else(|| cleaned.strip_prefix("0X"))
+    {
         return !hex.is_empty() && hex.bytes().all(|b| b.is_ascii_hexdigit());
     }
-    if let Some(oct) = cleaned.strip_prefix("0o").or_else(|| cleaned.strip_prefix("0O")) {
+    if let Some(oct) = cleaned
+        .strip_prefix("0o")
+        .or_else(|| cleaned.strip_prefix("0O"))
+    {
         return !oct.is_empty() && oct.bytes().all(|b| (b'0'..=b'7').contains(&b));
     }
-    if let Some(bin) = cleaned.strip_prefix("0b").or_else(|| cleaned.strip_prefix("0B")) {
+    if let Some(bin) = cleaned
+        .strip_prefix("0b")
+        .or_else(|| cleaned.strip_prefix("0B"))
+    {
         return !bin.is_empty() && bin.bytes().all(|b| b == b'0' || b == b'1');
     }
 
@@ -330,7 +350,10 @@ mod tests {
     fn sequence_of_maps_puts_first_key_on_the_dash_line() {
         let y = m(vec![(
             "users",
-            Yaml::Seq(vec![m(vec![("name", s("admin")), ("password", s("$2a$10$x"))])]),
+            Yaml::Seq(vec![m(vec![
+                ("name", s("admin")),
+                ("password", s("$2a$10$x")),
+            ])]),
         )]);
         assert_eq!(
             to_string(&y),
@@ -345,8 +368,14 @@ mod tests {
         assert_eq!(quote_str("30d"), "30d");
         assert_eq!(quote_str("256MB"), "256MB");
         assert_eq!(quote_str("127.0.0.1:13000"), "127.0.0.1:13000");
-        assert_eq!(quote_str("GET /dns-query/{ClientID}"), "GET /dns-query/{ClientID}");
-        assert_eq!(quote_str("family-block.dns.adguard.com"), "family-block.dns.adguard.com");
+        assert_eq!(
+            quote_str("GET /dns-query/{ClientID}"),
+            "GET /dns-query/{ClientID}"
+        );
+        assert_eq!(
+            quote_str("family-block.dns.adguard.com"),
+            "family-block.dns.adguard.com"
+        );
         assert_eq!(quote_str("$2a$10$dDdZ"), "$2a$10$dDdZ");
 
         // Must be quoted.  Upstream uses single quotes, except for the
@@ -363,7 +392,10 @@ mod tests {
 
         // Filtering rules are the common quoted case in a real config.
         assert_eq!(quote_str("||ads.example.com^"), "'||ads.example.com^'");
-        assert_eq!(quote_str("@@||good.example.com^"), "'@@||good.example.com^'");
+        assert_eq!(
+            quote_str("@@||good.example.com^"),
+            "'@@||good.example.com^'"
+        );
 
         // A quote inside a plain scalar is fine, so nothing is added.
         assert_eq!(quote_str("it's"), "it's");
