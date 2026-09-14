@@ -1,0 +1,22 @@
+[package]
+name = "agl-filter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+agl-core = { version = "0.107.79", path = "../agl-core" }
+ahash = "0.8.12"
+aho-corasick = "1.1.5"
+memchr = "2.8.3"
+regex = "1.13.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+
+[dev-dependencies]
+flate2 = "1.1.10"

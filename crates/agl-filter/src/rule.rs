@@ -1,0 +1,713 @@
+//! Parsing of AdGuard filtering rules.
+//!
+//! Two rule families matter for DNS filtering:
+//!
+//!   * *host rules*, the hosts-file form — `0.0.0.0 ads.example.com`;
+//!   * *network rules*, the adblock form — `||ads.example.com^$important`.
+//!
+//! Network rules are matched against the pseudo-URL `http://<hostname>`, the
+//! same string upstream's `FillRequestForHostname` builds, so patterns behave
+//! identically to the Go engine.
+
+use std::net::IpAddr;
+use std::sync::Arc;
+
+use regex::Regex;
+
+use crate::pattern::{self, Target};
+
+/// A parsed rule.
+#[derive(Clone, Debug)]
+pub enum Rule {
+    /// A hosts-file entry.
+    Host(HostRule),
+    /// An adblock-style rule.
+    Network(Box<NetworkRule>),
+}
+
+/// A hosts-file entry: an address and the names it resolves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostRule {
+    /// The original rule text.
+    pub text: String,
+    /// The address the names resolve to.
+    pub ip: IpAddr,
+    /// The names this entry covers.
+    pub hostnames: Vec<String>,
+    /// The list this rule came from.
+    pub list_id: i64,
+}
+
+impl HostRule {
+    /// Reports whether this entry blocks rather than rewrites, i.e. whether the
+    /// address is unspecified.
+    pub fn is_blocking(&self) -> bool {
+        self.ip.is_unspecified()
+    }
+}
+
+/// An adblock-style rule.
+#[derive(Clone, Debug)]
+pub struct NetworkRule {
+    /// The original rule text, as shown in the query log and API.
+    pub text: String,
+    /// The list this rule came from.
+    pub list_id: i64,
+    /// Whether this is an exception (`@@`) rule.
+    pub allowlist: bool,
+    /// The pattern to match.
+    pub pattern: Pattern,
+    /// The modifiers attached to the rule.
+    pub opts: Options,
+    /// The longest literal run in the pattern, used to prefilter candidates.
+    pub shortcut: Option<String>,
+}
+
+/// The matchable part of a network rule.
+#[derive(Clone, Debug)]
+pub enum Pattern {
+    /// `||domain^` — the domain itself and any subdomain.  The common case in
+    /// DNS blocklists, and the one with the fastest lookup path: a suffix walk
+    /// is exactly equivalent to the regex this would otherwise compile to.
+    DomainAnchor(String),
+    /// Any other pattern, compiled to a regex by [`crate::pattern::to_regex`].
+    Rx {
+        /// The compiled expression.
+        re: Arc<Regex>,
+        /// What the expression is matched against.
+        target: Target,
+    },
+    /// Matches every hostname.
+    Any,
+}
+
+/// The modifiers a network rule may carry.
+#[derive(Clone, Debug, Default)]
+pub struct Options {
+    /// `$important` — outranks exception rules.
+    pub important: bool,
+    /// `$badfilter` — disables the otherwise-identical rule.
+    pub badfilter: bool,
+    /// `$dnstype=A|AAAA` — the query types this rule applies to.
+    pub dnstype: Option<TypeList>,
+    /// `$client=...` — the clients this rule applies to.
+    pub client: Option<StrList>,
+    /// `$ctag=...` — the client tags this rule applies to.
+    pub ctag: Option<StrList>,
+    /// `$denyallow=...` — domains this rule must *not* block.
+    pub denyallow: Vec<String>,
+    /// `$dnsrewrite=...` — the response to synthesise.
+    pub dnsrewrite: Option<DnsRewrite>,
+}
+
+impl Options {
+    /// Reports whether any modifier restricts which requests the rule applies
+    /// to.  Unrestricted rules can use the fast lookup paths.
+    pub fn is_plain(&self) -> bool {
+        self.dnstype.is_none()
+            && self.client.is_none()
+            && self.ctag.is_none()
+            && self.denyallow.is_empty()
+            && self.dnsrewrite.is_none()
+    }
+}
+
+/// A list of values that may be negated individually.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StrList {
+    /// Values that must match.
+    pub included: Vec<String>,
+    /// Values that must not match.
+    pub excluded: Vec<String>,
+}
+
+impl StrList {
+    /// Reports whether `v` satisfies the list.
+    pub fn matches(&self, v: &str) -> bool {
+        if self.excluded.iter().any(|e| e.eq_ignore_ascii_case(v)) {
+            return false;
+        }
+        if self.included.is_empty() {
+            return true;
+        }
+
+        self.included.iter().any(|i| i.eq_ignore_ascii_case(v))
+    }
+
+    /// Reports whether any of `vs` satisfies the list.
+    pub fn matches_any(&self, vs: &[String]) -> bool {
+        if vs.iter().any(|v| self.excluded.iter().any(|e| e.eq_ignore_ascii_case(v))) {
+            return false;
+        }
+        if self.included.is_empty() {
+            return true;
+        }
+
+        vs.iter()
+            .any(|v| self.included.iter().any(|i| i.eq_ignore_ascii_case(v)))
+    }
+}
+
+/// A list of DNS record types that may be negated.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TypeList {
+    /// Types that must match.
+    pub included: Vec<u16>,
+    /// Types that must not match.
+    pub excluded: Vec<u16>,
+}
+
+impl TypeList {
+    /// Reports whether query type `t` satisfies the list.
+    pub fn matches(&self, t: u16) -> bool {
+        if self.excluded.contains(&t) {
+            return false;
+        }
+        if self.included.is_empty() {
+            return true;
+        }
+
+        self.included.contains(&t)
+    }
+}
+
+/// The response a `$dnsrewrite` rule synthesises.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DnsRewrite {
+    /// Answer with this response code and no records.
+    RCode(u16),
+    /// Answer with this address.
+    Addr(IpAddr),
+    /// Answer with this canonical name, then resolve it.
+    CName(String),
+    /// Answer with an arbitrary record of the given type.
+    Record {
+        /// The record type.
+        rtype: u16,
+        /// The record's textual value.
+        value: String,
+    },
+    /// Exclude the host from other `$dnsrewrite` rules.
+    Exclude,
+}
+
+/// Why a rule could not be parsed.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum ParseError {
+    /// The line is blank or a comment and carries no rule.
+    #[error("not a rule")]
+    NotARule,
+    /// The line is a cosmetic rule, which DNS filtering ignores.
+    #[error("cosmetic rules are not applicable to DNS")]
+    Cosmetic,
+    /// The rule's syntax is invalid.
+    #[error("invalid rule: {0}")]
+    Invalid(String),
+    /// The rule uses a modifier this engine does not implement.
+    #[error("unsupported modifier: {0}")]
+    UnsupportedModifier(String),
+}
+
+/// Maps a record type name to its numeric code.
+pub fn rr_type_from_str(s: &str) -> Option<u16> {
+    Some(match s.to_ascii_uppercase().as_str() {
+        "A" => 1,
+        "NS" => 2,
+        "CNAME" => 5,
+        "SOA" => 6,
+        "PTR" => 12,
+        "HINFO" => 13,
+        "MX" => 15,
+        "TXT" => 16,
+        "AAAA" => 28,
+        "SRV" => 33,
+        "NAPTR" => 35,
+        "DS" => 43,
+        "SSHFP" => 44,
+        "RRSIG" => 46,
+        "NSEC" => 47,
+        "DNSKEY" => 48,
+        "TLSA" => 52,
+        "SVCB" => 64,
+        "HTTPS" => 65,
+        "CAA" => 257,
+        "ANY" => 255,
+        _ => return None,
+    })
+}
+
+/// Maps a response code name to its numeric value.
+fn rcode_from_str(s: &str) -> Option<u16> {
+    Some(match s.to_ascii_uppercase().as_str() {
+        "NOERROR" => 0,
+        "FORMERR" => 1,
+        "SERVFAIL" => 2,
+        "NXDOMAIN" => 3,
+        "NOTIMP" => 4,
+        "REFUSED" => 5,
+        _ => return None,
+    })
+}
+
+/// Parses one line of a filter list.
+pub fn parse(line: &str, list_id: i64) -> Result<Rule, ParseError> {
+    let t = line.trim();
+    if t.is_empty() || t.starts_with('!') || t.starts_with("# ") || t == "#" {
+        return Err(ParseError::NotARule);
+    }
+
+    // Cosmetic rules carry a `##`-family separator; DNS filtering skips them.
+    if t.contains("##") || t.contains("#@#") || t.contains("#%#") || t.contains("#$#") {
+        return Err(ParseError::Cosmetic);
+    }
+
+    if let Some(h) = parse_host_rule(t, list_id) {
+        return Ok(Rule::Host(h));
+    }
+
+    parse_network_rule(t, list_id).map(|r| Rule::Network(Box::new(r)))
+}
+
+/// Parses a hosts-file line, returning `None` if it is not one.
+fn parse_host_rule(t: &str, list_id: i64) -> Option<HostRule> {
+    // A hosts line starts with an address followed by whitespace.
+    let (first, rest) = t.split_once(|c: char| c.is_ascii_whitespace())?;
+    let ip: IpAddr = first.parse().ok()?;
+
+    let hostnames: Vec<String> = rest
+        .split('#')
+        .next()
+        .unwrap_or("")
+        .split_ascii_whitespace()
+        .map(|h| h.trim_end_matches('.').to_ascii_lowercase())
+        .filter(|h| !h.is_empty() && agl_core::name::is_valid(h))
+        .collect();
+
+    if hostnames.is_empty() {
+        return None;
+    }
+
+    Some(HostRule { text: t.to_string(), ip, hostnames, list_id })
+}
+
+/// Parses an adblock-style rule.
+fn parse_network_rule(t: &str, list_id: i64) -> Result<NetworkRule, ParseError> {
+    let mut s = t;
+    let mut allowlist = false;
+    if let Some(rest) = s.strip_prefix("@@") {
+        allowlist = true;
+        s = rest;
+    }
+
+    let (pattern_str, opts) = split_options(s)?;
+    let pattern = parse_pattern(pattern_str)?;
+    let shortcut = pattern::shortcut(pattern_str, MIN_SHORTCUT_LEN);
+
+    Ok(NetworkRule { text: t.to_string(), list_id, allowlist, pattern, opts, shortcut })
+}
+
+/// Splits a rule body into its pattern and its parsed modifiers.
+///
+/// The `$` that introduces modifiers is the last unescaped one that is not
+/// inside a `/regex/` pattern.
+fn split_options(s: &str) -> Result<(&str, Options), ParseError> {
+    let b = s.as_bytes();
+    let in_regex = b.first() == Some(&b'/') && s.len() > 1;
+
+    // Find the `$` that starts the modifier list.
+    let mut idx = None;
+    let mut i = 0usize;
+    let mut regex_closed = !in_regex;
+    while i < b.len() {
+        match b[i] {
+            b'\\' => i += 1,
+            b'/' if in_regex && i > 0 => regex_closed = true,
+            b'$' if regex_closed => {
+                idx = Some(i);
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // Only the *last* `$` at the top level starts modifiers, and only if the
+    // text after it parses as a modifier list.
+    let Some(i) = idx else {
+        return Ok((s, Options::default()));
+    };
+
+    let opts = parse_options(&s[i + 1..])?;
+
+    Ok((&s[..i], opts))
+}
+
+/// Parses a comma-separated modifier list.
+fn parse_options(s: &str) -> Result<Options, ParseError> {
+    let mut o = Options::default();
+    for part in split_unescaped(s, ',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+
+        let (name, value) = match part.split_once('=') {
+            Some((n, v)) => (n, Some(v)),
+            None => (part, None),
+        };
+
+        match name {
+            "important" => o.important = true,
+            "badfilter" => o.badfilter = true,
+            "dnstype" => {
+                o.dnstype = Some(parse_type_list(value.unwrap_or_default())?);
+            }
+            "client" => o.client = Some(parse_str_list(value.unwrap_or_default())),
+            "ctag" => o.ctag = Some(parse_str_list(value.unwrap_or_default())),
+            "denyallow" => {
+                o.denyallow = value
+                    .unwrap_or_default()
+                    .split('|')
+                    .filter(|v| !v.is_empty())
+                    .map(|v| v.to_ascii_lowercase())
+                    .collect();
+            }
+            "dnsrewrite" => {
+                o.dnsrewrite = Some(parse_dnsrewrite(value.unwrap_or_default())?);
+            }
+            // Modifiers that are meaningful for HTTP filtering but inert for
+            // DNS.  Accept and ignore them rather than dropping the rule.
+            "domain" | "third-party" | "~third-party" | "3p" | "~3p" | "first-party"
+            | "~first-party" | "app" | "network" | "popup" | "document" | "doc"
+            | "all" | "method" | "to" | "extension" | "~extension" => {}
+            other => return Err(ParseError::UnsupportedModifier(other.to_string())),
+        }
+    }
+
+    Ok(o)
+}
+
+/// Splits on `sep`, honouring backslash escapes.
+fn split_unescaped(s: &str, sep: char) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let b = s.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == b'\\' {
+            i += 2;
+            continue;
+        }
+        if b[i] == sep as u8 {
+            out.push(&s[start..i]);
+            start = i + 1;
+        }
+        i += 1;
+    }
+    out.push(&s[start..]);
+
+    out
+}
+
+/// Parses a `|`-separated list of possibly negated values.
+fn parse_str_list(s: &str) -> StrList {
+    let mut l = StrList::default();
+    for v in s.split('|') {
+        let v = v.trim();
+        if v.is_empty() {
+            continue;
+        }
+        match v.strip_prefix('~') {
+            Some(neg) => l.excluded.push(neg.to_string()),
+            None => l.included.push(v.to_string()),
+        }
+    }
+
+    l
+}
+
+/// Parses a `|`-separated list of possibly negated record types.
+fn parse_type_list(s: &str) -> Result<TypeList, ParseError> {
+    let mut l = TypeList::default();
+    for v in s.split('|') {
+        let v = v.trim();
+        if v.is_empty() {
+            continue;
+        }
+        let (neg, name) = match v.strip_prefix('~') {
+            Some(n) => (true, n),
+            None => (false, v),
+        };
+        let t = rr_type_from_str(name)
+            .ok_or_else(|| ParseError::Invalid(format!("unknown dns type {name:?}")))?;
+        if neg {
+            l.excluded.push(t);
+        } else {
+            l.included.push(t);
+        }
+    }
+
+    Ok(l)
+}
+
+/// Parses a `$dnsrewrite` value.
+///
+/// Accepts the shorthand forms (`1.2.3.4`, `example.net`, `NXDOMAIN`) and the
+/// full `RCODE;TYPE;VALUE` form.
+fn parse_dnsrewrite(s: &str) -> Result<DnsRewrite, ParseError> {
+    if s.is_empty() {
+        return Ok(DnsRewrite::Exclude);
+    }
+
+    let parts: Vec<&str> = s.split(';').collect();
+    match parts.as_slice() {
+        [one] => {
+            if let Some(rc) = rcode_from_str(one) {
+                // NOERROR alone means "do not rewrite".
+                return Ok(if rc == 0 { DnsRewrite::Exclude } else { DnsRewrite::RCode(rc) });
+            }
+            if let Ok(ip) = one.parse::<IpAddr>() {
+                return Ok(DnsRewrite::Addr(ip));
+            }
+            if agl_core::name::is_valid(one) {
+                return Ok(DnsRewrite::CName(one.to_ascii_lowercase()));
+            }
+
+            Err(ParseError::Invalid(format!("bad dnsrewrite value {one:?}")))
+        }
+        [rcode, rtype, value] => {
+            let rc = rcode_from_str(rcode)
+                .ok_or_else(|| ParseError::Invalid(format!("bad rcode {rcode:?}")))?;
+            if rc != 0 {
+                return Ok(DnsRewrite::RCode(rc));
+            }
+            let t = rr_type_from_str(rtype)
+                .ok_or_else(|| ParseError::Invalid(format!("bad type {rtype:?}")))?;
+            match t {
+                1 | 28 => value
+                    .parse::<IpAddr>()
+                    .map(DnsRewrite::Addr)
+                    .map_err(|_| ParseError::Invalid(format!("bad address {value:?}"))),
+                5 => Ok(DnsRewrite::CName(value.to_ascii_lowercase())),
+                _ => Ok(DnsRewrite::Record { rtype: t, value: value.to_string() }),
+            }
+        }
+        [rcode, ..] if parts.len() == 2 => {
+            let rc = rcode_from_str(rcode)
+                .ok_or_else(|| ParseError::Invalid(format!("bad rcode {rcode:?}")))?;
+
+            Ok(DnsRewrite::RCode(rc))
+        }
+        _ => Err(ParseError::Invalid(format!("bad dnsrewrite {s:?}"))),
+    }
+}
+
+/// The shortest literal run worth indexing as a prefilter shortcut.
+pub const MIN_SHORTCUT_LEN: usize = 3;
+
+/// Parses a rule's pattern.
+///
+/// `||domain^` takes a dedicated fast path; everything else compiles to the
+/// regex upstream would have compiled, so the semantics match exactly.
+fn parse_pattern(s: &str) -> Result<Pattern, ParseError> {
+    if pattern::matches_all(s) {
+        return Ok(Pattern::Any);
+    }
+
+    if let Some(dom) = domain_anchor_of(s) {
+        return Ok(Pattern::DomainAnchor(dom));
+    }
+
+    let src = pattern::to_regex(s);
+    let re = Regex::new(&src)
+        .map_err(|e| ParseError::Invalid(format!("pattern {s:?} -> {src:?}: {e}")))?;
+
+    Ok(Pattern::Rx { re: Arc::new(re), target: pattern::target_for(s) })
+}
+
+/// Returns the domain of a `||domain^` pattern, if `s` is exactly that shape.
+///
+/// The trailing `^` is required: without it the pattern is a prefix match
+/// (`||example.org` also matches `example.org.evil.com`), which a suffix walk
+/// would get wrong.
+fn domain_anchor_of(s: &str) -> Option<String> {
+    let body = s.strip_prefix("||")?;
+    let dom = body.strip_suffix('^')?;
+
+    let ok = !dom.is_empty()
+        && agl_core::name::is_valid(dom)
+        && dom
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_'));
+
+    ok.then(|| dom.to_ascii_lowercase())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn net(s: &str) -> NetworkRule {
+        match parse(s, 1).unwrap() {
+            Rule::Network(n) => *n,
+            other => panic!("expected a network rule, got {other:?}"),
+        }
+    }
+
+    fn host(s: &str) -> HostRule {
+        match parse(s, 1).unwrap() {
+            Rule::Host(h) => h,
+            other => panic!("expected a host rule, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn skips_comments_and_blanks() {
+        for s in ["", "   ", "! comment", "# comment", "#"] {
+            assert_eq!(parse(s, 1).unwrap_err(), ParseError::NotARule, "for {s:?}");
+        }
+    }
+
+    #[test]
+    fn skips_cosmetic_rules() {
+        for s in ["example.org##.ad", "example.org#@#.ad", "example.org#%#//scriptlet()"] {
+            assert_eq!(parse(s, 1).unwrap_err(), ParseError::Cosmetic, "for {s:?}");
+        }
+    }
+
+    #[test]
+    fn parses_hosts_lines() {
+        let h = host("0.0.0.0 ads.example.com");
+        assert_eq!(h.ip, "0.0.0.0".parse::<IpAddr>().unwrap());
+        assert_eq!(h.hostnames, ["ads.example.com"]);
+        assert!(h.is_blocking());
+
+        // Multiple names and a trailing comment.
+        let h = host("127.0.0.1 a.example.com b.example.com # local");
+        assert_eq!(h.hostnames, ["a.example.com", "b.example.com"]);
+
+        // A non-unspecified address rewrites rather than blocks.
+        let h = host("192.168.1.5 nas.lan");
+        assert!(!h.is_blocking());
+
+        // IPv6 hosts entries.  `::` is a null answer; `::1` is a rewrite to
+        // loopback, so only the former counts as blocking.
+        assert!(host(":: ads.example.com").is_blocking());
+        assert!(!host("::1 localhost").is_blocking());
+    }
+
+    #[test]
+    fn recognises_the_domain_anchor_fast_path() {
+        for (rule, want) in [
+            ("||example.org^", "example.org"),
+            ("||sub.example.org^", "sub.example.org"),
+            ("||a-b_c.example.org^", "a-b_c.example.org"),
+        ] {
+            match net(rule).pattern {
+                Pattern::DomainAnchor(d) => assert_eq!(d, want, "for {rule}"),
+                other => panic!("{rule} should use the fast path, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn patterns_that_are_not_plain_domains_compile_to_a_regex() {
+        for rule in ["||example.org/path", "||exa*ple.org^", "|http://example.org"] {
+            assert!(
+                matches!(net(rule).pattern, Pattern::Rx { .. }),
+                "{rule} should compile to a regex"
+            );
+        }
+    }
+
+    #[test]
+    fn a_domain_anchor_without_a_separator_is_not_the_fast_path() {
+        // `||example.org` is a prefix match, so it must not use the suffix walk.
+        assert!(matches!(net("||example.org").pattern, Pattern::Rx { .. }));
+        assert!(matches!(net("||example.org^").pattern, Pattern::DomainAnchor(_)));
+    }
+
+    #[test]
+    fn parses_allowlist_marker() {
+        assert!(net("@@||example.org^").allowlist);
+        assert!(!net("||example.org^").allowlist);
+    }
+
+    #[test]
+    fn parses_modifiers() {
+        let r = net("||example.org^$important");
+        assert!(r.opts.important);
+
+        let r = net("||example.org^$badfilter");
+        assert!(r.opts.badfilter);
+
+        let r = net("||example.org^$dnstype=A|AAAA");
+        let t = r.opts.dnstype.unwrap();
+        assert_eq!(t.included, [1, 28]);
+
+        let r = net("||example.org^$dnstype=~TXT");
+        assert_eq!(r.opts.dnstype.unwrap().excluded, [16]);
+
+        let r = net("||example.org^$client=192.168.1.1|~Laptop");
+        let c = r.opts.client.unwrap();
+        assert_eq!(c.included, ["192.168.1.1"]);
+        assert_eq!(c.excluded, ["Laptop"]);
+
+        let r = net("||example.org^$denyallow=good.example.org");
+        assert_eq!(r.opts.denyallow, ["good.example.org"]);
+
+        let r = net("||example.org^$ctag=device_phone");
+        assert_eq!(r.opts.ctag.unwrap().included, ["device_phone"]);
+    }
+
+    #[test]
+    fn parses_dnsrewrite_forms() {
+        let cases: [(&str, DnsRewrite); 5] = [
+            ("||a^$dnsrewrite=1.2.3.4", DnsRewrite::Addr("1.2.3.4".parse().unwrap())),
+            ("||a^$dnsrewrite=example.net", DnsRewrite::CName("example.net".into())),
+            ("||a^$dnsrewrite=REFUSED", DnsRewrite::RCode(5)),
+            ("||a^$dnsrewrite=NXDOMAIN", DnsRewrite::RCode(3)),
+            (
+                "||a^$dnsrewrite=NOERROR;A;5.6.7.8",
+                DnsRewrite::Addr("5.6.7.8".parse().unwrap()),
+            ),
+        ];
+        for (rule, want) in cases {
+            assert_eq!(net(rule).opts.dnsrewrite, Some(want), "for {rule}");
+        }
+    }
+
+    #[test]
+    fn parses_regex_rules() {
+        assert!(matches!(net("/^ads?\\./").pattern, Pattern::Rx { .. }));
+        assert!(parse("/[unclosed/", 1).is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_modifiers() {
+        assert!(matches!(
+            parse("||example.org^$nosuchmodifier", 1),
+            Err(ParseError::UnsupportedModifier(_))
+        ));
+    }
+
+    #[test]
+    fn ignores_http_only_modifiers() {
+        // These are meaningless for DNS but must not invalidate the rule.
+        for r in ["||example.org^$third-party", "||example.org^$document"] {
+            assert!(parse(r, 1).is_ok(), "{r} should parse");
+        }
+    }
+
+    #[test]
+    fn str_list_matching() {
+        let l = parse_str_list("a|b|~c");
+        assert!(l.matches("a"));
+        assert!(l.matches("B"));
+        assert!(!l.matches("c"));
+        assert!(!l.matches("d"));
+
+        let only_neg = parse_str_list("~c");
+        assert!(only_neg.matches("a"));
+        assert!(!only_neg.matches("c"));
+    }
+}

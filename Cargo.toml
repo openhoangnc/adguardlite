@@ -1,0 +1,65 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.107.79"
+edition = "2024"
+rust-version = "1.98"
+license = "GPL-3.0-only"
+repository = "https://github.com/hoangnc/adguardlite"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+# ---------------------------------------------------------------------------
+# Build-speed profiles.
+#
+#  dev      : fastest edit->run loop. Deps at opt-level=2 (compiled once, then
+#             cached); our own crates unoptimised; line-tables-only debug info
+#             keeps linking cheap.
+#  release  : fast to BUILD and fast to RUN. thin LTO + 16 codegen units.
+#  dist     : the shipping profile. fat LTO, 1 codegen unit, panic=abort,
+#             symbols stripped -> smallest + fastest binary, slowest build.
+# ---------------------------------------------------------------------------
+[profile.dev]
+opt-level = 0
+debug = "line-tables-only"
+incremental = true
+codegen-units = 256
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 16
+debug = false
+incremental = false
+panic = "unwind"
+
+[profile.dist]
+inherits = "release"
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+debug = false
+
+[profile.bench]
+inherits = "release"
+debug = "line-tables-only"
+
+[workspace.dependencies]
+agl-core = { path = "crates/agl-core" }
+agl-gob = { path = "crates/agl-gob" }
+agl-bolt = { path = "crates/agl-bolt" }
+agl-config = { path = "crates/agl-config" }
+agl-filter = { path = "crates/agl-filter" }
+agl-dns = { path = "crates/agl-dns" }
+agl-querylog = { path = "crates/agl-querylog" }
+agl-stats = { path = "crates/agl-stats" }
+agl-api = { path = "crates/agl-api" }
