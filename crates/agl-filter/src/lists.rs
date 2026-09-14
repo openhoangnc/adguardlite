@@ -13,7 +13,16 @@ use jiff::Timestamp;
 use agl_config::Paths;
 
 /// The list identifier used for the user's own rules.
+///
+/// These match upstream's `rulelist.APIID` constants, which the web UI knows
+/// by number when it labels where a block came from.
 pub const CUSTOM_LIST_ID: i64 = 0;
+
+/// The list identifier for rules derived from the system hosts file.
+pub const ETC_HOSTS_LIST_ID: i64 = -1;
+
+/// The list identifier for the blocked-services rules.
+pub const BLOCKED_SERVICE_LIST_ID: i64 = -2;
 
 /// One filter list and its loaded contents.
 #[derive(Clone, Debug)]
@@ -108,6 +117,10 @@ pub struct Manager {
     pub allowlists: Vec<List>,
     /// The user's own rules.
     pub user_rules: Vec<String>,
+    /// The rules blocking the services the user selected.
+    pub service_rules: String,
+    /// Host rules taken from the system hosts file.
+    pub hosts_rules: String,
 }
 
 impl Manager {
@@ -117,6 +130,8 @@ impl Manager {
             blocklists: block.iter().map(|f| List::from_config(f, false)).collect(),
             allowlists: allow.iter().map(|f| List::from_config(f, true)).collect(),
             user_rules: user.to_vec(),
+            service_rules: String::new(),
+            hosts_rules: String::new(),
         };
 
         for l in m.blocklists.iter_mut().chain(m.allowlists.iter_mut()) {
@@ -126,11 +141,26 @@ impl Manager {
         m
     }
 
+    /// Replaces the blocked-services rules from a list of service identifiers.
+    pub fn set_blocked_services(&mut self, ids: &[String]) {
+        self.service_rules = crate::services::rules_for(ids);
+    }
+
+    /// Replaces the rules taken from the system hosts file.
+    pub fn set_hosts(&mut self, contents: String) {
+        self.hosts_rules = contents;
+    }
+
     /// Builds a filtering engine from the enabled lists and the user's rules.
     pub fn build_engine(&self) -> Engine {
         let user_text = self.user_rules.join("\n");
 
-        let block: Vec<(i64, &str)> = std::iter::once((CUSTOM_LIST_ID, user_text.as_str()))
+        let block: Vec<(i64, &str)> = [
+            (CUSTOM_LIST_ID, user_text.as_str()),
+            (BLOCKED_SERVICE_LIST_ID, self.service_rules.as_str()),
+            (ETC_HOSTS_LIST_ID, self.hosts_rules.as_str()),
+        ]
+        .into_iter()
             .chain(
                 self.blocklists
                     .iter()
@@ -380,6 +410,60 @@ mod tests {
         let p = tmpdir("escape");
         assert!(local_list_path(&p, "../../etc/passwd").is_err());
         assert!(local_list_path(&p, "mylist.txt").is_ok());
+
+        std::fs::remove_dir_all(p.work.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn blocked_services_are_enforced() {
+        let p = tmpdir("services");
+        let mut m = Manager::load(&p, &[], &[], &[]);
+        m.set_blocked_services(&["youtube".into()]);
+
+        let e = m.build_engine();
+        let r = e.match_request(&crate::engine::Request {
+            hostname: "www.youtube.com",
+            qtype: 1,
+            ..Default::default()
+        });
+
+        assert_eq!(r.reason, agl_core::Reason::FilteredBlockList);
+        assert_eq!(
+            r.rules[0].list_id, BLOCKED_SERVICE_LIST_ID,
+            "the match must be attributed to the blocked-services list"
+        );
+
+        // And nothing is blocked once the service is deselected.
+        m.set_blocked_services(&[]);
+        let e = m.build_engine();
+        assert_eq!(
+            e.match_request(&crate::engine::Request {
+                hostname: "www.youtube.com",
+                qtype: 1,
+                ..Default::default()
+            })
+            .reason,
+            agl_core::Reason::NotFilteredNotFound
+        );
+
+        std::fs::remove_dir_all(p.work.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn hosts_file_entries_are_applied() {
+        let p = tmpdir("hosts");
+        let mut m = Manager::load(&p, &[], &[], &[]);
+        m.set_hosts("192.168.1.5 nas.lan\n# a comment\n".into());
+
+        let e = m.build_engine();
+        let r = e.match_request(&crate::engine::Request {
+            hostname: "nas.lan",
+            qtype: 1,
+            ..Default::default()
+        });
+
+        assert_eq!(r.rules[0].list_id, ETC_HOSTS_LIST_ID);
+        assert_eq!(r.rules[0].ip, Some("192.168.1.5".parse().unwrap()));
 
         std::fs::remove_dir_all(p.work.parent().unwrap()).ok();
     }

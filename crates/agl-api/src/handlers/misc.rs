@@ -1,7 +1,6 @@
 //! Clients, access control, blocked services, encryption, DHCP, the setup
 //! wizard and profile endpoints.
 
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use axum::Json;
@@ -265,43 +264,16 @@ pub async fn access_set(
     s.save_config().map_err(ApiError::internal)
 }
 
-/// The bundled blocked-services catalogue, decompressed on first use.
-fn services_catalogue() -> &'static serde_json::Value {
-    static CATALOGUE: OnceLock<serde_json::Value> = OnceLock::new();
-
-    CATALOGUE.get_or_init(|| {
-        use std::io::Read as _;
-
-        let gz: &[u8] = include_bytes!("../../data/blocked-services.json.gz");
-        let mut s = String::new();
-        if flate2::read::GzDecoder::new(gz).read_to_string(&mut s).is_err() {
-            return json!({ "blocked_services": [], "groups": [] });
-        }
-
-        serde_json::from_str(&s).unwrap_or_else(|_| json!({ "blocked_services": [], "groups": [] }))
-    })
-}
-
 /// `GET /control/blocked_services/all`
-pub async fn services_all() -> Json<&'static serde_json::Value> {
-    Json(services_catalogue())
+pub async fn services_all() -> Json<&'static agl_filter::services::Catalogue> {
+    Json(agl_filter::services::catalogue())
 }
 
 /// `GET /control/blocked_services/services`
 ///
 /// The legacy endpoint: just the identifiers.
 pub async fn services_ids() -> Json<Vec<String>> {
-    let ids = services_catalogue()
-        .get("blocked_services")
-        .and_then(|v| v.as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|s| s.get("id").and_then(|i| i.as_str()).map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
-
-    Json(ids)
+    Json(agl_filter::services::ids())
 }
 
 /// `GET /control/blocked_services/list`
@@ -314,9 +286,13 @@ pub async fn services_set(
     State(s): State<Shared>,
     Json(ids): Json<Vec<String>>,
 ) -> ApiResult<()> {
-    s.config.write().filtering.blocked_services.ids = ids;
+    s.config.write().filtering.blocked_services.ids = ids.clone();
+    s.filters.write().set_blocked_services(&ids);
 
-    s.save_config().map_err(ApiError::internal)
+    s.save_config().map_err(ApiError::internal)?;
+    s.reloader.reload_filters(&s.filters.read());
+
+    Ok(())
 }
 
 /// `GET /control/blocked_services/get`
@@ -348,6 +324,7 @@ pub async fn services_update(
 ) -> ApiResult<()> {
     {
         let mut cfg = s.config.write();
+        s.filters.write().set_blocked_services(&req.ids);
         cfg.filtering.blocked_services.ids = req.ids;
         if let Some(tz) = req
             .schedule
@@ -359,7 +336,10 @@ pub async fn services_update(
         }
     }
 
-    s.save_config().map_err(ApiError::internal)
+    s.save_config().map_err(ApiError::internal)?;
+    s.reloader.reload_filters(&s.filters.read());
+
+    Ok(())
 }
 
 /// `GET /control/tls/status`
@@ -661,22 +641,6 @@ pub async fn install_configure(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_services_catalogue_decompresses() {
-        let c = services_catalogue();
-        let svc = c.get("blocked_services").and_then(|v| v.as_array()).unwrap();
-        assert_eq!(svc.len(), 139, "the bundled catalogue should hold every service");
-
-        let first = &svc[0];
-        assert!(first.get("id").is_some());
-        assert!(first.get("name").is_some());
-        assert!(first.get("icon_svg").is_some());
-        assert!(first.get("rules").is_some());
-
-        let groups = c.get("groups").and_then(|v| v.as_array()).unwrap();
-        assert!(!groups.is_empty());
-    }
 
     #[test]
     fn the_supported_tag_list_matches_the_ui() {

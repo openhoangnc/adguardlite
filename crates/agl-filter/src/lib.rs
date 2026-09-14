@@ -4,3 +4,4 @@ pub mod engine;
 pub mod lists;
 pub mod pattern;
 pub mod rule;
+pub mod services;

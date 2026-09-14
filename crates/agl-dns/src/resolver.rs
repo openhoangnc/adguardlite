@@ -285,10 +285,11 @@ impl Resolver {
                 | Reason::FilteredBlockedService => {
                     let addrs: Vec<IpAddr> = m.rules.iter().filter_map(|r| r.ip).collect();
                     let resp = msg::blocked(req, &settings.blocking, &addrs);
+                    let reason = reason_for_list(m.reason, &m.rules);
 
                     return done(
                         Action::Respond(Box::new(resp)),
-                        m.reason,
+                        reason,
                         m.rules,
                         None,
                         false,
@@ -445,6 +446,29 @@ impl Resolver {
             .iter()
             .any(|r| matches!(r, R::Record { .. }))
             .then(|| msg::nodata(req, ttl))
+    }
+}
+
+/// The list identifier for rules derived from the system hosts file.
+const ETC_HOSTS_LIST_ID: i64 = -1;
+
+/// The list identifier for the blocked-services rules.
+const BLOCKED_SERVICE_LIST_ID: i64 = -2;
+
+/// Refines a filtering reason using the list the winning rule came from.
+///
+/// The engine reports every blocking match as a blocklist match; upstream
+/// distinguishes the built-in lists by their reserved identifiers, and the web
+/// UI labels a query by that reason.
+fn reason_for_list(reason: Reason, rules: &[MatchedRule]) -> Reason {
+    let Some(first) = rules.first() else {
+        return reason;
+    };
+
+    match first.list_id {
+        BLOCKED_SERVICE_LIST_ID => Reason::FilteredBlockedService,
+        ETC_HOSTS_LIST_ID => Reason::RewrittenAutoHosts,
+        _ => reason,
     }
 }
 
@@ -641,6 +665,30 @@ mod tests {
         let r = resolver("192.168.1.7 printer.lan\n", Table::default(), Settings::default());
         let out = resolve(&r, "printer.lan.", RecordType::A, Proto::Udp).await;
         assert_eq!(out.reason, Reason::FilteredBlockList);
+        assert_eq!(
+            answer_addrs(out.response().unwrap()),
+            vec!["192.168.1.7".parse::<IpAddr>().unwrap()]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_blocked_service_is_reported_as_such() {
+        // The blocked-services rules carry the reserved list identifier, and
+        // the UI labels the query by the reason that implies.
+        let r = resolver("", Table::default(), Settings::default());
+        r.set_engine(Engine::build([(-2i64, "||youtube.com^")], []));
+
+        let out = resolve(&r, "www.youtube.com.", RecordType::A, Proto::Udp).await;
+        assert_eq!(out.reason, Reason::FilteredBlockedService);
+    }
+
+    #[tokio::test]
+    async fn a_hosts_file_entry_is_reported_as_a_rewrite() {
+        let r = resolver("", Table::default(), Settings::default());
+        r.set_engine(Engine::build([(-1i64, "192.168.1.7 printer.lan")], []));
+
+        let out = resolve(&r, "printer.lan.", RecordType::A, Proto::Udp).await;
+        assert_eq!(out.reason, Reason::RewrittenAutoHosts);
         assert_eq!(
             answer_addrs(out.response().unwrap()),
             vec!["192.168.1.7".parse::<IpAddr>().unwrap()]

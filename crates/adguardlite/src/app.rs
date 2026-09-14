@@ -63,12 +63,16 @@ impl App {
     pub async fn build(paths: Paths, config: Config, observer: Arc<dyn Observer>) -> Result<Self, Error> {
         paths.ensure()?;
 
-        let filters = Manager::load(
+        let mut filters = Manager::load(
             &paths,
             &config.filters,
             &config.whitelist_filters,
             &config.user_rules,
         );
+        filters.set_blocked_services(&config.filtering.blocked_services.ids);
+        if config.dns.hostsfile_enabled {
+            filters.set_hosts(read_system_hosts());
+        }
         let engine = filters.build_engine();
 
         let rewrites = Table::build(
@@ -153,6 +157,26 @@ impl App {
         Ok(tasks)
     }
 
+}
+
+/// Reads the system hosts file, returning its contents or an empty string.
+///
+/// A missing or unreadable file is not an error: the hosts file is advisory
+/// here, and failing startup over it would be worse than ignoring it.
+pub fn read_system_hosts() -> String {
+    #[cfg(unix)]
+    const PATH: &str = "/etc/hosts";
+    #[cfg(not(unix))]
+    const PATH: &str = r"C:\Windows\System32\drivers\etc\hosts";
+
+    match std::fs::read_to_string(PATH) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::debug!(path = PATH, error = %e, "reading the system hosts file");
+
+            String::new()
+        }
+    }
 }
 
 /// Derives resolver settings from the configuration.
