@@ -209,6 +209,20 @@ This is a derivative work of a GPL-3.0 project and redistributes AdGuard's
 compiled frontend, their services catalogue and captured fixtures. `NOTICE.md`
 records what came from where; update it when adding anything else of theirs.
 
+## DHCP is excluded on purpose
+
+Not a missing feature: this build will not serve DHCP. The API reports the
+feature off and refuses every change, so the interface cannot store settings
+nothing acts on.
+
+Two things follow that are easy to get wrong:
+
+- **`DhcpConfig` in `agl-config` stays.** The config file must round-trip byte
+  for byte, and a user switching back to the Go build keeps their settings.
+  Deleting the model breaks the golden test in `agl-config/src/file.rs`.
+- **`dhcp_status` must not echo the stored config.** Reporting a stored
+  `enabled: true` tells the interface a server is running when none is.
+
 ## Scope, and keeping it honest
 
 Endpoints for unimplemented features answer **501** rather than pretending to

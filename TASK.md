@@ -22,7 +22,7 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 | HTTP API | all 81 paths routed · 71 implemented, 10 answer 501 |
 | Web interface | done, embedded |
 | Docker | done, same runtime contract |
-| DHCP | not implemented |
+| DHCP | **out of scope** — API reports it off and refuses changes |
 | Encrypted inbound listeners | not implemented |
 | Safe browsing / parental / safe search | not implemented |
 
@@ -106,29 +106,47 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 ## Not implemented
 
 ### Endpoints answering 501
-These are routed and return `501 Not Implemented` rather than pretending to
-succeed.
+Routed, and refusing rather than pretending to succeed.
 
-- [ ] `POST /control/dhcp/set_config`
-- [ ] `POST /control/dhcp/find_active_dhcp`
-- [ ] `POST /control/dhcp/add_static_lease`
-- [ ] `POST /control/dhcp/remove_static_lease`
-- [ ] `PUT  /control/dhcp/update_static_lease`
-- [ ] `POST /control/dhcp/reset`
-- [ ] `POST /control/dhcp/reset_leases`
+Pending — these become real work when the feature lands:
+
 - [ ] `POST /control/tls/configure`
 - [ ] `POST /control/tls/validate`
 - [ ] `POST /control/update`
 
-### DHCP
-- [ ] DHCPv4 server: discover/offer/request/ack, lease store, conflict probing
-- [ ] DHCPv6 server and router advertisements
-- [ ] Static leases
-- [ ] Lease-derived DNS names and client identification
-- [ ] `/control/dhcp/interfaces` currently returns an empty object
+Settled — these stay 501 by design, see [DHCP](#dhcp--out-of-scope-not-pending):
 
-Needs raw-socket handling and per-platform interface enumeration; the largest
-single item remaining.
+- [x] `POST /control/dhcp/set_config`
+- [x] `POST /control/dhcp/find_active_dhcp`
+- [x] `POST /control/dhcp/add_static_lease`
+- [x] `POST /control/dhcp/remove_static_lease`
+- [x] `PUT  /control/dhcp/update_static_lease`
+- [x] `POST /control/dhcp/reset`
+- [x] `POST /control/dhcp/reset_leases`
+
+### DHCP — out of scope, not pending
+
+**This build will not serve DHCP.** It is a deliberate exclusion, not a gap
+waiting to be filled: run DHCP on your router or a dedicated service.
+
+What that means in practice:
+
+- `GET /control/dhcp/status` always reports `enabled: false` with empty ranges
+  and no leases, whatever the config file holds. Echoing a stored
+  `enabled: true` would tell the interface a server is running when nothing
+  serves leases.
+- `GET /control/dhcp/interfaces` returns `{}`.
+- Every endpoint that would change DHCP settings answers **501** with a message
+  saying so: `set_config`, `find_active_dhcp`, `add_static_lease`,
+  `remove_static_lease`, `update_static_lease`, `reset`, `reset_leases`.
+  Accepting them would write settings into the config that nothing acts on.
+- The `dhcp:` section of `AdGuardHome.yaml` is still **read and written
+  unchanged**. It has to be, for the file to round-trip byte for byte, and it
+  means someone switching back to the Go build keeps their settings. Do not
+  delete the model.
+
+501 is what upstream's own API documents for a build without DHCP support, so
+the web interface already knows how to present it.
 
 ### Encrypted inbound listeners
 - [ ] DNS-over-TLS listener (port 853)
@@ -165,7 +183,6 @@ Both parse today and are reported at startup and skipped.
 - [ ] ARP table
 - [ ] Reverse DNS
 - [ ] WHOIS
-- [ ] DHCP leases
 - [ ] Hosts file as a client source (it is used for *filtering*, not naming)
 
 `/control/clients` reports an empty `auto_clients`, and query log entries carry
@@ -203,6 +220,10 @@ an empty `client_info.name`.
 ## Deliberate deviations
 
 Not bugs; recorded so nobody "fixes" them.
+
+- **No DHCP server.** Excluded on purpose. The API reports the feature off and
+  refuses every change; the config section still round-trips. See
+  [DHCP](#dhcp--out-of-scope-not-pending).
 
 - **Cited rule on ties.** When several rules of equal priority match, upstream's
   choice falls out of its shortcut index's bucket balancing and the order it

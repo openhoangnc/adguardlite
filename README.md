@@ -8,7 +8,8 @@ and more throughput.
 
 It is not a complete reimplementation. The DNS filtering path, the web
 interface and the storage formats are done and verified against the Go build;
-DHCP, the encrypted inbound listeners and several smaller features are not.
+the encrypted inbound listeners and several smaller features are not.
+**DHCP is deliberately excluded** — see below.
 [What is not implemented](#what-is-not-implemented) lists every gap.
 
 ## Measured against the Go build
@@ -58,10 +59,17 @@ These are real gaps, not oversights in the documentation.
 write endpoint, `/control/tls/configure`, `/control/tls/validate`, and
 `/control/update`.
 
+**Excluded by design:**
+
+- **DHCP.** This build will not serve DHCP; run it on your router or a
+  dedicated service. `/control/dhcp/status` always reports the feature off and
+  every settings change is refused, so the web interface cannot store DHCP
+  configuration that nothing would act on. The `dhcp:` section of the config
+  file is still read and written unchanged, so switching back to the Go build
+  keeps your settings.
+
 **Not implemented at all:**
 
-- **DHCP server.** `/control/dhcp/status` reports the stored config; nothing
-  serves leases.
 - **Encrypted inbound listeners** — DNS-over-TLS, DNS-over-HTTPS,
   DNS-over-QUIC and DNSCrypt. Plain DNS over UDP and TCP is served. *Outbound*
   DoT and DoH upstreams do work.

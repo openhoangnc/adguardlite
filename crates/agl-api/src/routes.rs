@@ -157,16 +157,17 @@ fn control_router() -> Router<Shared> {
         .route("/tls/status", get(misc::tls_status))
         .route("/tls/configure", post(not_supported))
         .route("/tls/validate", post(not_supported))
-        // DHCP.
+        // DHCP.  Not implemented: status reports the feature as off and every
+        // change is refused.  See the DHCP section of TASK.md.
         .route("/dhcp/status", get(misc::dhcp_status))
         .route("/dhcp/interfaces", get(misc::dhcp_interfaces))
-        .route("/dhcp/set_config", post(not_supported))
-        .route("/dhcp/find_active_dhcp", post(not_supported))
-        .route("/dhcp/add_static_lease", post(not_supported))
-        .route("/dhcp/remove_static_lease", post(not_supported))
-        .route("/dhcp/update_static_lease", put(not_supported))
-        .route("/dhcp/reset", post(not_supported))
-        .route("/dhcp/reset_leases", post(not_supported))
+        .route("/dhcp/set_config", post(dhcp_unsupported))
+        .route("/dhcp/find_active_dhcp", post(dhcp_unsupported))
+        .route("/dhcp/add_static_lease", post(dhcp_unsupported))
+        .route("/dhcp/remove_static_lease", post(dhcp_unsupported))
+        .route("/dhcp/update_static_lease", put(dhcp_unsupported))
+        .route("/dhcp/reset", post(dhcp_unsupported))
+        .route("/dhcp/reset_leases", post(dhcp_unsupported))
         // Localisation and profile.
         .route("/i18n/current_language", get(misc::current_language))
         .route("/i18n/change_language", post(misc::change_language))
@@ -192,6 +193,24 @@ async fn not_supported() -> Response {
     (
         StatusCode::NOT_IMPLEMENTED,
         "this endpoint is not implemented by adguardlite",
+    )
+        .into_response()
+}
+
+/// Answers every DHCP endpoint that would change something.
+///
+/// This build deliberately ships no DHCP server -- see the DHCP section of
+/// TASK.md -- so a request to configure one is refused rather than stored.
+/// Accepting it would write settings into the config file that nothing acts
+/// on, which reads as a working DHCP server from the web interface.
+///
+/// 501 is what upstream's own API documents for a build without DHCP support,
+/// so the interface already knows how to present it.
+async fn dhcp_unsupported() -> Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        "this build of adguardlite has no DHCP server; \
+         use your router or a separate DHCP service",
     )
         .into_response()
 }
@@ -257,4 +276,42 @@ fn mobileconfig(s: &Shared, proto: &str) -> ApiResult<Response> {
 /// A JSON body of `{"enabled": ...}`, used by several toggles.
 pub async fn enabled_json(enabled: bool) -> Json<serde_json::Value> {
     Json(json!({ "enabled": enabled }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn every_dhcp_change_is_refused() {
+        // Storing DHCP settings nothing acts on would look like a working
+        // server from the web interface.
+        let r = dhcp_unsupported().await;
+        assert_eq!(r.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[test]
+    fn every_dhcp_mutation_route_refuses() {
+        // A route added later that forgets this would silently accept
+        // settings, so check the table itself.
+        let src = include_str!("routes.rs");
+        for route in [
+            "/dhcp/set_config",
+            "/dhcp/find_active_dhcp",
+            "/dhcp/add_static_lease",
+            "/dhcp/remove_static_lease",
+            "/dhcp/update_static_lease",
+            "/dhcp/reset",
+            "/dhcp/reset_leases",
+        ] {
+            let line = src
+                .lines()
+                .find(|l| l.contains(&format!("\"{route}\"")))
+                .unwrap_or_else(|| panic!("{route} is not routed"));
+            assert!(
+                line.contains("dhcp_unsupported"),
+                "{route} must refuse, but routes to: {line}"
+            );
+        }
+    }
 }

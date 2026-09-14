@@ -385,30 +385,37 @@ pub async fn tls_status(State(s): State<Shared>) -> Json<serde_json::Value> {
 }
 
 /// `GET /control/dhcp/status`
-pub async fn dhcp_status(State(s): State<Shared>) -> Json<serde_json::Value> {
-    let cfg = s.config.read();
-    let d = &cfg.dhcp;
-
+///
+/// This build has no DHCP server, so the status is always disabled and empty
+/// regardless of what the configuration file holds.  Echoing a stored
+/// `enabled: true` would tell the web interface a server is running when
+/// nothing is serving leases.
+///
+/// The shape still matches upstream's `DhcpStatus`, so the interface renders
+/// its DHCP page normally and shows the feature as off.
+pub async fn dhcp_status() -> Json<serde_json::Value> {
     Json(json!({
-        "interface_name": d.interface_name,
+        "interface_name": "",
         "v4": {
-            "gateway_ip": d.dhcpv4.gateway_ip.to_string(),
-            "subnet_mask": d.dhcpv4.subnet_mask.to_string(),
-            "range_start": d.dhcpv4.range_start.to_string(),
-            "range_end": d.dhcpv4.range_end.to_string(),
-            "lease_duration": d.dhcpv4.lease_duration,
+            "gateway_ip": "",
+            "subnet_mask": "",
+            "range_start": "",
+            "range_end": "",
+            "lease_duration": 0,
         },
         "v6": {
-            "range_start": d.dhcpv6.range_start.to_string(),
-            "lease_duration": d.dhcpv6.lease_duration,
+            "range_start": "",
+            "lease_duration": 0,
         },
         "leases": [],
         "static_leases": [],
-        "enabled": d.enabled,
+        "enabled": false,
     }))
 }
 
 /// `GET /control/dhcp/interfaces`
+///
+/// Always empty: with no DHCP server there is no interface to offer.
 pub async fn dhcp_interfaces() -> Json<serde_json::Value> {
     Json(json!({}))
 }
@@ -657,6 +664,55 @@ pub async fn install_configure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dhcp_status_is_always_disabled_and_empty() {
+        // Whatever the config says, this build serves no leases, so the status
+        // must not claim a server is running.
+        let Json(v) = dhcp_status().await;
+
+        assert_eq!(v["enabled"], serde_json::json!(false));
+        assert_eq!(v["interface_name"], serde_json::json!(""));
+        assert_eq!(v["leases"], serde_json::json!([]));
+        assert_eq!(v["static_leases"], serde_json::json!([]));
+        assert_eq!(v["v4"]["range_start"], serde_json::json!(""));
+        assert_eq!(v["v6"]["range_start"], serde_json::json!(""));
+    }
+
+    #[tokio::test]
+    async fn dhcp_status_keeps_the_shape_the_interface_expects() {
+        // The web interface reads these keys even when the feature is off.
+        let Json(v) = dhcp_status().await;
+
+        for key in [
+            "enabled",
+            "interface_name",
+            "v4",
+            "v6",
+            "leases",
+            "static_leases",
+        ] {
+            assert!(v.get(key).is_some(), "missing {key}");
+        }
+        for key in [
+            "gateway_ip",
+            "subnet_mask",
+            "range_start",
+            "range_end",
+            "lease_duration",
+        ] {
+            assert!(v["v4"].get(key).is_some(), "missing v4.{key}");
+        }
+        for key in ["range_start", "lease_duration"] {
+            assert!(v["v6"].get(key).is_some(), "missing v6.{key}");
+        }
+    }
+
+    #[tokio::test]
+    async fn dhcp_interfaces_is_empty() {
+        let Json(v) = dhcp_interfaces().await;
+        assert_eq!(v, serde_json::json!({}));
+    }
 
     #[test]
     fn the_supported_tag_list_matches_the_ui() {

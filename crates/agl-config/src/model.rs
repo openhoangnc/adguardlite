@@ -50,6 +50,10 @@ pub struct Config {
     /// Custom filtering rules.
     pub user_rules: Vec<String>,
     /// DHCP server settings.
+    ///
+    /// This build serves no DHCP; the section is kept because the file must
+    /// round-trip byte for byte, and because a user switching back to the Go
+    /// build would otherwise lose their settings.  Do not remove it.
     pub dhcp: DhcpConfig,
     /// Filtering engine settings.
     pub filtering: FilteringConfig,
@@ -557,6 +561,9 @@ impl FilterYaml {
 }
 
 /// DHCP server settings.
+///
+/// Read and written so the configuration file survives a round trip; nothing
+/// in this build acts on them.  See the DHCP section of `TASK.md`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DhcpConfig {
