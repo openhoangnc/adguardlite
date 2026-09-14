@@ -7,8 +7,8 @@ interface, and the same Docker contract — in a smaller image, with less memory
 and more throughput.
 
 It is not a complete reimplementation. The DNS filtering path, the web
-interface, the storage formats and the DNS-over-TLS and DNS-over-HTTPS
-listeners are done and verified against the Go build; DNS-over-QUIC, DNSCrypt
+interface, the storage formats and the DNS-over-TLS, DNS-over-HTTPS and
+DNS-over-QUIC listeners are done and verified against the Go build; DNSCrypt
 and several smaller features are not.
 **DHCP is deliberately excluded** — see below.
 [What is not implemented](#what-is-not-implemented) lists every gap.
@@ -48,7 +48,7 @@ read off the source.
 | `querylog.json` | byte-identical | 43 real log lines, one per distinct entry shape, re-encode byte for byte. |
 | `stats.db` (bbolt + gob) | interoperable | The Rust server wrote a database; a Go AdGuardHome read it and reported the same counts. Go's own gob encoder is not byte-stable, so byte-equality is not the bar. |
 | Filter lists on disk | same files | The same `data/filters/<id>.txt` layout; an existing download is used as-is. |
-| DNS-over-TLS and DNS-over-HTTPS | interoperable | AdGuard's own dnsproxy client, verifying the certificate, resolves through both listeners. |
+| DNS-over-TLS, -HTTPS and -QUIC | interoperable | AdGuard's own dnsproxy client, verifying the certificate, resolves through all three listeners. |
 | Docker | same contract | Same binary path, working directory, ports and entrypoint arguments; run against a config and data directory a Go instance produced. |
 
 Reproduce it with `scripts/verify.sh` (see [Verifying](#verifying)).
@@ -72,9 +72,9 @@ write endpoint, `/control/tls/configure`, `/control/tls/validate`, and
 
 **Not implemented at all:**
 
-- **DNS-over-QUIC and DNSCrypt listeners**, and HTTP/3. DNS-over-TLS,
-  DNS-over-HTTPS and HTTPS for the web interface *are* served.
-  `port_dns_over_quic` is stored but ignored, where the Go build binds it.
+- **The DNSCrypt listener**, and HTTP/3. DNS-over-TLS, DNS-over-HTTPS,
+  DNS-over-QUIC and HTTPS for the web interface *are* served. `port_dnscrypt`
+  and `dnscrypt_config_file` round-trip through the config and are ignored.
 - **DNS-over-QUIC and DNSCrypt upstreams.** A config naming one is reported at
   startup and skipped.
 - **Safe browsing and parental control.** The toggles persist and the API

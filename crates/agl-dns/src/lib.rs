@@ -3,6 +3,7 @@
 pub mod addr;
 pub mod cache;
 pub mod client;
+pub mod doq;
 pub mod msg;
 pub mod pool;
 pub mod ratelimit;

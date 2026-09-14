@@ -211,7 +211,8 @@ records what came from where; update it when adding anything else of theirs.
 
 ## Encrypted listeners
 
-DNS-over-TLS and DNS-over-HTTPS are served. Two things about how they fit:
+DNS-over-TLS, DNS-over-HTTPS and DNS-over-QUIC are served. Three things about
+how they fit:
 
 - **DoH shares the router with the web interface**, because upstream serves
   both on the HTTPS port. `routes::router(state, secure)` takes whether the
@@ -222,6 +223,11 @@ DNS-over-TLS and DNS-over-HTTPS are served. Two things about how they fit:
   resolver, so it gets the same rate limiting, access control, query log and
   statistics as UDP and TCP. Anything added to that path applies to DoH for
   free; anything that bypasses it silently does not.
+
+- **DoQ reuses the same framing.** A query arrives on its own bidirectional
+  stream carrying the two-byte length prefix that TCP and DoT use, so only the
+  transport differs. `Proto` is exhaustively matched in the query-log mapping,
+  so adding a transport there fails the build until it is given a name.
 
 `tests/compat/dns-oracle` is the check that matters: it drives AdGuard's own
 dnsproxy client against a listener, with the certificate verified rather than

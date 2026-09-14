@@ -133,6 +133,10 @@ pub struct Loaded {
     /// The rustls configuration for HTTPS and DNS-over-HTTPS, which differs
     /// only in the protocols it advertises.
     pub https: Arc<ServerConfig>,
+    /// The rustls configuration for DNS-over-QUIC.
+    ///
+    /// Separate because QUIC requires TLS 1.3 and its own ALPN identifier.
+    pub doq: Arc<ServerConfig>,
     /// What to report about the certificate.
     pub status: Status,
 }
@@ -356,19 +360,25 @@ pub fn load(src: &Source) -> Result<Loaded, Error> {
     status.valid_chain = chain.len() > 1;
     describe_leaf(&chain[0], &mut status);
 
-    // rustls consumes the key, so build the two configurations from clones.
+    // rustls consumes the key, so build each configuration from a clone.
     let mut dot = build(chain.clone(), key.clone_key())?;
     // DNS-over-TLS advertises itself so a client can be sure what it reached.
     dot.alpn_protocols = vec![b"dot".to_vec()];
 
-    let mut https = build(chain, key)?;
+    let mut https = build(chain.clone(), key.clone_key())?;
     https.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+
+    // RFC 9250 names the protocol `doq`; earlier drafts used other tokens,
+    // and clients that still send them are simply not served.
+    let mut doq = build(chain, key)?;
+    doq.alpn_protocols = vec![b"doq".to_vec()];
 
     status.valid_pair = true;
 
     Ok(Loaded {
         dot: Arc::new(dot),
         https: Arc::new(https),
+        doq: Arc::new(doq),
         status,
     })
 }
@@ -417,6 +427,7 @@ mod tests {
             loaded.https.alpn_protocols,
             vec![b"h2".to_vec(), b"http/1.1".to_vec()]
         );
+        assert_eq!(loaded.doq.alpn_protocols, vec![b"doq".to_vec()]);
     }
 
     #[test]

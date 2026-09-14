@@ -23,7 +23,7 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 | Web interface | done, embedded |
 | Docker | done, same runtime contract |
 | DHCP | **out of scope** — API reports it off and refuses changes |
-| Encrypted inbound listeners | DoT and DoH done · DoQ, DNSCrypt missing |
+| Encrypted inbound listeners | DoT, DoH and DoQ done · DNSCrypt missing |
 | Safe browsing / parental / safe search | not implemented |
 
 ---
@@ -87,12 +87,14 @@ Verification claims below are reproducible with `scripts/verify.sh` and
       `POST /control/tls/configure`
 - [x] **DNS-over-TLS listener**
 - [x] **DNS-over-HTTPS listener**, GET and POST, with the ClientID path segment
+- [x] **DNS-over-QUIC listener** (RFC 9250), one query per bidirectional
+      stream, served concurrently on a shared connection
 - [x] HTTPS for the web interface, sharing the port with DoH as upstream does
 - [x] DoH refused over plain HTTP unless `insecure_enabled` is set
 - [x] **Verified**: AdGuard's own dnsproxy client, with full certificate
-      verification, resolves through both listeners; the query log records them
-      as `dot` and `doh`; `/control/tls/status` matches Go field for field with
-      the same certificate loaded
+      verification, resolves through all three listeners; the query log records
+      them as `dot`, `doh` and `doq`; `/control/tls/status` matches Go field for
+      field with the same certificate loaded
 
 ### Storage
 - [x] `querylog.json`: exact JSON shape, rotation, in-memory buffer, reverse
@@ -163,13 +165,16 @@ What that means in practice:
 the web interface already knows how to present it.
 
 ### Encrypted inbound listeners — the rest
-DoT, DoH and HTTPS are done; these are what remain.
+DoT, DoH, DoQ and HTTPS are done; these are what remain.
 
-- [ ] DNS-over-QUIC listener. `port_dns_over_quic` is stored but **ignored**,
-      where Go binds it — a config naming a privileged port starts here and
-      fails there.
-- [ ] DNSCrypt listener
-- [ ] HTTP/3
+- [ ] **DNSCrypt listener.** The largest remaining item and the one with the
+      widest security surface: it needs X25519 key exchange, Ed25519 signing
+      and NaCl box (XSalsa20-Poly1305), a signed-certificate protocol served
+      over DNS, and a `dnscrypt_config_file` matching AdGuard's own format.
+      `port_dnscrypt` and `dnscrypt_config_file` round-trip through the config
+      and are otherwise ignored. Weigh it against the protocol's declining use
+      before starting.
+- [ ] HTTP/3 for DNS-over-HTTPS (`serve_http3`, `use_http3_upstreams`)
 - [ ] The HTTP→HTTPS redirect (`force_https` is stored and unread)
 - [ ] Certificate reload without a restart: a certificate replaced through
       `/control/tls/configure` is stored, but the running listeners keep the

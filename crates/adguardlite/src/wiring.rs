@@ -146,6 +146,7 @@ fn proto_of(p: agl_dns::resolver::Proto) -> ClientProto {
         Proto::Udp | Proto::Tcp => ClientProto::Plain,
         Proto::Tls => ClientProto::Dot,
         Proto::Https => ClientProto::Doh,
+        Proto::Quic => ClientProto::Doq,
     }
 }
 
@@ -216,5 +217,6 @@ mod tests {
         assert_eq!(proto_of(Proto::Tcp), ClientProto::Plain);
         assert_eq!(proto_of(Proto::Tls), ClientProto::Dot);
         assert_eq!(proto_of(Proto::Https), ClientProto::Doh);
+        assert_eq!(proto_of(Proto::Quic), ClientProto::Doq);
     }
 }

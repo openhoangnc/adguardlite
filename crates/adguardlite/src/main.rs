@@ -226,6 +226,26 @@ async fn run(args: Args) -> anyhow::Result<()> {
             }
         }
 
+        if cfg.tls.port_dns_over_quic != 0 {
+            for ip in &cfg.dns.bind_hosts {
+                let addr = std::net::SocketAddr::new(*ip, cfg.tls.port_dns_over_quic);
+                match agl_dns::doq::endpoint(addr, tls.doq.clone()) {
+                    Ok(ep) => {
+                        tracing::info!(%addr, "serving dns-over-quic");
+                        let server = application.server.clone();
+                        let mut rx = shutdown_rx.clone();
+                        tasks.push(tokio::spawn(async move {
+                            agl_dns::doq::serve(ep, server, async move {
+                                let _ = rx.changed().await;
+                            })
+                            .await;
+                        }));
+                    }
+                    Err(e) => tracing::error!(%addr, error = %e, "binding dns-over-quic"),
+                }
+            }
+        }
+
         if cfg.tls.port_dns_over_tls != 0 {
             for ip in &cfg.dns.bind_hosts {
                 let addr = std::net::SocketAddr::new(*ip, cfg.tls.port_dns_over_tls);

@@ -31,6 +31,8 @@ pub enum Proto {
     Tls,
     /// DNS-over-HTTPS.
     Https,
+    /// DNS-over-QUIC.
+    Quic,
 }
 
 impl Proto {
@@ -41,6 +43,7 @@ impl Proto {
             Proto::Udp | Proto::Tcp => "",
             Proto::Tls => "tls",
             Proto::Https => "doh",
+            Proto::Quic => "doq",
         }
     }
 
@@ -807,5 +810,6 @@ mod tests {
         assert_eq!(Proto::Tcp.log_name(), "");
         assert_eq!(Proto::Tls.log_name(), "tls");
         assert_eq!(Proto::Https.log_name(), "doh");
+        assert_eq!(Proto::Quic.log_name(), "doq");
     }
 }

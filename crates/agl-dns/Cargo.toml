@@ -20,6 +20,7 @@ hyper = { version = "1.11.1", features = ["client", "http1", "http2"] }
 hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "tokio"] }
 jiff = { version = "0.2.37", features = ["serde"] }
 parking_lot = "0.12.5"
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rand = "0.10.2"
 rustls = { version = "0.23.44", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pemfile = "2.2.0"
