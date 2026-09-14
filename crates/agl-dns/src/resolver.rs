@@ -261,6 +261,13 @@ impl Resolver {
         }
 
         // 5. Filtering.
+        //
+        // An allowlist match does not stop resolution, but it *is* the
+        // query's verdict: upstream records the `@@` rule and reason 1
+        // alongside the upstream answer, and the UI shows the query as
+        // explicitly allowed.
+        let mut allowed: Option<(Reason, Vec<MatchedRule>)> = None;
+
         if settings.protection_enabled && settings.filtering_enabled {
             let engine = self.engine();
             let m = engine.match_request(&FilterRequest {
@@ -300,7 +307,9 @@ impl Resolver {
                         );
                     }
                 }
-                // An allowlist match is recorded but still resolved upstream.
+                Reason::NotFilteredAllowList => {
+                    allowed = Some((Reason::NotFilteredAllowList, m.rules));
+                }
                 _ => {}
             }
         }
@@ -308,15 +317,9 @@ impl Resolver {
         // 6. `AAAA` suppression.
         if settings.aaaa_disabled && qtype == RecordType::AAAA {
             let resp = msg::nodata(req, settings.blocking.ttl);
+            let (reason, rules) = allowed.clone().unwrap_or_default();
 
-            return done(
-                Action::Respond(Box::new(resp)),
-                Reason::NotFilteredNotFound,
-                vec![],
-                None,
-                false,
-                None,
-            );
+            return done(Action::Respond(Box::new(resp)), reason, rules, None, false, None);
         }
 
         // 7. Cache.
@@ -326,14 +329,9 @@ impl Resolver {
         {
             cached.metadata.id = req.metadata.id;
             if freshness == Freshness::Fresh {
-                return done(
-                    Action::Respond(Box::new(cached)),
-                    Reason::NotFilteredNotFound,
-                    vec![],
-                    None,
-                    true,
-                    None,
-                );
+                let (reason, rules) = allowed.clone().unwrap_or_default();
+
+                return done(Action::Respond(Box::new(cached)), reason, rules, None, true, None);
             }
         }
 
@@ -348,28 +346,23 @@ impl Resolver {
                     self.cache.put(k, &resp);
                 }
 
-                let upstream = pool
-                    .select(&host)
-                    .first()
-                    .map(|m| m.client.upstream.original.clone());
+                let upstream = pool.select(&host).first().map(|m| m.client.upstream.label());
+                let (reason, rules) = allowed.unwrap_or_default();
+
+                done(Action::Respond(Box::new(resp)), reason, rules, upstream, false, None)
+            }
+            Err(_) => {
+                let (reason, rules) = allowed.unwrap_or_default();
 
                 done(
-                    Action::Respond(Box::new(resp)),
-                    Reason::NotFilteredNotFound,
-                    vec![],
-                    upstream,
+                    Action::Respond(Box::new(msg::servfail(req))),
+                    reason,
+                    rules,
+                    None,
                     false,
                     None,
                 )
             }
-            Err(_) => done(
-                Action::Respond(Box::new(msg::servfail(req))),
-                Reason::NotFilteredNotFound,
-                vec![],
-                None,
-                false,
-                None,
-            ),
         }
     }
 
@@ -596,6 +589,26 @@ mod tests {
         let out = resolve(&r, "good.example.com.", RecordType::A, Proto::Udp).await;
         // No upstream is configured, so it reaches SERVFAIL rather than being blocked.
         assert_eq!(out.response().unwrap().metadata.response_code, ResponseCode::ServFail);
+    }
+
+    #[tokio::test]
+    async fn an_allowlist_match_stays_the_recorded_verdict() {
+        // Upstream writes the `@@` rule and reason 1 into the query log even
+        // though the query is then resolved normally, and the UI relies on it.
+        let r = resolver("||example.com^\n@@||good.example.com^\n", Table::default(), Settings::default());
+        let out = resolve(&r, "good.example.com.", RecordType::A, Proto::Udp).await;
+
+        assert_eq!(out.reason, Reason::NotFilteredAllowList);
+        assert_eq!(out.rules.len(), 1);
+        assert_eq!(out.rules[0].text, "@@||good.example.com^");
+    }
+
+    #[tokio::test]
+    async fn an_unmatched_query_records_no_rules() {
+        let r = resolver("||example.com^\n", Table::default(), Settings::default());
+        let out = resolve(&r, "unrelated.org.", RecordType::A, Proto::Udp).await;
+        assert_eq!(out.reason, Reason::NotFilteredNotFound);
+        assert!(out.rules.is_empty());
     }
 
     #[tokio::test]

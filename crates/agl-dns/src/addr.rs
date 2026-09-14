@@ -85,6 +85,19 @@ impl Upstream {
         }
     }
 
+    /// The address string used in the query log.
+    ///
+    /// Upstream logs the normalised form with an explicit port, e.g.
+    /// `https://dns10.quad9.net:443/dns-query` for a DoH upstream written
+    /// without one, and `9.9.9.10:53` for plain DNS.
+    pub fn label(&self) -> String {
+        match self.transport {
+            Transport::Udp | Transport::Tcp => self.authority(),
+            Transport::Stamp => self.original.clone(),
+            t => format!("{}://{}{}", t.scheme(), self.authority(), self.path),
+        }
+    }
+
     /// Reports whether this upstream is implemented by this build.
     pub const fn is_supported(&self) -> bool {
         matches!(
@@ -371,6 +384,18 @@ mod tests {
             Err(ParseError::UnterminatedDomains(_))
         ));
         assert!(matches!(parse("ftp://example.com"), Err(ParseError::Invalid(..))));
+    }
+
+    #[test]
+    fn the_log_label_carries_an_explicit_port() {
+        // This is the exact form a real AdGuard Home writes to querylog.json.
+        assert_eq!(
+            up("https://dns10.quad9.net/dns-query").label(),
+            "https://dns10.quad9.net:443/dns-query"
+        );
+        assert_eq!(up("9.9.9.10").label(), "9.9.9.10:53");
+        assert_eq!(up("tls://dns.adguard.com").label(), "tls://dns.adguard.com:853");
+        assert_eq!(up("2620:fe::10").label(), "[2620:fe::10]:53");
     }
 
     #[test]
