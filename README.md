@@ -1,5 +1,8 @@
 # adguardlite
 
+[![Docker](https://github.com/openhoangnc/adguardlite/actions/workflows/docker.yml/badge.svg)](https://github.com/openhoangnc/adguardlite/actions/workflows/docker.yml)
+[![Image](https://img.shields.io/badge/ghcr.io-openhoangnc%2Fadguardlite-blue?logo=docker&logoColor=white)](https://github.com/openhoangnc/adguardlite/pkgs/container/adguardlite)
+
 A Rust backend for [AdGuard Home](https://github.com/AdguardTeam/AdGuardHome),
 built as a drop-in replacement for the Go binary of release **v0.107.79**: the
 same config file, the same on-disk data, the same HTTP API, the same web
@@ -37,6 +40,63 @@ servers and so competes with them for CPU; treat the ratios as meaningful and
 the absolute numbers as a floor. The binary sizes compare against AdGuard's
 published release, not a local `go build`, which is larger because it keeps
 its debug info.
+
+## The published image
+
+A multi-architecture image — `linux/amd64` and `linux/arm64`, so it runs on a
+Raspberry Pi as well as a server — is published to the GitHub Container
+Registry on every push to `main`:
+
+```bash
+docker pull ghcr.io/openhoangnc/adguardlite:latest
+```
+
+| Tag | What it points at |
+|---|---|
+| `latest` | the newest build of `main` |
+| `sha-<short>` | one specific commit |
+| `1.2.3`, `1.2` | a `v1.2.3` release tag |
+
+The registry keeps only the **newest three releases**; everything older is
+deleted, `sha-` tags included. Deploy against a `sha-` tag rather than `latest`
+if you want a restart to redeploy the same bytes, and mirror the image into
+your own registry — or rebuild it from the commit — if you need one to stay
+pullable for longer than three builds.
+
+It is a drop-in for `adguard/adguardhome`: same binary path, working directory,
+exposed ports and entrypoint arguments. An existing deployment only changes its
+`image:` line, and keeps its config and data directory as they are.
+
+```yaml
+services:
+  adguardhome:
+    image: ghcr.io/openhoangnc/adguardlite:latest
+    container_name: adguardhome
+    restart: unless-stopped
+    volumes:
+      - ./work:/opt/adguardhome/work
+      - ./conf:/opt/adguardhome/conf
+    ports:
+      - 53:53/tcp
+      - 53:53/udp
+      - 3000:3000/tcp
+```
+
+Or directly:
+
+```bash
+docker run -d --name adguardhome \
+  -v "$PWD/work:/opt/adguardhome/work" \
+  -v "$PWD/conf:/opt/adguardhome/conf" \
+  -p 53:53/tcp -p 53:53/udp -p 3000:3000/tcp \
+  ghcr.io/openhoangnc/adguardlite:latest
+```
+
+To build the same image yourself:
+
+```bash
+docker build -f docker/Dockerfile -t adguardlite .
+```
 
 ## Compatibility, and how it was checked
 
@@ -125,24 +185,10 @@ To rebuild it from upstream's sources:
 scripts/build-frontend.sh
 ```
 
-## Running
+## Running from source
 
 ```bash
 cargo run --release -- --no-check-update -c ./AdGuardHome.yaml -w ./work
-```
-
-Or with Docker, as a drop-in for `adguard/adguardhome`:
-
-```bash
-docker build -f docker/Dockerfile -t adguardlite .
-```
-
-```bash
-docker run -d --name adguardhome \
-  -v "$PWD/work:/opt/adguardhome/work" \
-  -v "$PWD/conf:/opt/adguardhome/conf" \
-  -p 53:53/tcp -p 53:53/udp -p 3000:3000/tcp \
-  adguardlite
 ```
 
 ## Verifying
@@ -162,9 +208,16 @@ DNS, API and statistics comparisons described above.
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs three jobs: formatting, lints and the test
-suite; the cross-implementation differential against a freshly cloned AdGuard
-Home; and a Docker build whose image is then started and queried.
+One workflow runs on its own. `.github/workflows/docker.yml` builds the image
+for both architectures on native runners — no emulation — publishes a single
+multi-architecture tag to GHCR, and then prunes the package back to the newest
+three releases. Documentation-only commits are skipped, and a newer push
+cancels an in-flight build.
+
+`.github/workflows/ci.yml` — formatting, lints, the 555-test suite, and the
+differential against a freshly cloned AdGuard Home — is `workflow_dispatch`
+only. It costs nothing until it is started from the Actions tab, because all of
+it also runs locally: `cargo test --workspace` and `scripts/verify.sh`.
 
 ## Licence
 

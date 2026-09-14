@@ -1,0 +1,229 @@
+name: Docker
+
+# The only workflow that runs on its own. It builds the image for amd64 and
+# arm64 on native runners, publishes one multi-architecture tag to GHCR, and
+# then prunes the package back to the newest three releases.
+#
+# The full test, lint and differential suite lives in ci.yml and is run by
+# hand; `cargo test --workspace` covers it locally without a network.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    # A documentation-only commit does not change the image, and the build is
+    # two full LTO compiles of the workspace.
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+  # How many published releases to keep in the registry.
+  KEEP_RELEASES: '3'
+
+# A newer push makes an in-flight build pointless; stop paying for it.
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            # Native arm64, so the Rust build is not emulated. Free on public
+            # repositories.
+            runner: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Describe this build
+        id: vars
+        run: |
+          set -eu
+          if [ "${GITHUB_REF_TYPE}" = tag ]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="${GITHUB_REF_NAME}-${GITHUB_SHA:0:7}"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          echo "slug=$(echo '${{ matrix.platform }}' | tr / -)" >> "$GITHUB_OUTPUT"
+
+      # Pushed by digest with no tag: the merge job below is what names the
+      # image, so a half-finished multi-architecture push never claims `latest`.
+      #
+      # `provenance: false` keeps each build a single manifest. Attestations
+      # would add manifests that nothing references, which the prune below
+      # would then have to tell apart from stale ones.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/Dockerfile
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          build-args: |
+            VERSION=${{ steps.vars.outputs.version }}
+            VCS_REF=${{ github.sha }}
+            BUILD_DATE=${{ steps.vars.outputs.date }}
+          outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha,scope=${{ steps.vars.outputs.slug }}
+          cache-to: type=gha,mode=max,scope=${{ steps.vars.outputs.slug }}
+
+      - name: Export the digest
+        run: |
+          set -eu
+          mkdir -p "${{ runner.temp }}/digests"
+          digest='${{ steps.build.outputs.digest }}'
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ steps.vars.outputs.slug }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          # The file is empty and only has to survive until the merge job.
+          retention-days: 1
+
+  merge:
+    name: Publish the manifest
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digest-*
+          merge-multiple: true
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+
+      - name: Create the multi-architecture manifest
+        working-directory: ${{ runner.temp }}/digests
+        run: |
+          set -eu
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf "${REGISTRY}/${IMAGE_NAME}@sha256:%s " *)
+
+      - name: Inspect what was published
+        run: |
+          docker buildx imagetools inspect \
+            "${REGISTRY}/${IMAGE_NAME}:${{ steps.meta.outputs.version }}"
+
+  prune:
+    name: Prune old images
+    needs: merge
+    runs-on: ubuntu-latest
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # A published release is one tagged index plus one untagged manifest per
+      # architecture. Deleting an index's children breaks `docker pull` for
+      # that architecture, so the children of everything kept are resolved and
+      # kept too, rather than counting versions blindly.
+      - name: Work out what is stale
+        id: plan
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          OWNER: ${{ github.repository_owner }}
+          PACKAGE: ${{ github.event.repository.name }}
+          KEEP: ${{ env.KEEP_RELEASES }}
+        run: |
+          set -euo pipefail
+
+          # The first run of this workflow prunes nothing, and a missing
+          # package is the only listing failure that is not a problem.
+          if ! gh api "/users/$OWNER/packages/container/$PACKAGE" >/dev/null 2>&1; then
+            echo "No package published yet; nothing to prune."
+            echo "ids=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Newest first. Sorted here rather than trusted from the API, which
+          # documents no order, and `--paginate` would only order within a page
+          # anyway. ISO 8601 sorts lexically.
+          all="$(gh api --paginate \
+            "/users/$OWNER/packages/container/$PACKAGE/versions" \
+            --jq '.[] | [.created_at, .id, .name, ((.metadata.container.tags // []) | join(" "))] | @tsv' \
+            | sort -r)"
+
+          keep=""
+          kept=0
+          while IFS=$'\t' read -r created id digest tags; do
+            [ -n "${tags:-}" ] || continue
+            kept=$((kept + 1))
+            [ "$kept" -le "$KEEP" ] || continue
+            echo "keep    $digest  $created  [$tags]"
+            keep="$keep $digest"
+            # Its per-architecture manifests have to survive with it.
+            for child in $(docker buildx imagetools inspect --raw "$IMAGE@$digest" \
+                             | jq -r '.manifests[]?.digest'); do
+              echo "keep    $child  (child of $tags)"
+              keep="$keep $child"
+            done
+          done <<< "$all"
+
+          keep=" $keep "
+          ids=""
+          while IFS=$'\t' read -r created id digest tags; do
+            case "$keep" in *" $digest "*) continue ;; esac
+            echo "delete  $digest  $created  [${tags:-untagged}]"
+            ids="$ids,$id"
+          done <<< "$all"
+
+          echo "ids=${ids#,}" >> "$GITHUB_OUTPUT"
+
+      - name: Delete them
+        if: steps.plan.outputs.ids != ''
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ github.event.repository.name }}
+          package-type: container
+          package-version-ids: ${{ steps.plan.outputs.ids }}
+          token: ${{ secrets.GITHUB_TOKEN }}

@@ -7,7 +7,7 @@ version = "0.107.79"
 edition = "2024"
 rust-version = "1.98"
 license = "GPL-3.0-only"
-repository = "https://github.com/hoangnc/adguardlite"
+repository = "https://github.com/openhoangnc/adguardlite"
 
 [workspace.lints.rust]
 unsafe_code = "deny"

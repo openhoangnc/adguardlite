@@ -72,7 +72,7 @@ LABEL \
 	org.opencontainers.image.description="Network-wide ads & trackers blocking DNS server, Rust backend" \
 	org.opencontainers.image.licenses="GPL-3.0" \
 	org.opencontainers.image.revision=$VCS_REF \
-	org.opencontainers.image.source="https://github.com/hoangnc/adguardlite" \
+	org.opencontainers.image.source="https://github.com/openhoangnc/adguardlite" \
 	org.opencontainers.image.title="adguardlite" \
 	org.opencontainers.image.version=$VERSION
 

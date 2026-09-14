@@ -192,6 +192,19 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 - [x] CLI accepting every flag the Go binary documents
 - [x] Docker image with upstream's runtime contract, verified against a config
       and data directory a Go instance produced
+- [x] **Published image**: `.github/workflows/docker.yml` builds `linux/amd64`
+      and `linux/arm64` on native runners, pushes each by digest, and joins
+      them into one multi-architecture tag on `ghcr.io/openhoangnc/adguardlite`.
+      A prune step keeps the newest three releases and their per-architecture
+      children — resolved from each kept index rather than counted, because
+      deleting a child breaks `docker pull` for that architecture. Attestations
+      are off (`provenance: false`) so every manifest in the package is either
+      an index or a child of one.
+- [x] **CI is `workflow_dispatch` only.** Formatting, lints, the test suite and
+      the differential against a cloned AdGuard Home all run locally with
+      `cargo test --workspace` and `scripts/verify.sh`, so paying for them on
+      every push buys nothing. Run `ci.yml` from the Actions tab before cutting
+      a release tag.
 - [x] Graceful shutdown persisting the query log, statistics and sessions
 - [x] **`--logfile`** and the `log` block: a file, with rotation on
       `max_size`, `max_backups`, `max_age` and `compress`, or `syslog` over the
