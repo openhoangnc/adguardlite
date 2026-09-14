@@ -23,7 +23,7 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 | Web interface | done, embedded |
 | Docker | done, same runtime contract |
 | DHCP | **out of scope** — API reports it off and refuses changes |
-| Encrypted inbound listeners | DoT, DoH and DoQ done · DNSCrypt missing |
+| Encrypted inbound listeners | DoT, DoH and DoQ done · DNSCrypt **out of scope** |
 | Safe browsing / parental / safe search | not implemented |
 
 ---
@@ -167,13 +167,6 @@ the web interface already knows how to present it.
 ### Encrypted inbound listeners — the rest
 DoT, DoH, DoQ and HTTPS are done; these are what remain.
 
-- [ ] **DNSCrypt listener.** The largest remaining item and the one with the
-      widest security surface: it needs X25519 key exchange, Ed25519 signing
-      and NaCl box (XSalsa20-Poly1305), a signed-certificate protocol served
-      over DNS, and a `dnscrypt_config_file` matching AdGuard's own format.
-      `port_dnscrypt` and `dnscrypt_config_file` round-trip through the config
-      and are otherwise ignored. Weigh it against the protocol's declining use
-      before starting.
 - [ ] HTTP/3 for DNS-over-HTTPS (`serve_http3`, `use_http3_upstreams`)
 - [ ] The HTTP→HTTPS redirect (`force_https` is stored and unread)
 - [ ] Certificate reload without a restart: a certificate replaced through
@@ -185,6 +178,43 @@ DoT, DoH, DoQ and HTTPS are done; these are what remain.
 - [ ] DNSCrypt (`sdns://` stamps)
 
 Both parse today and are reported at startup and skipped.
+
+These are separate from the listeners, and the DNSCrypt one is worth more than
+its listener: a `sdns://` upstream means *using* a DNSCrypt provider, and
+AdGuard's own provider list publishes stamps for AdGuard DNS, Quad9, OpenDNS
+and others. A user migrating a config that names one loses their upstream
+today. The client side also needs far less than the server side — no
+certificate to serve, no provider keys to manage.
+
+### DNSCrypt listener — out of scope, not pending
+
+**This build will not serve DNSCrypt.** Unlike DHCP, nothing about the API
+changes: `port_dnscrypt` and `dnscrypt_config_file` round-trip through the
+config file untouched, `/control/tls/status` reports them as stored, and no
+endpoint refuses anything. The port is simply never bound.
+
+Why it was excluded rather than scheduled:
+
+- It is the only remaining protocol that needs cryptography this project does
+  not already have. DoT, DoH and DoQ came almost free once rustls and quinn
+  were in the tree; DNSCrypt needs X25519 key exchange, Ed25519 signing and
+  NaCl box (XSalsa20-Poly1305), none of them present.
+- On top of the primitives it needs a signed-certificate protocol served over
+  DNS — client magic, resolver magic, padding rules — and a
+  `dnscrypt_config_file` matching AdGuard's own format, including provider key
+  material. Their Go library is roughly 4,400 lines.
+- A mistake in key handling or nonce reuse is a silent security failure, not a
+  visible bug, and this project has no way to test for one the way it tests
+  everything else — by comparing against a running Go build.
+- The three protocols it would sit alongside all work, so a deployment that
+  needs DNSCrypt can front adguardlite with `dnscrypt-proxy`.
+
+Note that DNSCrypt is **not** a dead protocol: AdGuard's own provider list at
+<https://adguard-dns.io/kb/general/dns-providers/> still publishes DNSCrypt
+addresses and `sdns://` stamps for AdGuard DNS, Quad9, OpenDNS, CleanBrowsing
+and others. The exclusion is about the cost and risk of implementing it here,
+not about nobody using it. If that trade changes, this is a session on its own,
+with the Go implementation as an oracle throughout.
 
 ### Filtering features
 - [ ] Safe browsing: the hash-prefix lookup protocol and its cache
@@ -240,6 +270,10 @@ an empty `client_info.name`.
 
 Not bugs; recorded so nobody "fixes" them.
 
+- **No DNSCrypt listener.** Excluded on purpose: the only remaining protocol
+  needing cryptography not already in the tree, and untestable against the Go
+  build the way everything else here is. See
+  [DNSCrypt](#dnscrypt-listener--out-of-scope-not-pending).
 - **No DHCP server.** Excluded on purpose. The API reports the feature off and
   refuses every change; the config section still round-trips. See
   [DHCP](#dhcp--out-of-scope-not-pending).

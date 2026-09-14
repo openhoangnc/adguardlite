@@ -8,8 +8,9 @@ and more throughput.
 
 It is not a complete reimplementation. The DNS filtering path, the web
 interface, the storage formats and the DNS-over-TLS, DNS-over-HTTPS and
-DNS-over-QUIC listeners are done and verified against the Go build; DNSCrypt
-and several smaller features are not.
+DNS-over-QUIC listeners are done and verified against the Go build.
+**DNSCrypt is deliberately excluded**, and several smaller features are not
+implemented.
 **DHCP is deliberately excluded** — see below.
 [What is not implemented](#what-is-not-implemented) lists every gap.
 
@@ -63,6 +64,14 @@ write endpoint, `/control/tls/configure`, `/control/tls/validate`, and
 
 **Excluded by design:**
 
+- **The DNSCrypt listener.** It is the one remaining protocol needing
+  cryptography this project does not already have — X25519, Ed25519 and NaCl
+  box — plus a signed-certificate protocol and AdGuard's provider-key file
+  format, and a mistake there fails silently rather than visibly.
+  `port_dnscrypt` and `dnscrypt_config_file` round-trip through the config
+  untouched; the port is never bound. DNSCrypt itself is still in use —
+  AdGuard's own provider list publishes stamps for it — so front adguardlite
+  with `dnscrypt-proxy` if you need it.
 - **DHCP.** This build will not serve DHCP; run it on your router or a
   dedicated service. `/control/dhcp/status` always reports the feature off and
   every settings change is refused, so the web interface cannot store DHCP
@@ -72,9 +81,8 @@ write endpoint, `/control/tls/configure`, `/control/tls/validate`, and
 
 **Not implemented at all:**
 
-- **The DNSCrypt listener**, and HTTP/3. DNS-over-TLS, DNS-over-HTTPS,
-  DNS-over-QUIC and HTTPS for the web interface *are* served. `port_dnscrypt`
-  and `dnscrypt_config_file` round-trip through the config and are ignored.
+- **HTTP/3** for DNS-over-HTTPS. DNS-over-TLS, DNS-over-HTTPS, DNS-over-QUIC
+  and HTTPS for the web interface *are* served.
 - **DNS-over-QUIC and DNSCrypt upstreams.** A config naming one is reported at
   startup and skipped.
 - **Safe browsing and parental control.** The toggles persist and the API
