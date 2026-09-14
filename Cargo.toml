@@ -52,14 +52,3 @@ debug = false
 [profile.bench]
 inherits = "release"
 debug = "line-tables-only"
-
-[workspace.dependencies]
-agl-core = { path = "crates/agl-core" }
-agl-gob = { path = "crates/agl-gob" }
-agl-bolt = { path = "crates/agl-bolt" }
-agl-config = { path = "crates/agl-config" }
-agl-filter = { path = "crates/agl-filter" }
-agl-dns = { path = "crates/agl-dns" }
-agl-querylog = { path = "crates/agl-querylog" }
-agl-stats = { path = "crates/agl-stats" }
-agl-api = { path = "crates/agl-api" }

@@ -9,6 +9,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+agl-core = { version = "0.107.79", path = "../agl-core" }
+agl-filter = { version = "0.107.79", path = "../agl-filter" }
 ahash = "0.8.12"
 base64 = "0.23.1"
 bytes = "1.12.1"
@@ -18,11 +20,11 @@ hyper = { version = "1.11.1", features = ["client", "http1", "http2"] }
 hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "tokio"] }
 parking_lot = "0.12.5"
 rand = "0.10.2"
-rustls = "0.23.44"
+rustls = { version = "0.23.44", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-pki-types = "1.15.1"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.20"
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "io-util", "signal"] }
-tokio-rustls = "0.26.5"
+tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring", "tls12"] }
 url = "2.5.8"
 webpki-roots = "1.0.9"
