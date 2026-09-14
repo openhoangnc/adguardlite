@@ -209,6 +209,24 @@ This is a derivative work of a GPL-3.0 project and redistributes AdGuard's
 compiled frontend, their services catalogue and captured fixtures. `NOTICE.md`
 records what came from where; update it when adding anything else of theirs.
 
+## Encrypted listeners
+
+DNS-over-TLS and DNS-over-HTTPS are served. Two things about how they fit:
+
+- **DoH shares the router with the web interface**, because upstream serves
+  both on the HTTPS port. `routes::router(state, secure)` takes whether the
+  listener is encrypted; DoH answers over plain HTTP only when
+  `http.doh.insecure_enabled` is set, so an operator cannot expose queries by
+  accident.
+- **DoH goes through `agl_dns::server::Server::handle`**, not straight to the
+  resolver, so it gets the same rate limiting, access control, query log and
+  statistics as UDP and TCP. Anything added to that path applies to DoH for
+  free; anything that bypasses it silently does not.
+
+`tests/compat/dns-oracle` is the check that matters: it drives AdGuard's own
+dnsproxy client against a listener, with the certificate verified rather than
+skipped.
+
 ## DHCP is excluded on purpose
 
 Not a missing feature: this build will not serve DHCP. The API reports the

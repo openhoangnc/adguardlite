@@ -59,6 +59,9 @@ pub struct AppState {
     pub config: RwLock<Config>,
     /// The resolver, for cache control and protection state.
     pub resolver: Arc<Resolver>,
+    /// The DNS front end, so DNS-over-HTTPS takes the same path as UDP and
+    /// TCP: the same rate limits, access control, query log and statistics.
+    pub dns_server: Arc<agl_dns::server::Server>,
     /// The filter lists.
     pub filters: RwLock<Manager>,
     /// The query log.

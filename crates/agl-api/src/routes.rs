@@ -8,6 +8,7 @@ use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde_json::json;
 
+use crate::doh;
 use crate::error::ApiResult;
 use crate::handlers::{filtering, logs, misc, status};
 use crate::state::Shared;
@@ -24,14 +25,30 @@ const PUBLIC: &[&str] = &[
 ];
 
 /// Builds the full application router.
-pub fn router(state: Shared) -> Router {
+///
+/// `secure` says whether this router is serving an encrypted listener; it
+/// decides whether DNS-over-HTTPS answers, since serving DNS over plain HTTP
+/// exposes queries to the network.
+pub fn router(state: Shared, secure: bool) -> Router {
     let control = control_router()
         .layer(middleware::from_fn_with_state(state.clone(), require_auth))
         .with_state(state.clone());
 
+    // DNS-over-HTTPS shares the router with the web interface, because
+    // upstream serves both on the HTTPS port.  The routes are the defaults in
+    // `http.doh.routes`; a ClientID may be appended as a path segment.
+    let dns = Router::new()
+        .route("/dns-query", get(doh::get).post(doh::post))
+        .route(
+            "/dns-query/{client_id}",
+            get(doh::get_with_client).post(doh::post_with_client),
+        );
+
     Router::new()
         .nest("/control", control)
+        .merge(dns.with_state(state.clone()))
         .fallback(get(serve_ui))
+        .layer(axum::Extension(doh::Secure(secure)))
         .with_state(state)
 }
 
@@ -155,8 +172,8 @@ fn control_router() -> Router<Shared> {
         .route("/blocked_services/update", put(misc::services_update))
         // Encryption.
         .route("/tls/status", get(misc::tls_status))
-        .route("/tls/configure", post(not_supported))
-        .route("/tls/validate", post(not_supported))
+        .route("/tls/configure", post(misc::tls_configure))
+        .route("/tls/validate", post(misc::tls_validate))
         // DHCP.  Not implemented: status reports the feature as off and every
         // change is refused.  See the DHCP section of TASK.md.
         .route("/dhcp/status", get(misc::dhcp_status))

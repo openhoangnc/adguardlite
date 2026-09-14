@@ -23,7 +23,7 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 | Web interface | done, embedded |
 | Docker | done, same runtime contract |
 | DHCP | **out of scope** — API reports it off and refuses changes |
-| Encrypted inbound listeners | not implemented |
+| Encrypted inbound listeners | DoT and DoH done · DoQ, DNSCrypt missing |
 | Safe browsing / parental / safe search | not implemented |
 
 ---
@@ -78,6 +78,22 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 - [x] Blocked hosts dropped on UDP, REFUSED on TCP
 - [x] **Verified**: 2,046 names over A and AAAA against Go — no verdict differs
 
+### Encryption
+- [x] Certificate and key loading, inline or from a path, with the conflict
+      upstream rejects
+- [x] Chain verification against the trusted roots, reported as a warning while
+      still serving — a self-signed certificate works and says so
+- [x] `GET /control/tls/status`, `POST /control/tls/validate`,
+      `POST /control/tls/configure`
+- [x] **DNS-over-TLS listener**
+- [x] **DNS-over-HTTPS listener**, GET and POST, with the ClientID path segment
+- [x] HTTPS for the web interface, sharing the port with DoH as upstream does
+- [x] DoH refused over plain HTTP unless `insecure_enabled` is set
+- [x] **Verified**: AdGuard's own dnsproxy client, with full certificate
+      verification, resolves through both listeners; the query log records them
+      as `dot` and `doh`; `/control/tls/status` matches Go field for field with
+      the same certificate loaded
+
 ### Storage
 - [x] `querylog.json`: exact JSON shape, rotation, in-memory buffer, reverse
       chunked reads for the API
@@ -110,8 +126,6 @@ Routed, and refusing rather than pretending to succeed.
 
 Pending — these become real work when the feature lands:
 
-- [ ] `POST /control/tls/configure`
-- [ ] `POST /control/tls/validate`
 - [ ] `POST /control/update`
 
 Settled — these stay 501 by design, see [DHCP](#dhcp--out-of-scope-not-pending):
@@ -148,19 +162,18 @@ What that means in practice:
 501 is what upstream's own API documents for a build without DHCP support, so
 the web interface already knows how to present it.
 
-### Encrypted inbound listeners
-- [ ] DNS-over-TLS listener (port 853)
-- [ ] DNS-over-HTTPS listener, including the `{ClientID}` routes already
-      present in the config model
-- [ ] DNS-over-QUIC listener
-- [ ] DNSCrypt listener
-- [ ] HTTP/3 for the above
-- [ ] HTTPS for the web interface, and the HTTP→HTTPS redirect
-- [ ] Certificate loading, validation and the `/control/tls/*` endpoints
+### Encrypted inbound listeners — the rest
+DoT, DoH and HTTPS are done; these are what remain.
 
-`agl-dns` already owns a rustls client config; the server side needs a
-certificate resolver and one listener per protocol. DoT and DoH are the
-worthwhile first two — the resolver and `Proto` enum already model them.
+- [ ] DNS-over-QUIC listener. `port_dns_over_quic` is stored but **ignored**,
+      where Go binds it — a config naming a privileged port starts here and
+      fails there.
+- [ ] DNSCrypt listener
+- [ ] HTTP/3
+- [ ] The HTTP→HTTPS redirect (`force_https` is stored and unread)
+- [ ] Certificate reload without a restart: a certificate replaced through
+      `/control/tls/configure` is stored, but the running listeners keep the
+      one they started with
 
 ### Encrypted upstreams
 - [ ] DNS-over-QUIC (`quic://`)
@@ -177,7 +190,8 @@ Both parse today and are reported at startup and skipped.
       round-trip through the config, but the block applies at all times
 - [ ] Per-client settings: a persistent client's own filtering toggles,
       upstreams, tags and blocked services do not affect resolution
-- [ ] ClientID extraction from DoH/DoT paths
+- [ ] ClientID: the DoH path segment is routed and accepted, but the identifier
+      is not yet used to select per-client settings
 
 ### Client discovery
 - [ ] ARP table

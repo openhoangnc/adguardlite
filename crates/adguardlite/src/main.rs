@@ -152,6 +152,7 @@ async fn run(args: Args) -> anyhow::Result<()> {
         paths: application.paths.clone(),
         config: parking_lot::RwLock::new(application.config.clone()),
         resolver: application.resolver.clone(),
+        dns_server: application.server.clone(),
         filters: parking_lot::RwLock::new(application.filters.clone()),
         querylog: querylog.clone(),
         stats: stats.clone(),
@@ -175,22 +176,77 @@ async fn run(args: Args) -> anyhow::Result<()> {
         tracing::info!(%addr, "serving dns");
     }
 
-    // The web interface.
+    // Encryption, if a usable certificate is configured.  A broken one is a
+    // warning rather than a fatal error: plain DNS and the web interface
+    // should keep working while the operator fixes it.
+    let tls = load_tls(&application.config);
+
+    // The web interface over plain HTTP.
     let listener = tokio::net::TcpListener::bind(web_addr).await?;
     tracing::info!(addr = %web_addr, "serving web interface");
     if state.needs_install() {
         tracing::info!("no user configured yet; open the web interface to finish setup");
     }
 
-    let app_router = agl_api::routes::router(state.clone());
+    let app_router = agl_api::routes::router(state.clone(), false);
     let mut web_shutdown = shutdown_rx.clone();
     tasks.push(tokio::spawn(async move {
-        let _ = axum::serve(listener, app_router)
-            .with_graceful_shutdown(async move {
-                let _ = web_shutdown.changed().await;
-            })
-            .await;
+        let _ = axum::serve(
+            listener,
+            app_router.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = web_shutdown.changed().await;
+        })
+        .await;
     }));
+
+    if let Some(tls) = tls {
+        let cfg = &application.config;
+
+        // HTTPS carries both the web interface and DNS-over-HTTPS, as upstream
+        // serves them.
+        if cfg.tls.port_https != 0 {
+            for ip in &cfg.dns.bind_hosts {
+                let addr = std::net::SocketAddr::new(*ip, cfg.tls.port_https);
+                match agl_api::https::serve(
+                    addr,
+                    tls.https.clone(),
+                    agl_api::routes::router(state.clone(), true),
+                    shutdown_rx.clone(),
+                )
+                .await
+                {
+                    Ok(t) => {
+                        tracing::info!(%addr, "serving https and dns-over-https");
+                        tasks.push(t);
+                    }
+                    Err(e) => tracing::error!(%addr, error = %e, "binding https"),
+                }
+            }
+        }
+
+        if cfg.tls.port_dns_over_tls != 0 {
+            for ip in &cfg.dns.bind_hosts {
+                let addr = std::net::SocketAddr::new(*ip, cfg.tls.port_dns_over_tls);
+                match agl_dns::server::bind_tcp(addr).await {
+                    Ok(l) => {
+                        tracing::info!(%addr, "serving dns-over-tls");
+                        let server = application.server.clone();
+                        let dot = tls.dot.clone();
+                        let mut rx = shutdown_rx.clone();
+                        tasks.push(tokio::spawn(async move {
+                            let _ = agl_dns::server::serve_dot(l, dot, server, async move {
+                                let _ = rx.changed().await;
+                            })
+                            .await;
+                        }));
+                    }
+                    Err(e) => tracing::error!(%addr, error = %e, "binding dns-over-tls"),
+                }
+            }
+        }
+    }
 
     // Periodic maintenance: flush the log, prune statistics, refresh lists.
     tasks.push(tokio::spawn(maintenance(
@@ -216,6 +272,39 @@ async fn run(args: Args) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Loads the configured certificate, if encryption is on and one is set.
+fn load_tls(cfg: &agl_config::Config) -> Option<agl_dns::tls::Loaded> {
+    if !cfg.tls.enabled {
+        return None;
+    }
+
+    let src = agl_dns::tls::Source {
+        certificate_chain: cfg.tls.certificate_chain.clone(),
+        private_key: cfg.tls.private_key.clone(),
+        certificate_path: cfg.tls.certificate_path.clone(),
+        private_key_path: cfg.tls.private_key_path.clone(),
+    };
+
+    if src.is_empty() {
+        tracing::warn!("encryption is enabled but no certificate is configured");
+
+        return None;
+    }
+
+    match agl_dns::tls::load(&src) {
+        Ok(l) => {
+            tracing::info!(names = ?l.status.dns_names, "certificate loaded");
+
+            Some(l)
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "encryption is enabled but the certificate is unusable");
+
+            None
+        }
+    }
 }
 
 /// Runs the periodic upkeep the server needs.

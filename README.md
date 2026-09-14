@@ -7,8 +7,9 @@ interface, and the same Docker contract — in a smaller image, with less memory
 and more throughput.
 
 It is not a complete reimplementation. The DNS filtering path, the web
-interface and the storage formats are done and verified against the Go build;
-the encrypted inbound listeners and several smaller features are not.
+interface, the storage formats and the DNS-over-TLS and DNS-over-HTTPS
+listeners are done and verified against the Go build; DNS-over-QUIC, DNSCrypt
+and several smaller features are not.
 **DHCP is deliberately excluded** — see below.
 [What is not implemented](#what-is-not-implemented) lists every gap.
 
@@ -47,6 +48,7 @@ read off the source.
 | `querylog.json` | byte-identical | 43 real log lines, one per distinct entry shape, re-encode byte for byte. |
 | `stats.db` (bbolt + gob) | interoperable | The Rust server wrote a database; a Go AdGuardHome read it and reported the same counts. Go's own gob encoder is not byte-stable, so byte-equality is not the bar. |
 | Filter lists on disk | same files | The same `data/filters/<id>.txt` layout; an existing download is used as-is. |
+| DNS-over-TLS and DNS-over-HTTPS | interoperable | AdGuard's own dnsproxy client, verifying the certificate, resolves through both listeners. |
 | Docker | same contract | Same binary path, working directory, ports and entrypoint arguments; run against a config and data directory a Go instance produced. |
 
 Reproduce it with `scripts/verify.sh` (see [Verifying](#verifying)).
@@ -70,9 +72,9 @@ write endpoint, `/control/tls/configure`, `/control/tls/validate`, and
 
 **Not implemented at all:**
 
-- **Encrypted inbound listeners** — DNS-over-TLS, DNS-over-HTTPS,
-  DNS-over-QUIC and DNSCrypt. Plain DNS over UDP and TCP is served. *Outbound*
-  DoT and DoH upstreams do work.
+- **DNS-over-QUIC and DNSCrypt listeners**, and HTTP/3. DNS-over-TLS,
+  DNS-over-HTTPS and HTTPS for the web interface *are* served.
+  `port_dns_over_quic` is stored but ignored, where the Go build binds it.
 - **DNS-over-QUIC and DNSCrypt upstreams.** A config naming one is reported at
   startup and skipped.
 - **Safe browsing and parental control.** The toggles persist and the API
@@ -83,7 +85,9 @@ write endpoint, `/control/tls/configure`, `/control/tls/validate`, and
   resolution.
 - **Runtime client discovery** — ARP, rDNS, WHOIS, DHCP leases.
   `/control/clients` reports an empty `auto_clients`.
-- **HTTPS for the web interface.** It serves plain HTTP.
+- **The HTTP→HTTPS redirect.** `force_https` is stored and unread.
+- **Certificate reload without a restart.** A certificate replaced through the
+  API is stored, but the running listeners keep the one they started with.
 - **Automatic updates**, **ipset**, **DNS64**, **EDNS Client Subnet**,
   `upstream_dns_file`, `bogus_nxdomain`, `trusted_proxies`, DDR handling, and
   duplicate-request coalescing.

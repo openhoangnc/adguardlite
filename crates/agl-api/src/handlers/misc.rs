@@ -345,24 +345,48 @@ pub async fn services_update(
     Ok(())
 }
 
-/// `GET /control/tls/status`
-pub async fn tls_status(State(s): State<Shared>) -> Json<serde_json::Value> {
-    let cfg = s.config.read();
-    let t = &cfg.tls;
+/// Describes the configured certificate, if any.
+fn tls_report(s: &Shared) -> (agl_dns::tls::Status, agl_config::model::TlsConfig) {
+    let t = s.config.read().tls.clone();
+    let src = agl_dns::tls::Source {
+        certificate_chain: t.certificate_chain.clone(),
+        private_key: t.private_key.clone(),
+        certificate_path: t.certificate_path.clone(),
+        private_key_path: t.private_key_path.clone(),
+    };
+
+    let status = if src.is_empty() {
+        agl_dns::tls::Status::default()
+    } else {
+        agl_dns::tls::inspect(&src)
+    };
+
+    (status, t)
+}
+
+/// Renders the certificate report the way `/control/tls/status` does.
+fn tls_json(
+    st: &agl_dns::tls::Status,
+    t: &agl_config::model::TlsConfig,
+    plain_dns: bool,
+) -> serde_json::Value {
+    let zero = agl_core::gotime::GO_ZERO_TIME;
 
     let mut out = json!({
-        "not_before": agl_core::gotime::GO_ZERO_TIME,
-        "not_after": agl_core::gotime::GO_ZERO_TIME,
-        "dns_names": serde_json::Value::Null,
-        "valid_cert": false,
-        "valid_chain": false,
-        "valid_key": false,
-        "valid_pair": false,
+        "not_before": if st.not_before.is_empty() { zero.to_string() } else { st.not_before.clone() },
+        "not_after": if st.not_after.is_empty() { zero.to_string() } else { st.not_after.clone() },
+        "dns_names": if st.dns_names.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::to_value(&st.dns_names).unwrap_or(serde_json::Value::Null)
+        },
+        "valid_cert": st.valid_cert,
+        "valid_chain": st.valid_chain,
+        "valid_key": st.valid_key,
+        "valid_pair": st.valid_pair,
         "enabled": t.enabled,
         "force_https": t.force_https,
-        "port_https": t.port_https,
-        "port_dns_over_tls": t.port_dns_over_tls,
-        "port_dns_over_quic": t.port_dns_over_quic,
+        // port_dnscrypt is always sent; the other three are omitempty.
         "port_dnscrypt": t.port_dnscrypt,
         "dnscrypt_config_file": t.dnscrypt_config_file,
         "certificate_chain": t.certificate_chain,
@@ -370,18 +394,189 @@ pub async fn tls_status(State(s): State<Shared>) -> Json<serde_json::Value> {
         "certificate_path": t.certificate_path,
         "private_key_path": t.private_key_path,
         "private_key_saved": !t.private_key.is_empty() || !t.private_key_path.is_empty(),
-        "serve_plain_dns": cfg.dns.serve_plain_dns,
+        "serve_plain_dns": plain_dns,
     });
 
-    // Upstream marks the server name `omitempty`, so an unset one is absent
-    // rather than an empty string.
-    if !t.server_name.is_empty()
-        && let Some(m) = out.as_object_mut()
-    {
+    let Some(m) = out.as_object_mut() else {
+        return out;
+    };
+
+    // Upstream marks these `omitempty`, so an unset one is absent rather than
+    // an empty string or a zero.
+    if !t.server_name.is_empty() {
         m.insert("server_name".into(), json!(t.server_name));
     }
+    for (k, v) in [
+        ("port_https", t.port_https),
+        ("port_dns_over_tls", t.port_dns_over_tls),
+        ("port_dns_over_quic", t.port_dns_over_quic),
+    ] {
+        if v != 0 {
+            m.insert(k.into(), json!(v));
+        }
+    }
+    for (k, v) in [
+        ("key_type", &st.key_type),
+        ("subject", &st.subject),
+        ("issuer", &st.issuer),
+        ("warning_validation", &st.warning_validation),
+    ] {
+        if !v.is_empty() {
+            m.insert(k.into(), json!(v));
+        }
+    }
 
-    Json(out)
+    out
+}
+
+/// `GET /control/tls/status`
+pub async fn tls_status(State(s): State<Shared>) -> Json<serde_json::Value> {
+    let (st, t) = tls_report(&s);
+    let plain = s.config.read().dns.serve_plain_dns;
+
+    Json(tls_json(&st, &t, plain))
+}
+
+/// The encryption settings the interface sends.
+#[derive(Deserialize, Clone, Default)]
+pub struct TlsSettings {
+    /// Whether encryption is on.
+    #[serde(default)]
+    pub enabled: bool,
+    /// The hostname the certificate is for.
+    #[serde(default)]
+    pub server_name: String,
+    /// Whether plain HTTP redirects to HTTPS.
+    #[serde(default)]
+    pub force_https: bool,
+    /// The HTTPS port.
+    #[serde(default)]
+    pub port_https: u16,
+    /// The DNS-over-TLS port.
+    #[serde(default)]
+    pub port_dns_over_tls: u16,
+    /// The DNS-over-QUIC port.
+    #[serde(default)]
+    pub port_dns_over_quic: u16,
+    /// The PEM-encoded certificate chain.
+    #[serde(default)]
+    pub certificate_chain: String,
+    /// The PEM-encoded private key.
+    #[serde(default)]
+    pub private_key: String,
+    /// A path to the certificate chain.
+    #[serde(default)]
+    pub certificate_path: String,
+    /// A path to the private key.
+    #[serde(default)]
+    pub private_key_path: String,
+    /// Whether plain DNS is still served.
+    #[serde(default = "default_true_bool")]
+    pub serve_plain_dns: bool,
+}
+
+/// The default for `serve_plain_dns`, which is on unless turned off.
+fn default_true_bool() -> bool {
+    true
+}
+
+/// Inspects a proposed certificate without storing it.
+fn inspect_settings(req: &TlsSettings) -> agl_dns::tls::Status {
+    let src = agl_dns::tls::Source {
+        certificate_chain: req.certificate_chain.clone(),
+        private_key: req.private_key.clone(),
+        certificate_path: req.certificate_path.clone(),
+        private_key_path: req.private_key_path.clone(),
+    };
+
+    if src.is_empty() {
+        agl_dns::tls::Status::default()
+    } else {
+        agl_dns::tls::inspect(&src)
+    }
+}
+
+/// Copies the proposed settings into a config block.
+fn settings_to_config(req: &TlsSettings, t: &mut agl_config::model::TlsConfig) {
+    t.enabled = req.enabled;
+    t.server_name = req.server_name.clone();
+    t.force_https = req.force_https;
+    t.port_https = req.port_https;
+    t.port_dns_over_tls = req.port_dns_over_tls;
+    t.port_dns_over_quic = req.port_dns_over_quic;
+    t.certificate_chain = req.certificate_chain.clone();
+    t.private_key = req.private_key.clone();
+    t.certificate_path = req.certificate_path.clone();
+    t.private_key_path = req.private_key_path.clone();
+}
+
+/// `POST /control/tls/validate`
+///
+/// Reports on a certificate the user is still editing without storing it.
+pub async fn tls_validate(
+    State(s): State<Shared>,
+    Json(req): Json<TlsSettings>,
+) -> Json<serde_json::Value> {
+    let _ = &s;
+    let st = inspect_settings(&req);
+
+    let mut t = agl_config::model::TlsConfig::default();
+    settings_to_config(&req, &mut t);
+
+    Json(tls_json(&st, &t, req.serve_plain_dns))
+}
+
+/// `POST /control/tls/configure`
+///
+/// Stores the settings, refusing a certificate that cannot be served: saving
+/// one would leave the listeners unable to start on the next restart.
+pub async fn tls_configure(
+    State(s): State<Shared>,
+    Json(req): Json<TlsSettings>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let st = inspect_settings(&req);
+
+    let configured = !req.certificate_chain.is_empty()
+        || !req.certificate_path.is_empty()
+        || !req.private_key.is_empty()
+        || !req.private_key_path.is_empty();
+
+    if req.enabled && !st.valid_pair {
+        let why = if st.warning_validation.is_empty() {
+            "a certificate and a matching private key are required".to_string()
+        } else {
+            st.warning_validation.clone()
+        };
+
+        return Err(ApiError::bad_request(format!(
+            "encryption not enabled: {why}"
+        )));
+    }
+
+    if req.enabled && req.port_https == 0 && req.port_dns_over_tls == 0 {
+        return Err(ApiError::bad_request(
+            "encryption not enabled: no port is set for HTTPS or DNS-over-TLS",
+        ));
+    }
+
+    if configured && !st.valid_cert {
+        return Err(ApiError::bad_request(format!(
+            "invalid certificate: {}",
+            st.warning_validation
+        )));
+    }
+
+    {
+        let mut cfg = s.config.write();
+        settings_to_config(&req, &mut cfg.tls);
+        cfg.dns.serve_plain_dns = req.serve_plain_dns;
+    }
+
+    s.save_config().map_err(ApiError::internal)?;
+
+    let t = s.config.read().tls.clone();
+
+    Ok(Json(tls_json(&st, &t, req.serve_plain_dns)))
 }
 
 /// `GET /control/dhcp/status`

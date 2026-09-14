@@ -21,6 +21,9 @@ const TCP_IDLE: Duration = Duration::from_secs(30);
 /// The maximum size of a TCP-framed query.
 const MAX_TCP_MSG: usize = 64 * 1024;
 
+/// How long a TLS handshake may take before the connection is dropped.
+const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Notified about every handled query, for the query log and statistics.
 pub trait Observer: Send + Sync + 'static {
     /// Called once per handled request.
@@ -173,19 +176,61 @@ pub async fn serve_tcp(
 
         let server = server.clone();
         tokio::spawn(async move {
-            let _ = serve_tcp_conn(stream, server, peer).await;
+            stream.set_nodelay(true).ok();
+            let _ = serve_stream(stream, server, peer, Proto::Tcp).await;
         });
     }
 }
 
-/// Handles queries on one TCP connection until it closes or goes idle.
-async fn serve_tcp_conn(
-    mut stream: tokio::net::TcpStream,
+/// Serves DNS-over-TLS until `shutdown` resolves.
+///
+/// A handshake failure closes that one connection and leaves the listener
+/// running: an unreachable server is a worse outcome than a rejected client.
+pub async fn serve_dot(
+    listener: TcpListener,
+    tls: Arc<rustls::ServerConfig>,
+    server: Arc<Server>,
+    shutdown: impl std::future::Future<Output = ()> + Send,
+) -> std::io::Result<()> {
+    let acceptor = tokio_rustls::TlsAcceptor::from(tls);
+    tokio::pin!(shutdown);
+
+    loop {
+        let (stream, peer) = tokio::select! {
+            r = listener.accept() => r?,
+            () = &mut shutdown => return Ok(()),
+        };
+
+        let server = server.clone();
+        let acceptor = acceptor.clone();
+        tokio::spawn(async move {
+            stream.set_nodelay(true).ok();
+
+            // Bound the handshake so a client that connects and says nothing
+            // cannot hold a task open.
+            let accepted = tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream));
+            let Ok(Ok(tls_stream)) = accepted.await else {
+                return;
+            };
+
+            let _ = serve_stream(tls_stream, server, peer, Proto::Tls).await;
+        });
+    }
+}
+
+/// Handles queries on one stream until it closes or goes idle.
+///
+/// Plain DNS over TCP and DNS-over-TLS share this: both carry the same
+/// two-byte-length framing, and only the transport underneath differs.
+async fn serve_stream<S>(
+    mut stream: S,
     server: Arc<Server>,
     peer: SocketAddr,
-) -> std::io::Result<()> {
-    stream.set_nodelay(true).ok();
-
+    proto: Proto,
+) -> std::io::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     loop {
         let mut lenbuf = [0u8; 2];
         match tokio::time::timeout(TCP_IDLE, stream.read_exact(&mut lenbuf)).await {
@@ -204,7 +249,7 @@ async fn serve_tcp_conn(
             return Ok(());
         }
 
-        let Some(resp) = server.handle(&wire, peer, Proto::Tcp).await else {
+        let Some(resp) = server.handle(&wire, peer, proto).await else {
             // Nothing to send: close rather than leave the client waiting.
             return Ok(());
         };
@@ -460,6 +505,111 @@ mod tests {
             let resp = Message::from_bytes(&buf).unwrap();
             assert_eq!(resp.answers.len(), 1);
         }
+
+        let _ = tx.send(());
+    }
+
+    /// A self-signed certificate for `dns.example.com`.
+    fn test_cert() -> (String, String) {
+        let c = rcgen::generate_simple_self_signed(vec!["dns.example.com".to_string()])
+            .expect("generating a certificate");
+
+        (c.cert.pem(), c.signing_key.serialize_pem())
+    }
+
+    #[tokio::test]
+    async fn dot_listener_answers_a_query() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let (cert, key) = test_cert();
+        let loaded = crate::tls::load(&crate::tls::Source {
+            certificate_chain: cert.clone(),
+            private_key: key,
+            ..Default::default()
+        })
+        .expect("the test pair must load");
+
+        let s = test_server("||ads.example.com^\n", 0);
+        let listener = bind_tcp("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = serve_dot(listener, loaded.dot, s, async {
+                let _ = rx.await;
+            })
+            .await;
+        });
+
+        // Trust only the certificate the server presents.
+        let mut roots = rustls::RootCertStore::empty();
+        for c in rustls_pemfile::certs(&mut cert.as_bytes()) {
+            roots.add(c.unwrap()).unwrap();
+        }
+        let client_cfg = rustls::ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+
+        let connector = tokio_rustls::TlsConnector::from(Arc::new(client_cfg));
+        let name = rustls_pki_types::ServerName::try_from("dns.example.com").unwrap();
+        let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut tls = connector.connect(name, tcp).await.expect("handshake");
+
+        let q = wire_query("ads.example.com.", RecordType::A);
+        tls.write_all(&(q.len() as u16).to_be_bytes())
+            .await
+            .unwrap();
+        tls.write_all(&q).await.unwrap();
+        tls.flush().await.unwrap();
+
+        let mut lenbuf = [0u8; 2];
+        tokio::time::timeout(Duration::from_secs(5), tls.read_exact(&mut lenbuf))
+            .await
+            .expect("should not time out")
+            .unwrap();
+        let mut buf = vec![0u8; usize::from(u16::from_be_bytes(lenbuf))];
+        tls.read_exact(&mut buf).await.unwrap();
+
+        let resp = Message::from_bytes(&buf).unwrap();
+        assert_eq!(resp.metadata.id, 0x2222);
+        assert_eq!(resp.answers.len(), 1, "the blocked name should be answered");
+
+        let _ = tx.send(());
+    }
+
+    #[tokio::test]
+    async fn dot_records_the_query_as_encrypted() {
+        // The query log distinguishes transports, so the listener must pass
+        // the right one through.
+        assert_eq!(Proto::Tls.log_name(), "tls");
+        assert!(!Proto::Tls.is_datagram(), "DoT is connection-oriented");
+    }
+
+    #[tokio::test]
+    async fn a_client_that_never_completes_the_handshake_is_dropped() {
+        let (cert, key) = test_cert();
+        let loaded = crate::tls::load(&crate::tls::Source {
+            certificate_chain: cert,
+            private_key: key,
+            ..Default::default()
+        })
+        .unwrap();
+
+        let s = test_server("", 0);
+        let listener = bind_tcp("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = serve_dot(listener, loaded.dot, s, async {
+                let _ = rx.await;
+            })
+            .await;
+        });
+
+        // Connect and send nothing.  The listener must stay available.
+        let _silent = tokio::net::TcpStream::connect(addr).await.unwrap();
+        assert!(tokio::net::TcpStream::connect(addr).await.is_ok());
 
         let _ = tx.send(());
     }
