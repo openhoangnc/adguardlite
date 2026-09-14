@@ -179,6 +179,21 @@ mod tests {
     }
 
     #[test]
+    fn a_client_without_the_flags_is_logged_and_counted() {
+        // The field names are the exclusions, not the features, so a config
+        // that never mentions them must leave the client in both records.
+        let cfg = from_str(
+            "schema_version: 34\nclients:\n  persistent:\n  - name: tablet\n    ids: ['192.0.2.5']\n",
+        )
+        .unwrap();
+
+        let c = &cfg.clients.persistent[0];
+        assert_eq!(c.name, "tablet");
+        assert!(!c.ignore_querylog);
+        assert!(!c.ignore_statistics);
+    }
+
+    #[test]
     fn parses_a_minimal_config_using_defaults() {
         let cfg = from_str("schema_version: 34\n").unwrap();
         assert_eq!(cfg.dns.port, 53);

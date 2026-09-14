@@ -147,7 +147,7 @@ docker run -d --name adguardhome \
 
 ## Verifying
 
-`cargo test --workspace` runs 554 unit and integration tests, including the
+`cargo test --workspace` runs 555 unit and integration tests, including the
 differential against the real filter list and the query-log and gob golden
 files — none of which need a network or a running Go build.
 

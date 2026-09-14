@@ -233,7 +233,7 @@ fn control_router() -> Router<Shared> {
         .route("/clients/find", get(misc::clients_find))
         .route(
             "/clients/search",
-            get(misc::clients_find).post(misc::clients_find),
+            get(misc::clients_find).post(misc::clients_search),
         )
         .route("/access/list", get(misc::access_list))
         .route("/access/set", post(misc::access_set))

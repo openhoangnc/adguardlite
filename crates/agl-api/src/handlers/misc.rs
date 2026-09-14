@@ -263,6 +263,38 @@ pub async fn clients_find(
     Json(out)
 }
 
+/// The `/control/clients/search` request.
+#[derive(Deserialize, Default)]
+pub struct SearchClientsReq {
+    /// The identifiers to look up.
+    #[serde(default)]
+    pub clients: Vec<SearchClientId>,
+}
+
+/// One identifier in a search request.
+#[derive(Deserialize)]
+pub struct SearchClientId {
+    /// An address, a CIDR, a MAC or a ClientID.
+    pub id: String,
+}
+
+/// `POST /control/clients/search`
+///
+/// The same answer as `/control/clients/find`, with the identifiers in a body
+/// rather than in the query string.
+pub async fn clients_search(
+    State(s): State<Shared>,
+    Json(req): Json<SearchClientsReq>,
+) -> Json<Vec<serde_json::Value>> {
+    Json(
+        req.clients
+            .iter()
+            .filter(|c| !c.id.is_empty())
+            .map(|c| json!({ &c.id: find_client(&s, &c.id) }))
+            .collect(),
+    )
+}
+
 /// Reads one parameter out of a raw query string.
 fn query_param(query: &str, key: &str) -> Option<String> {
     query.split('&').find_map(|pair| {

@@ -11,12 +11,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::{AddrPort, OptAddr, Prefix};
 
-/// Returns `true` — used for `#[serde(default = ...)]` on boolean fields that
-/// default to enabled.
-fn t() -> bool {
-    true
-}
-
 /// The whole configuration document.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -949,11 +943,12 @@ pub struct PersistentClient {
     pub parental_enabled: bool,
     /// Whether safe browsing applies.
     pub safebrowsing_enabled: bool,
-    /// Whether the client's queries are logged.
-    #[serde(default = "t")]
+    /// Whether the client's queries are kept **out** of the query log.
+    ///
+    /// The sense is the field's name, not the feature's: absent means the
+    /// client is logged, which is what an operator who never set it expects.
     pub ignore_querylog: bool,
-    /// Whether the client's queries are counted in statistics.
-    #[serde(default = "t")]
+    /// Whether the client's queries are kept **out** of the statistics.
     pub ignore_statistics: bool,
     /// Whether global blocked-services settings apply.
     pub use_global_blocked_services: bool,
