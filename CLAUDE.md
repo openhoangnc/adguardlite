@@ -46,7 +46,7 @@ installation.
 ```bash
 cargo build --release            # fast to build and to run
 cargo build --profile dist       # fat LTO, panic=abort, stripped: ~10.7 MB
-cargo test --workspace           # 566 tests, no network or Go build needed
+cargo test --workspace           # 568 tests, no network or Go build needed
 cargo clippy --workspace --all-targets
 ```
 
@@ -109,6 +109,20 @@ The comparison harnesses live in `tests/compat/`:
 - `gob-oracle/` — a small Go program that encodes and decodes the statistics
   unit with Go's own `encoding/gob`, so the Rust codec is checked against the
   implementation it must interoperate with.
+- `dropin.sh` — the migration itself. It configures a real
+  `adguard/adguardhome` container, generates traffic, swaps this image in
+  underneath it on the same volume, swaps back, and has the Go build read
+  everything this one wrote. It needs Docker and both images, nothing else:
+
+  ```bash
+  tests/compat/dropin.sh                          # the published image
+  tests/compat/dropin.sh adguardlite:local        # one you just built
+  ```
+
+  What it checks is that **nothing on the volume has to change**: the config
+  file is untouched, sessions issued by either build are honoured by the
+  other, and the statistics and query log continue rather than reset. Run it
+  after anything that touches an on-disk format, a file mode, or the image.
 
 Committed fixtures under `tests/fixtures/` were all captured from a real
 instance: the reference config, 43 query-log lines (one per distinct entry

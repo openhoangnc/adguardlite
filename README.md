@@ -65,7 +65,12 @@ pullable for longer than three builds.
 
 It is a drop-in for `adguard/adguardhome`: same binary path, working directory,
 exposed ports and entrypoint arguments. An existing deployment only changes its
-`image:` line, and keeps its config and data directory as they are.
+`image:` line, and keeps its config and data directory as they are — bind
+mounts or named volumes alike, and nobody is signed out.
+
+Switching back is the same one-line change. Both builds read each other's
+`AdGuardHome.yaml`, `querylog.json`, `stats.db`, `sessions.db` and downloaded
+filter lists, so a rollback costs nothing.
 
 ```yaml
 services:
@@ -115,7 +120,7 @@ read off the source.
 | DNS-over-TLS, -HTTPS and -QUIC | interoperable | AdGuard's own dnsproxy client, verifying the certificate, resolves through all three listeners. |
 | Config migration | all 34 steps | A port of `internal/configmigrate`; a config from any older schema is upgraded and the upgraded file written back. |
 | `sessions.db` | same layout | Sessions are stored the way the Go build stores them, so a restart signs nobody out and either build reads the other's file. |
-| Docker | same contract | Same binary path, working directory, ports and entrypoint arguments; run against a config and data directory a Go instance produced. |
+| Docker | same contract | Entrypoint, command, working directory, user, volumes, exposed ports, environment, healthcheck and stop signal are identical. A configured `adguard/adguardhome` container was swapped to this image on the same volumes and swapped back: the config file survived byte for byte, sessions stayed valid in both directions, and each build read the other's `querylog.json`, `stats.db` and filter cache. |
 
 Reproduce it with `scripts/verify.sh` (see [Verifying](#verifying)).
 
@@ -193,7 +198,7 @@ cargo run --release -- --no-check-update -c ./AdGuardHome.yaml -w ./work
 
 ## Verifying
 
-`cargo test --workspace` runs 566 unit and integration tests, including the
+`cargo test --workspace` runs 568 unit and integration tests, including the
 differential against the real filter list and the query-log and gob golden
 files — none of which need a network or a running Go build.
 
@@ -206,6 +211,19 @@ scripts/verify.sh
 It builds the Go reference from `upstream/`, starts both, and runs the config,
 DNS, API and statistics comparisons described above.
 
+The drop-in claim has its own check, which needs only Docker and the two
+images:
+
+```bash
+tests/compat/dropin.sh
+```
+
+It configures a real `adguard/adguardhome` container, generates traffic, swaps
+this image in on the same volume, swaps back, and has the Go build read
+everything this one wrote — 27 assertions, from the image's entrypoint and
+exposed ports through to whether a session issued by one build is still
+honoured by the other.
+
 ## Continuous integration
 
 One workflow runs on its own. `.github/workflows/docker.yml` builds the image
@@ -214,7 +232,7 @@ multi-architecture tag to GHCR, and then prunes the package back to the newest
 three releases. Documentation-only commits are skipped, and a newer push
 cancels an in-flight build.
 
-`.github/workflows/ci.yml` — formatting, lints, the 566-test suite, and the
+`.github/workflows/ci.yml` — formatting, lints, the 568-test suite, and the
 differential against a freshly cloned AdGuard Home — is `workflow_dispatch`
 only. It costs nothing until it is started from the Actions tab, because all of
 it also runs locally: `cargo test --workspace` and `scripts/verify.sh`.

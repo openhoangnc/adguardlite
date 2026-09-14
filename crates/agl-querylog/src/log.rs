@@ -154,13 +154,12 @@ impl QueryLog {
         };
 
         if let Some(dir) = self.path.parent() {
-            std::fs::create_dir_all(dir)?;
+            agl_core::perms::create_dir_all(dir)?;
         }
 
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)?;
+        // 0o600 at creation, as upstream's `aghos.DefaultPermFile` is: this
+        // file records every name every client on the network looked up.
+        let file = open_restricted(&self.path)?;
         let mut w = BufWriter::new(file);
         let mut written = 0;
         for e in &batch {
@@ -308,6 +307,24 @@ pub fn read_tail(path: &Path, offset: usize, limit: usize) -> Vec<Entry> {
     }
 
     out
+}
+
+/// Opens the log for appending, creating it with upstream's file mode.
+#[cfg(unix)]
+fn open_restricted(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(agl_core::perms::FILE)
+        .open(path)
+}
+
+/// Opens the log for appending.
+#[cfg(not(unix))]
+fn open_restricted(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    OpenOptions::new().create(true).append(true).open(path)
 }
 
 #[cfg(test)]

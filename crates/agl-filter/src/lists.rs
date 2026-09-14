@@ -85,14 +85,16 @@ impl List {
         self.text = text;
     }
 
-    /// Writes the list's contents to disk.
+    /// Writes the list's contents to disk, with upstream's modes.
     pub fn save(&self, paths: &Paths) -> std::io::Result<()> {
         let p = paths.filter_file(self.id);
         if let Some(dir) = p.parent() {
-            std::fs::create_dir_all(dir)?;
+            agl_core::perms::create_dir_all(dir)?;
         }
 
-        std::fs::write(p, self.text.as_bytes())
+        std::fs::write(&p, self.text.as_bytes())?;
+
+        agl_core::perms::restrict_file(&p)
     }
 }
 

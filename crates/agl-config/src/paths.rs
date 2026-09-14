@@ -81,12 +81,15 @@ impl Paths {
         }
     }
 
-    /// Creates the directories an installation needs.
+    /// Creates the directories an installation needs, with upstream's mode.
+    ///
+    /// `0o700`, as `aghos.DefaultPermDir` is: the data directory holds
+    /// `querylog.json`, which is every name every client looked up.
     pub fn ensure(&self) -> std::io::Result<()> {
-        std::fs::create_dir_all(self.filters())?;
-        std::fs::create_dir_all(self.user_filters())?;
+        agl_core::perms::create_dir_all(self.filters())?;
+        agl_core::perms::create_dir_all(self.user_filters())?;
         if let Some(parent) = self.config.parent() {
-            std::fs::create_dir_all(parent)?;
+            agl_core::perms::create_dir_all(parent)?;
         }
 
         Ok(())

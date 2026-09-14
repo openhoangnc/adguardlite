@@ -5,7 +5,7 @@ Work status for the Rust backend, against AdGuard Home **v0.107.79**.
 Legend: **[x]** done and verified · **[~]** partial, see the note · **[ ]** not started
 
 Verification claims below are reproducible with `scripts/verify.sh` and
-`cargo test --workspace` (566 tests).
+`cargo test --workspace` (568 tests).
 
 ---
 
@@ -372,7 +372,46 @@ shape of the mistakes is worth keeping, not because the work is outstanding.
   settings page whose every save answers 501 — the exact failure the DHCP
   exclusion exists to avoid.
 
+## Found by swapping a real Go deployment, and fixed
+
+A second pass replaced a *configured* `adguard/adguardhome:v0.107.79`
+container with this image on the same volumes, then swapped back, then had the
+Go build read everything this one had written. The contract held — the image's
+entrypoint, command, working directory, user, volumes, exposed ports,
+environment, healthcheck and stop signal are identical, the config file came
+through byte for byte, and neither build signs anyone out. Two things did not
+hold.
+
+- **The data directory was world-readable.** Upstream creates directories
+  `0o700` and files `0o600` (`aghos.DefaultPermDir`, `aghos.DefaultPermFile`);
+  this created `work/data`, `work/data/filters` and `querylog.json` at `0o755`
+  and `0o644`. The query log records every name every client on the network
+  looked up, so on a shared host — or in a volume mounted into a second
+  container — that is a disclosure the Go build does not make. The modes now
+  come from `agl_core::perms`, which the config writer, the query log, the
+  filter cache and `Paths::ensure` all share.
+
+- **The setup wizard suggested the wrong admin port.** `web_port` in
+  `/control/install/get_addresses` is a suggestion for the *finished* install,
+  not the port the wizard is being served on: upstream answers 80 while
+  listening on 3000, and honours `ADGUARD_HOME_DEFAULT_WEB_PORT` when a
+  deployment sets it. Echoing the live port instead quietly put every fresh
+  install's admin interface on 3000. `dns_port` is likewise upstream's
+  constant 53, not the configured port.
+
+`ADGUARD_HOME_TEST_UPDATE_VERSION_URL` is the only other environment variable
+upstream reads, and it is disabled for release builds, so it does nothing in
+the image a user runs. Nothing to implement.
+
 ## Deliberate deviations
+
+**A first launch as a non-root user is allowed.** The Go build refuses one —
+*"this is the first launch of adguard home; you must run it as
+administrator"* — and exits. This build starts and serves the wizard. The
+difference is confined to the first launch: an already-configured
+installation runs as `--user 65534:65534` under both, logs in under both, and
+behaves identically. Refusing to start would be the worse failure, so the
+extra permissiveness stands.
 
 Not bugs; recorded so nobody "fixes" them.
 

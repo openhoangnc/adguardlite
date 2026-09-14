@@ -922,12 +922,55 @@ pub async fn logout(State(s): State<Shared>, headers: HeaderMap) -> Response {
 }
 
 /// `GET /control/install/get_addresses`
-pub async fn install_addresses(State(s): State<Shared>) -> Json<serde_json::Value> {
-    let cfg = s.config.read();
+/// The DNS port the wizard suggests, which upstream hard-codes.
+const DEFAULT_PORT_DNS: u16 = 53;
 
+/// The admin port the wizard suggests when the environment says nothing.
+const DEFAULT_PORT_HTTP: u16 = 80;
+
+/// The environment variable upstream lets a deployment override it with.
+const WEB_PORT_ENV: &str = "ADGUARD_HOME_DEFAULT_WEB_PORT";
+
+/// The admin port the setup wizard should offer.
+///
+/// This is a *suggestion* for the finished install, not the port the wizard is
+/// being served on: upstream answers 80 here while listening on 3000, so the
+/// finished server ends up on 80 unless the operator says otherwise.  Echoing
+/// the live port instead — which is what this did — quietly moved every fresh
+/// install to 3000.  A container that sets `ADGUARD_HOME_DEFAULT_WEB_PORT`
+/// gets that instead, as it would under the Go build.
+fn suggested_web_port() -> u16 {
+    parse_web_port(std::env::var(WEB_PORT_ENV).ok().as_deref())
+}
+
+/// Applies upstream's rule to an override, so the rule can be tested without
+/// writing to the process environment.
+///
+/// Anything that is not a port in 1..=65535 is a warning and the default, as
+/// `suggestedWebPort` does.
+fn parse_web_port(raw: Option<&str>) -> u16 {
+    let Some(raw) = raw else {
+        return DEFAULT_PORT_HTTP;
+    };
+
+    match raw.parse::<u16>() {
+        Ok(p) if p != 0 => p,
+        _ => {
+            tracing::warn!(
+                env = WEB_PORT_ENV,
+                val = %raw,
+                "invalid web port; using default"
+            );
+
+            DEFAULT_PORT_HTTP
+        }
+    }
+}
+
+pub async fn install_addresses() -> Json<serde_json::Value> {
     Json(json!({
-        "web_port": cfg.http.address.0.port(),
-        "dns_port": cfg.dns.port,
+        "web_port": suggested_web_port(),
+        "dns_port": DEFAULT_PORT_DNS,
         "interfaces": crate::netiface::all(),
         "version": agl_core::AGH_VERSION,
     }))
@@ -1036,6 +1079,30 @@ pub async fn install_configure(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wizard_suggests_the_port_the_go_build_suggests() {
+        // Verified against adguard/adguardhome:v0.107.79 on a fresh install:
+        //   {"version":"v0.107.79","web_port":80,"dns_port":53}
+        // These are suggestions for the finished install, not the ports the
+        // wizard is being served on.  Echoing the live ports instead put every
+        // fresh install's admin interface on 3000.
+        assert_eq!(DEFAULT_PORT_DNS, 53);
+        assert_eq!(parse_web_port(None), 80, "no override means 80");
+        assert_eq!(
+            parse_web_port(Some("8080")),
+            8080,
+            "a container may override it"
+        );
+
+        for bad in ["0", "", "not a port", "70000", "-1"] {
+            assert_eq!(
+                parse_web_port(Some(bad)),
+                80,
+                "{bad:?} is not a port; upstream warns and falls back"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn dhcp_status_is_always_disabled_and_empty() {

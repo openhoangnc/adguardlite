@@ -120,15 +120,12 @@ pub fn save(path: &Path, cfg: &Config) -> Result<(), Error> {
         source,
     };
 
-    std::fs::create_dir_all(dir).map_err(io)?;
+    agl_core::perms::create_dir_all(dir).map_err(io)?;
     std::fs::write(&tmp, text.as_bytes()).map_err(io)?;
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        // Upstream uses 0o600 for the config file.
-        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).map_err(io)?;
-    }
+    // Narrowed before the rename, so the file is never briefly readable under
+    // its real name.  Upstream's `aghos.DefaultPermFile`.
+    agl_core::perms::restrict_file(&tmp).map_err(io)?;
 
     std::fs::rename(&tmp, path).map_err(io)?;
 

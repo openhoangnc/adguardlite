@@ -5,6 +5,7 @@ pub mod bytesize;
 pub mod duration;
 pub mod gotime;
 pub mod name;
+pub mod perms;
 pub mod reason;
 pub mod schedule;
 
