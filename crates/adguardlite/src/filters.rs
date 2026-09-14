@@ -1,0 +1,421 @@
+//! Filter list storage, refresh and engine construction.
+//!
+//! Lists live in `<work>/data/filters/<id>.txt` exactly as the Go
+//! implementation writes them — raw rule text, no header — so an existing
+//! installation's downloaded lists are picked up without a re-download.
+
+use std::path::PathBuf;
+use std::time::Duration;
+
+use agl_config::model::FilterYaml;
+use agl_filter::engine::Engine;
+use jiff::Timestamp;
+
+use crate::paths::Paths;
+
+/// The list identifier used for the user's own rules.
+pub const CUSTOM_LIST_ID: i64 = 0;
+
+/// One filter list and its loaded contents.
+#[derive(Clone, Debug)]
+pub struct List {
+    /// The list identifier.
+    pub id: i64,
+    /// Where the list is fetched from.
+    pub url: String,
+    /// The display name.
+    pub name: String,
+    /// Whether the list is applied.
+    pub enabled: bool,
+    /// Whether this is an allowlist.
+    pub allowlist: bool,
+    /// The rule text, as loaded from disk.
+    pub text: String,
+    /// The number of rules the text holds.
+    pub rules_count: usize,
+    /// When the list was last written.
+    pub last_updated: Option<Timestamp>,
+}
+
+impl List {
+    /// Builds a list from its configuration entry, with no contents yet.
+    pub fn from_config(f: &FilterYaml, allowlist: bool) -> Self {
+        Self {
+            id: f.id,
+            url: f.url.clone(),
+            name: f.name.clone(),
+            enabled: f.enabled,
+            allowlist,
+            text: String::new(),
+            rules_count: 0,
+            last_updated: None,
+        }
+    }
+
+    /// Converts back to a configuration entry.
+    pub fn to_config(&self) -> FilterYaml {
+        FilterYaml {
+            enabled: self.enabled,
+            url: self.url.clone(),
+            name: self.name.clone(),
+            id: self.id,
+        }
+    }
+
+    /// Loads the list's contents from disk, if the file exists.
+    pub fn load(&mut self, paths: &Paths) {
+        let p = paths.filter_file(self.id);
+        let Ok(text) = std::fs::read_to_string(&p) else {
+            return;
+        };
+
+        self.last_updated = std::fs::metadata(&p)
+            .and_then(|m| m.modified())
+            .ok()
+            .map(|t| Timestamp::try_from(t).unwrap_or(Timestamp::UNIX_EPOCH));
+        self.rules_count = count_rules(&text);
+        self.text = text;
+    }
+
+    /// Writes the list's contents to disk.
+    pub fn save(&self, paths: &Paths) -> std::io::Result<()> {
+        let p = paths.filter_file(self.id);
+        if let Some(dir) = p.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+
+        std::fs::write(p, self.text.as_bytes())
+    }
+}
+
+/// Counts the rules in a list, skipping blanks and comments the way upstream
+/// does when reporting `rules_count`.
+pub fn count_rules(text: &str) -> usize {
+    text.lines()
+        .filter(|l| {
+            let t = l.trim();
+
+            !t.is_empty() && !t.starts_with('!') && !t.starts_with('#')
+        })
+        .count()
+}
+
+/// Holds every list and builds the filtering engine from them.
+#[derive(Debug, Default)]
+pub struct Manager {
+    /// Blocklists.
+    pub blocklists: Vec<List>,
+    /// Allowlists.
+    pub allowlists: Vec<List>,
+    /// The user's own rules.
+    pub user_rules: Vec<String>,
+}
+
+impl Manager {
+    /// Builds a manager from the configured lists, loading contents from disk.
+    pub fn load(paths: &Paths, block: &[FilterYaml], allow: &[FilterYaml], user: &[String]) -> Self {
+        let mut m = Manager {
+            blocklists: block.iter().map(|f| List::from_config(f, false)).collect(),
+            allowlists: allow.iter().map(|f| List::from_config(f, true)).collect(),
+            user_rules: user.to_vec(),
+        };
+
+        for l in m.blocklists.iter_mut().chain(m.allowlists.iter_mut()) {
+            l.load(paths);
+        }
+
+        m
+    }
+
+    /// Builds a filtering engine from the enabled lists and the user's rules.
+    pub fn build_engine(&self) -> Engine {
+        let user_text = self.user_rules.join("\n");
+
+        let block: Vec<(i64, &str)> = std::iter::once((CUSTOM_LIST_ID, user_text.as_str()))
+            .chain(
+                self.blocklists
+                    .iter()
+                    .filter(|l| l.enabled)
+                    .map(|l| (l.id, l.text.as_str())),
+            )
+            .collect();
+
+        let allow: Vec<(i64, &str)> = self
+            .allowlists
+            .iter()
+            .filter(|l| l.enabled)
+            .map(|l| (l.id, l.text.as_str()))
+            .collect();
+
+        Engine::build(block, allow)
+    }
+
+    /// The total number of rules across enabled lists.
+    pub fn rules_count(&self) -> usize {
+        self.blocklists
+            .iter()
+            .chain(&self.allowlists)
+            .filter(|l| l.enabled)
+            .map(|l| l.rules_count)
+            .sum::<usize>()
+            + self.user_rules.len()
+    }
+
+    /// Finds a list by identifier.
+    pub fn find_mut(&mut self, id: i64) -> Option<&mut List> {
+        self.blocklists
+            .iter_mut()
+            .chain(self.allowlists.iter_mut())
+            .find(|l| l.id == id)
+    }
+
+    /// Allocates an identifier not already in use.
+    pub fn next_id(&self) -> i64 {
+        let max = self
+            .blocklists
+            .iter()
+            .chain(&self.allowlists)
+            .map(|l| l.id)
+            .max()
+            .unwrap_or(0);
+
+        // Upstream assigns identifiers from the current time, but any unused
+        // one works; keep them small and stable instead.
+        (max + 1).max(1)
+    }
+
+    /// Downloads and stores a list's contents.
+    pub async fn refresh(
+        &mut self,
+        paths: &Paths,
+        id: i64,
+        max_bytes: u64,
+        timeout: Duration,
+    ) -> Result<usize, RefreshError> {
+        let url = self
+            .find_mut(id)
+            .map(|l| l.url.clone())
+            .ok_or(RefreshError::NotFound(id))?;
+
+        let text = fetch_list(paths, &url, max_bytes, timeout).await?;
+        let count = count_rules(&text);
+
+        let list = self.find_mut(id).ok_or(RefreshError::NotFound(id))?;
+        list.text = text;
+        list.rules_count = count;
+        list.last_updated = Some(Timestamp::now());
+        list.save(paths).map_err(|e| RefreshError::Io(e.to_string()))?;
+
+        Ok(count)
+    }
+
+    /// Refreshes every enabled list, returning how many changed.
+    pub async fn refresh_all(
+        &mut self,
+        paths: &Paths,
+        max_bytes: u64,
+        timeout: Duration,
+    ) -> usize {
+        let ids: Vec<i64> = self
+            .blocklists
+            .iter()
+            .chain(&self.allowlists)
+            .filter(|l| l.enabled)
+            .map(|l| l.id)
+            .collect();
+
+        let mut updated = 0;
+        for id in ids {
+            if self.refresh(paths, id, max_bytes, timeout).await.is_ok() {
+                updated += 1;
+            }
+        }
+
+        updated
+    }
+}
+
+/// Loads a list's contents from a URL or a local path.
+async fn fetch_list(
+    paths: &Paths,
+    url: &str,
+    max_bytes: u64,
+    timeout: Duration,
+) -> Result<String, RefreshError> {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        let body = crate::fetch::get(url, max_bytes, timeout)
+            .await
+            .map_err(|e| RefreshError::Download(e.to_string()))?;
+
+        return String::from_utf8(body).map_err(|e| RefreshError::Download(e.to_string()));
+    }
+
+    // A filesystem-backed list.  Resolve it under the user-filters directory
+    // when it is not absolute, so a config cannot read arbitrary files.
+    let p = local_list_path(paths, url)?;
+
+    std::fs::read_to_string(p).map_err(|e| RefreshError::Io(e.to_string()))
+}
+
+/// Resolves a filesystem list path, rejecting traversal outside the data
+/// directory.
+fn local_list_path(paths: &Paths, url: &str) -> Result<PathBuf, RefreshError> {
+    let raw = url.strip_prefix("file://").unwrap_or(url);
+    let candidate = PathBuf::from(raw);
+    let joined = if candidate.is_absolute() {
+        candidate
+    } else {
+        paths.user_filters().join(candidate)
+    };
+
+    if joined.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(RefreshError::Io(format!("path {url:?} escapes the data directory")));
+    }
+
+    Ok(joined)
+}
+
+/// Why a list could not be refreshed.
+#[derive(Debug, thiserror::Error)]
+pub enum RefreshError {
+    /// No list has that identifier.
+    #[error("no filter list with id {0}")]
+    NotFound(i64),
+
+    /// The download failed.
+    #[error("downloading: {0}")]
+    Download(String),
+
+    /// The list could not be read or written.
+    #[error("filter list i/o: {0}")]
+    Io(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tmpdir(tag: &str) -> Paths {
+        let base = std::env::temp_dir().join(format!("agl-filters-{tag}-{}", std::process::id()));
+        let p = Paths::new(base.join("work"), base.join("conf/AdGuardHome.yaml"));
+        p.ensure().unwrap();
+
+        p
+    }
+
+    fn cfg(id: i64, enabled: bool) -> FilterYaml {
+        FilterYaml {
+            enabled,
+            url: format!("https://example.invalid/{id}.txt"),
+            name: format!("list {id}"),
+            id,
+        }
+    }
+
+    #[test]
+    fn counts_rules_ignoring_comments_and_blanks() {
+        let text = "! a comment\n\n||a.com^\n# another\n||b.com^\n";
+        assert_eq!(count_rules(text), 2);
+    }
+
+    #[test]
+    fn loads_list_contents_from_disk() {
+        let p = tmpdir("load");
+        std::fs::write(p.filter_file(1), "||ads.example.com^\n! note\n").unwrap();
+
+        let m = Manager::load(&p, &[cfg(1, true)], &[], &[]);
+        assert_eq!(m.blocklists[0].rules_count, 1);
+        assert!(m.blocklists[0].last_updated.is_some());
+
+        std::fs::remove_dir_all(p.work.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn builds_an_engine_from_enabled_lists_only() {
+        let p = tmpdir("engine");
+        std::fs::write(p.filter_file(1), "||on.example.com^\n").unwrap();
+        std::fs::write(p.filter_file(2), "||off.example.com^\n").unwrap();
+
+        let m = Manager::load(&p, &[cfg(1, true), cfg(2, false)], &[], &[]);
+        let e = m.build_engine();
+
+        let matched = |h: &str| {
+            e.match_request(&agl_filter::engine::Request {
+                hostname: h,
+                qtype: 1,
+                ..Default::default()
+            })
+            .reason
+        };
+
+        assert_eq!(matched("on.example.com"), agl_core::Reason::FilteredBlockList);
+        assert_eq!(matched("off.example.com"), agl_core::Reason::NotFilteredNotFound);
+
+        std::fs::remove_dir_all(p.work.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn user_rules_are_applied_under_the_custom_list_id() {
+        let p = tmpdir("user");
+        let m = Manager::load(&p, &[], &[], &["||custom.example.com^".to_string()]);
+        let e = m.build_engine();
+
+        let r = e.match_request(&agl_filter::engine::Request {
+            hostname: "custom.example.com",
+            qtype: 1,
+            ..Default::default()
+        });
+        assert_eq!(r.reason, agl_core::Reason::FilteredBlockList);
+        assert_eq!(r.rules[0].list_id, CUSTOM_LIST_ID);
+
+        std::fs::remove_dir_all(p.work.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn allowlists_short_circuit_blocklists() {
+        let p = tmpdir("allow");
+        std::fs::write(p.filter_file(1), "||example.com^\n").unwrap();
+        std::fs::write(p.filter_file(10), "||example.com^\n").unwrap();
+
+        let m = Manager::load(&p, &[cfg(1, true)], &[cfg(10, true)], &[]);
+        let e = m.build_engine();
+
+        let r = e.match_request(&agl_filter::engine::Request {
+            hostname: "example.com",
+            qtype: 1,
+            ..Default::default()
+        });
+        assert_eq!(r.reason, agl_core::Reason::NotFilteredAllowList);
+
+        std::fs::remove_dir_all(p.work.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn identifiers_do_not_collide() {
+        let p = tmpdir("ids");
+        let m = Manager::load(&p, &[cfg(1, true), cfg(7, true)], &[cfg(9, true)], &[]);
+        assert_eq!(m.next_id(), 10);
+
+        std::fs::remove_dir_all(p.work.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn local_list_paths_cannot_escape_the_data_directory() {
+        let p = tmpdir("escape");
+        assert!(local_list_path(&p, "../../etc/passwd").is_err());
+        assert!(local_list_path(&p, "mylist.txt").is_ok());
+
+        std::fs::remove_dir_all(p.work.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn round_trips_through_the_config_representation() {
+        let f = cfg(3, true);
+        let l = List::from_config(&f, false);
+        let back = l.to_config();
+        assert_eq!(back.id, f.id);
+        assert_eq!(back.url, f.url);
+        assert_eq!(back.name, f.name);
+        assert_eq!(back.enabled, f.enabled);
+    }
+}

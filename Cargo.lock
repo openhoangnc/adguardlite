@@ -6,11 +6,26 @@ version = 4
 name = "adguardlite"
 version = "0.107.79"
 dependencies = [
+ "agl-config",
+ "agl-core",
+ "agl-dns",
+ "agl-filter",
  "anyhow",
+ "bytes",
  "clap",
+ "hickory-proto",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "jiff",
+ "rustls",
+ "rustls-pki-types",
+ "thiserror",
  "tokio",
+ "tokio-rustls",
  "tracing",
  "tracing-subscriber",
+ "webpki-roots",
 ]
 
 [[package]]

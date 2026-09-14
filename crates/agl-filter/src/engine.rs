@@ -19,6 +19,37 @@ use agl_core::Reason;
 use crate::pattern::Target;
 use crate::rule::{DnsRewrite, HostRule, MIN_SHORTCUT_LEN, NetworkRule, Pattern, Rule, parse};
 
+/// The rule indices stored under one index key.
+///
+/// Almost every domain is named by exactly one rule, so the common case is
+/// kept inline: a `Vec` here would cost a 24-byte header plus a heap
+/// allocation apiece, tens of megabytes across a real blocklist.
+#[derive(Clone, Debug)]
+enum Refs {
+    /// A single rule.
+    One(u32),
+    /// Several rules, in load order.
+    Many(Vec<u32>),
+}
+
+impl Refs {
+    /// Adds an index, promoting to the heap only when a second one arrives.
+    fn push(&mut self, idx: u32) {
+        match self {
+            Refs::One(first) => *self = Refs::Many(vec![*first, idx]),
+            Refs::Many(v) => v.push(idx),
+        }
+    }
+
+    /// Iterates the stored indices.
+    fn iter(&self) -> impl Iterator<Item = u32> + '_ {
+        match self {
+            Refs::One(i) => std::slice::from_ref(i).iter().copied(),
+            Refs::Many(v) => v.iter().copied(),
+        }
+    }
+}
+
 /// A DNS filtering request.
 #[derive(Clone, Debug, Default)]
 pub struct Request<'a> {
@@ -68,8 +99,8 @@ impl MatchResult {
 pub struct RuleSet {
     net: Vec<NetworkRule>,
     hosts: Vec<HostRule>,
-    domain_index: AHashMap<Box<str>, Vec<u32>>,
-    host_index: AHashMap<Box<str>, Vec<u32>>,
+    domain_index: AHashMap<Box<str>, Refs>,
+    host_index: AHashMap<Box<str>, Refs>,
     ac: Option<AhoCorasick>,
     ac_rules: Vec<Vec<u32>>,
     scan: Vec<u32>,
@@ -113,7 +144,7 @@ impl RuleSet {
         // 1. Domain index: walk the query's parent domains.
         for suffix in agl_core::name::suffixes(req.hostname) {
             if let Some(ids) = self.domain_index.get(suffix) {
-                for &i in ids {
+                for i in ids.iter() {
                     self.consider(i, req, &url, &mut best, &mut rewrites, &mut seen);
                 }
             }
@@ -156,7 +187,7 @@ impl RuleSet {
             return;
         }
 
-        if r.opts.dnsrewrite.is_some() {
+        if r.dnsrewrite().is_some() {
             rewrites.push(r);
 
             return;
@@ -170,17 +201,22 @@ impl RuleSet {
     /// Reports whether `r` applies to `req`, checking both the pattern and the
     /// modifiers.
     fn applies(&self, r: &NetworkRule, req: &Request<'_>, url: &str) -> bool {
-        if r.opts.badfilter || self.badfilter.contains(canonical_text(&r.text).as_str()) {
+        if r.badfilter() || self.badfilter.contains(canonical_text(&r.text).as_str()) {
             return false;
         }
 
-        if let Some(t) = &r.opts.dnstype
+        let Some(opts) = r.opts() else {
+            // No modifiers: only the pattern decides.
+            return self.pattern_matches(r, req, url);
+        };
+
+        if let Some(t) = &opts.dnstype
             && !t.matches(req.qtype)
         {
             return false;
         }
 
-        if let Some(c) = &r.opts.client {
+        if let Some(c) = &opts.client {
             let ip = req.client_ip.map(|i| i.to_string());
             let name_ok = req.client_name.is_some_and(|n| c.matches(n));
             let ip_ok = ip.as_deref().is_some_and(|i| c.matches(i));
@@ -191,14 +227,14 @@ impl RuleSet {
             }
         }
 
-        if let Some(t) = &r.opts.ctag
+        if let Some(t) = &opts.ctag
             && !t.matches_any(req.client_tags)
         {
             return false;
         }
 
-        if !r.opts.denyallow.is_empty()
-            && r.opts
+        if !opts.denyallow.is_empty()
+            && opts
                 .denyallow
                 .iter()
                 .any(|d| agl_core::name::is_subdomain_of(req.hostname, d))
@@ -206,9 +242,16 @@ impl RuleSet {
             return false;
         }
 
+        self.pattern_matches(r, req, url)
+    }
+
+    /// Reports whether the rule's pattern matches the request.
+    fn pattern_matches(&self, r: &NetworkRule, req: &Request<'_>, url: &str) -> bool {
         match &r.pattern {
             Pattern::Any => true,
-            Pattern::DomainAnchor(d) => agl_core::name::is_subdomain_of(req.hostname, d),
+            // Reaching a domain-anchored rule means the domain index already
+            // matched one of the hostname's suffixes.
+            Pattern::DomainAnchor => true,
             Pattern::Rx { re, target } => match target {
                 Target::Url => re.is_match(url),
                 Target::Hostname => re.is_match(req.hostname),
@@ -220,7 +263,7 @@ impl RuleSet {
     fn match_hosts(&self, req: &Request<'_>) -> Vec<&HostRule> {
         self.host_index
             .get(req.hostname)
-            .map(|ids| ids.iter().map(|&i| &self.hosts[i as usize]).collect())
+            .map(|ids| ids.iter().map(|i| &self.hosts[i as usize]).collect())
             .unwrap_or_default()
     }
 }
@@ -238,7 +281,7 @@ fn excluded(c: &crate::rule::StrList, req: &Request<'_>) -> bool {
 /// The priority class of a rule.  Upstream's ordering is:
 /// whitelist+important, important, whitelist, then basic rules.
 fn rank(r: &NetworkRule) -> u8 {
-    match (r.allowlist, r.opts.important) {
+    match (r.allowlist, r.important()) {
         (true, true) => 3,
         (false, true) => 2,
         (true, false) => 1,
@@ -262,25 +305,12 @@ fn higher_priority(a: (u32, &NetworkRule), b: (u32, &NetworkRule)) -> bool {
         return ra > rb;
     }
 
-    let (sa, sb) = (specificity(ar), specificity(br));
+    let (sa, sb) = (ar.specificity(), br.specificity());
     if sa != sb {
         return sa > sb;
     }
 
     ai < bi
-}
-
-/// Counts a rule's dedicated specifiers, mirroring upstream's `calcRuleSpecs`.
-fn specificity(r: &NetworkRule) -> usize {
-    let o = &r.opts;
-
-    usize::from(o.important)
-        + usize::from(o.badfilter)
-        + usize::from(o.dnstype.is_some())
-        + usize::from(o.client.is_some())
-        + usize::from(o.ctag.is_some())
-        + usize::from(!o.denyallow.is_empty())
-        + usize::from(o.dnsrewrite.is_some())
 }
 
 /// Strips the `$badfilter` modifier so a badfilter rule can be compared with
@@ -303,13 +333,23 @@ fn canonical_text(text: &str) -> String {
     }
 }
 
+/// Inserts a rule index into a `Refs`-valued map.
+fn push_ref(map: &mut AHashMap<Box<str>, Refs>, key: Box<str>, idx: u32) {
+    match map.entry(key) {
+        std::collections::hash_map::Entry::Occupied(mut e) => e.get_mut().push(idx),
+        std::collections::hash_map::Entry::Vacant(e) => {
+            e.insert(Refs::One(idx));
+        }
+    }
+}
+
 /// Accumulates rules and builds the lookup indexes.
 #[derive(Default)]
 struct Builder {
     net: Vec<NetworkRule>,
     hosts: Vec<HostRule>,
-    domain_index: AHashMap<Box<str>, Vec<u32>>,
-    host_index: AHashMap<Box<str>, Vec<u32>>,
+    domain_index: AHashMap<Box<str>, Refs>,
+    host_index: AHashMap<Box<str>, Refs>,
     shortcuts: AHashMap<String, Vec<u32>>,
     scan: Vec<u32>,
     badfilter: AHashSet<Box<str>>,
@@ -321,7 +361,7 @@ impl Builder {
     fn add_list(&mut self, id: i64, text: &str) {
         for line in text.lines() {
             match parse(line, id) {
-                Ok(Rule::Network(n)) => self.add_network(*n),
+                Ok(Rule::Network(n)) => self.add_network(n.rule, n.shortcut),
                 Ok(Rule::Host(h)) => self.add_host(h),
                 Err(_) => {}
             }
@@ -329,26 +369,23 @@ impl Builder {
     }
 
     /// Indexes one network rule.
-    fn add_network(&mut self, r: NetworkRule) {
+    fn add_network(&mut self, r: NetworkRule, shortcut: Option<String>) {
         self.rules_count += 1;
 
-        if r.opts.badfilter {
+        if r.badfilter() {
             self.badfilter.insert(canonical_text(&r.text).into_boxed_str());
         }
 
         let idx = self.net.len() as u32;
 
-        match &r.pattern {
-            Pattern::DomainAnchor(d) => {
-                self.domain_index.entry(d.clone().into_boxed_str()).or_default().push(idx);
+        match (&r.pattern, shortcut) {
+            (Pattern::DomainAnchor, Some(d)) => {
+                push_ref(&mut self.domain_index, d.into_boxed_str(), idx);
             }
-            Pattern::Rx { .. } => match &r.shortcut {
-                Some(sc) if sc.len() >= MIN_SHORTCUT_LEN => {
-                    self.shortcuts.entry(sc.clone()).or_default().push(idx)
-                }
-                _ => self.scan.push(idx),
-            },
-            Pattern::Any => self.scan.push(idx),
+            (Pattern::Rx { .. }, Some(sc)) if sc.len() >= MIN_SHORTCUT_LEN => {
+                self.shortcuts.entry(sc).or_default().push(idx);
+            }
+            _ => self.scan.push(idx),
         }
 
         self.net.push(r);
@@ -359,10 +396,7 @@ impl Builder {
         self.rules_count += 1;
         let idx = self.hosts.len() as u32;
         for name in &h.hostnames {
-            self.host_index
-                .entry(name.clone().into_boxed_str())
-                .or_default()
-                .push(idx);
+            push_ref(&mut self.host_index, name.clone().into_boxed_str(), idx);
         }
         self.hosts.push(h);
     }
@@ -469,14 +503,14 @@ impl Engine {
         if !rewrites.is_empty() {
             let excluded = rewrites
                 .iter()
-                .any(|r| matches!(r.opts.dnsrewrite, Some(DnsRewrite::Exclude)));
+                .any(|r| matches!(r.dnsrewrite(), Some(DnsRewrite::Exclude)));
             if !excluded {
                 return MatchResult {
                     reason: Reason::RewrittenRule,
                     rules: rewrites.iter().map(|r| to_matched(r)).collect(),
                     rewrites: rewrites
                         .iter()
-                        .filter_map(|r| r.opts.dnsrewrite.clone())
+                        .filter_map(|r| r.dnsrewrite().cloned())
                         .collect(),
                 };
             }
@@ -524,7 +558,7 @@ impl Engine {
 
 /// Converts a network rule into its reportable form.
 fn to_matched(r: &NetworkRule) -> MatchedRule {
-    MatchedRule { text: r.text.clone(), list_id: r.list_id, ip: None }
+    MatchedRule { text: r.text.to_string(), list_id: r.list_id, ip: None }
 }
 
 /// Converts a host rule into its reportable form.

@@ -21,8 +21,22 @@ use crate::pattern::{self, Target};
 pub enum Rule {
     /// A hosts-file entry.
     Host(HostRule),
-    /// An adblock-style rule.
-    Network(Box<NetworkRule>),
+    /// An adblock-style rule, with the shortcut the index will consume.
+    Network(Box<ParsedNetwork>),
+}
+
+/// A network rule together with the prefilter shortcut derived from its
+/// pattern.
+///
+/// The shortcut is a product of parsing that only the index needs, so it is
+/// kept beside the rule rather than inside it: at list scale, a field that is
+/// dead after construction costs tens of megabytes.
+#[derive(Clone, Debug)]
+pub struct ParsedNetwork {
+    /// The rule itself.
+    pub rule: NetworkRule,
+    /// The longest literal run in the pattern, if it is long enough to index.
+    pub shortcut: Option<String>,
 }
 
 /// A hosts-file entry: an address and the names it resolves.
@@ -47,20 +61,61 @@ impl HostRule {
 }
 
 /// An adblock-style rule.
+///
+/// The layout is deliberately tight.  A real blocklist holds ~180,000 of
+/// these, so every byte here is multiplied by that: the modifiers live behind
+/// a `Box` because almost no rule has any, and the domain-anchor pattern
+/// carries no payload because reaching it already proves the match.
 #[derive(Clone, Debug)]
 pub struct NetworkRule {
     /// The original rule text, as shown in the query log and API.
-    pub text: String,
+    pub text: Box<str>,
+    /// The pattern to match.
+    pub pattern: Pattern,
+    /// The modifiers attached to the rule, if it has any.
+    pub opts: Option<Box<Options>>,
     /// The list this rule came from.
     pub list_id: i64,
     /// Whether this is an exception (`@@`) rule.
     pub allowlist: bool,
-    /// The pattern to match.
-    pub pattern: Pattern,
-    /// The modifiers attached to the rule.
-    pub opts: Options,
-    /// The longest literal run in the pattern, used to prefilter candidates.
-    pub shortcut: Option<String>,
+}
+
+impl NetworkRule {
+    /// The rule's modifiers, if it carries any.
+    pub fn opts(&self) -> Option<&Options> {
+        self.opts.as_deref()
+    }
+
+    /// Whether the rule has the `$important` modifier.
+    pub fn important(&self) -> bool {
+        self.opts().is_some_and(|o| o.important)
+    }
+
+    /// Whether the rule has the `$badfilter` modifier.
+    pub fn badfilter(&self) -> bool {
+        self.opts().is_some_and(|o| o.badfilter)
+    }
+
+    /// The rule's `$dnsrewrite` value, if it has one.
+    pub fn dnsrewrite(&self) -> Option<&DnsRewrite> {
+        self.opts().and_then(|o| o.dnsrewrite.as_ref())
+    }
+
+    /// Counts the rule's dedicated specifiers, mirroring upstream's
+    /// `calcRuleSpecs`.
+    pub fn specificity(&self) -> usize {
+        let Some(o) = self.opts() else {
+            return 0;
+        };
+
+        usize::from(o.important)
+            + usize::from(o.badfilter)
+            + usize::from(o.dnstype.is_some())
+            + usize::from(o.client.is_some())
+            + usize::from(o.ctag.is_some())
+            + usize::from(!o.denyallow.is_empty())
+            + usize::from(o.dnsrewrite.is_some())
+    }
 }
 
 /// The matchable part of a network rule.
@@ -69,7 +124,11 @@ pub enum Pattern {
     /// `||domain^` — the domain itself and any subdomain.  The common case in
     /// DNS blocklists, and the one with the fastest lookup path: a suffix walk
     /// is exactly equivalent to the regex this would otherwise compile to.
-    DomainAnchor(String),
+    ///
+    /// No payload: such a rule is only ever reachable through the domain
+    /// index, whose key *is* the domain, so arriving here already proves the
+    /// hostname matched.
+    DomainAnchor,
     /// Any other pattern, compiled to a regex by [`crate::pattern::to_regex`].
     Rx {
         /// The compiled expression.
@@ -291,7 +350,7 @@ fn parse_host_rule(t: &str, list_id: i64) -> Option<HostRule> {
 }
 
 /// Parses an adblock-style rule.
-fn parse_network_rule(t: &str, list_id: i64) -> Result<NetworkRule, ParseError> {
+fn parse_network_rule(t: &str, list_id: i64) -> Result<ParsedNetwork, ParseError> {
     let mut s = t;
     let mut allowlist = false;
     if let Some(rest) = s.strip_prefix("@@") {
@@ -300,10 +359,29 @@ fn parse_network_rule(t: &str, list_id: i64) -> Result<NetworkRule, ParseError> 
     }
 
     let (pattern_str, opts) = split_options(s)?;
-    let pattern = parse_pattern(pattern_str)?;
-    let shortcut = pattern::shortcut(pattern_str, MIN_SHORTCUT_LEN);
+    let (pattern, domain) = parse_pattern(pattern_str)?;
+    let shortcut = match &pattern {
+        // A domain-anchored rule is indexed by its domain, not a shortcut.
+        Pattern::DomainAnchor => domain,
+        _ => pattern::shortcut(pattern_str, MIN_SHORTCUT_LEN),
+    };
 
-    Ok(NetworkRule { text: t.to_string(), list_id, allowlist, pattern, opts, shortcut })
+    let opts = if opts.is_plain() && !opts.important && !opts.badfilter {
+        None
+    } else {
+        Some(Box::new(opts))
+    };
+
+    Ok(ParsedNetwork {
+        rule: NetworkRule {
+            text: t.to_string().into_boxed_str(),
+            list_id,
+            allowlist,
+            pattern,
+            opts,
+        },
+        shortcut,
+    })
 }
 
 /// Splits a rule body into its pattern and its parsed modifiers.
@@ -504,24 +582,24 @@ fn parse_dnsrewrite(s: &str) -> Result<DnsRewrite, ParseError> {
 /// The shortest literal run worth indexing as a prefilter shortcut.
 pub const MIN_SHORTCUT_LEN: usize = 3;
 
-/// Parses a rule's pattern.
+/// Parses a rule's pattern, returning it and the domain to index it under.
 ///
 /// `||domain^` takes a dedicated fast path; everything else compiles to the
 /// regex upstream would have compiled, so the semantics match exactly.
-fn parse_pattern(s: &str) -> Result<Pattern, ParseError> {
+fn parse_pattern(s: &str) -> Result<(Pattern, Option<String>), ParseError> {
     if pattern::matches_all(s) {
-        return Ok(Pattern::Any);
+        return Ok((Pattern::Any, None));
     }
 
     if let Some(dom) = domain_anchor_of(s) {
-        return Ok(Pattern::DomainAnchor(dom));
+        return Ok((Pattern::DomainAnchor, Some(dom)));
     }
 
     let src = pattern::to_regex(s);
     let re = Regex::new(&src)
         .map_err(|e| ParseError::Invalid(format!("pattern {s:?} -> {src:?}: {e}")))?;
 
-    Ok(Pattern::Rx { re: Arc::new(re), target: pattern::target_for(s) })
+    Ok((Pattern::Rx { re: Arc::new(re), target: pattern::target_for(s) }, None))
 }
 
 /// Returns the domain of a `||domain^` pattern, if `s` is exactly that shape.
@@ -548,9 +626,14 @@ mod tests {
 
     fn net(s: &str) -> NetworkRule {
         match parse(s, 1).unwrap() {
-            Rule::Network(n) => *n,
+            Rule::Network(n) => n.rule,
             other => panic!("expected a network rule, got {other:?}"),
         }
+    }
+
+    /// The modifiers of a rule that is expected to carry some.
+    fn opts(s: &str) -> Options {
+        *net(s).opts.expect("rule should carry modifiers")
     }
 
     fn host(s: &str) -> HostRule {
@@ -602,10 +685,15 @@ mod tests {
             ("||sub.example.org^", "sub.example.org"),
             ("||a-b_c.example.org^", "a-b_c.example.org"),
         ] {
-            match net(rule).pattern {
-                Pattern::DomainAnchor(d) => assert_eq!(d, want, "for {rule}"),
-                other => panic!("{rule} should use the fast path, got {other:?}"),
-            }
+            let Rule::Network(n) = parse(rule, 1).unwrap() else {
+                panic!("{rule} should be a network rule");
+            };
+            assert!(
+                matches!(n.rule.pattern, Pattern::DomainAnchor),
+                "{rule} should use the fast path"
+            );
+            // The domain becomes the index key.
+            assert_eq!(n.shortcut.as_deref(), Some(want), "for {rule}");
         }
     }
 
@@ -623,7 +711,7 @@ mod tests {
     fn a_domain_anchor_without_a_separator_is_not_the_fast_path() {
         // `||example.org` is a prefix match, so it must not use the suffix walk.
         assert!(matches!(net("||example.org").pattern, Pattern::Rx { .. }));
-        assert!(matches!(net("||example.org^").pattern, Pattern::DomainAnchor(_)));
+        assert!(matches!(net("||example.org^").pattern, Pattern::DomainAnchor));
     }
 
     #[test]
@@ -634,29 +722,29 @@ mod tests {
 
     #[test]
     fn parses_modifiers() {
-        let r = net("||example.org^$important");
-        assert!(r.opts.important);
+        assert!(net("||example.org^$important").important());
+        assert!(net("||example.org^$badfilter").badfilter());
 
-        let r = net("||example.org^$badfilter");
-        assert!(r.opts.badfilter);
-
-        let r = net("||example.org^$dnstype=A|AAAA");
-        let t = r.opts.dnstype.unwrap();
+        let t = opts("||example.org^$dnstype=A|AAAA").dnstype.unwrap();
         assert_eq!(t.included, [1, 28]);
 
-        let r = net("||example.org^$dnstype=~TXT");
-        assert_eq!(r.opts.dnstype.unwrap().excluded, [16]);
+        assert_eq!(opts("||example.org^$dnstype=~TXT").dnstype.unwrap().excluded, [16]);
 
-        let r = net("||example.org^$client=192.168.1.1|~Laptop");
-        let c = r.opts.client.unwrap();
+        let c = opts("||example.org^$client=192.168.1.1|~Laptop").client.unwrap();
         assert_eq!(c.included, ["192.168.1.1"]);
         assert_eq!(c.excluded, ["Laptop"]);
 
-        let r = net("||example.org^$denyallow=good.example.org");
-        assert_eq!(r.opts.denyallow, ["good.example.org"]);
+        assert_eq!(
+            opts("||example.org^$denyallow=good.example.org").denyallow,
+            ["good.example.org"]
+        );
+        assert_eq!(
+            opts("||example.org^$ctag=device_phone").ctag.unwrap().included,
+            ["device_phone"]
+        );
 
-        let r = net("||example.org^$ctag=device_phone");
-        assert_eq!(r.opts.ctag.unwrap().included, ["device_phone"]);
+        // A rule with no modifiers must not allocate an options block at all.
+        assert!(net("||example.org^").opts.is_none());
     }
 
     #[test]
@@ -672,7 +760,7 @@ mod tests {
             ),
         ];
         for (rule, want) in cases {
-            assert_eq!(net(rule).opts.dnsrewrite, Some(want), "for {rule}");
+            assert_eq!(net(rule).dnsrewrite().cloned(), Some(want), "for {rule}");
         }
     }
 
