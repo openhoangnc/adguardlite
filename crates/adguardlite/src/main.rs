@@ -528,14 +528,11 @@ async fn maintenance(
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-    let mut minutes: u64 = 0;
     loop {
         tokio::select! {
             _ = tick.tick() => {}
             _ = shutdown.changed() => return,
         }
-
-        minutes += 1;
 
         if let Err(e) = state.querylog.flush() {
             tracing::warn!(error = %e, "flushing the query log");
@@ -547,17 +544,23 @@ async fn maintenance(
             tracing::warn!(error = %e, "saving statistics");
         }
 
-        // Refresh filter lists on the configured interval.
+        // Refresh any list whose own interval has elapsed, checked every
+        // tick.  Firing on a multiple of uptime instead left a fresh install
+        // unfiltered until the first interval passed, and never refreshed a
+        // server that restarts more often than the interval.
         let hours = state.config.read().filtering.filters_update_interval;
-        if hours > 0 && minutes.is_multiple_of(u64::from(hours) * 60) {
-            refresh_lists(&state).await;
+        if hours > 0 {
+            let interval = jiff::SignedDuration::from_hours(i64::from(hours));
+            let due = state.filters.read().stale_ids(interval);
+            if !due.is_empty() {
+                refresh_lists(&state, due).await;
+            }
         }
     }
 }
 
 /// Downloads every enabled list and rebuilds the engine.
-async fn refresh_lists(state: &Shared) {
-    let ids = state.filters.read().enabled_ids();
+async fn refresh_lists(state: &Shared, ids: Vec<i64>) {
     let mut updated = 0;
 
     for id in ids {

@@ -26,8 +26,13 @@ pub fn format_zoned(z: &Zoned) -> String {
     let mut out = format!("{y:04}-{mo:02}-{dy:02}T{h:02}:{mi:02}:{s:02}");
     push_frac(&mut out, nanos);
 
+    // Go's `Z07:00` prints `Z` whenever the *offset* is zero, whatever the
+    // zone is called: `Etc/UTC` and a wintertime `Europe/London` both render
+    // `Z`.  Comparing against `TimeZone::UTC` instead would emit `+00:00` in
+    // the Docker image, where the zone resolves by name rather than
+    // identity — and that goes into `querylog.json`, which has to match.
     let off = z.offset().seconds();
-    if off == 0 && z.time_zone() == &TimeZone::UTC {
+    if off == 0 {
         out.push('Z');
     } else {
         let sign = if off < 0 { '-' } else { '+' };
@@ -92,6 +97,33 @@ mod tests {
         let ts: Timestamp = "2026-09-14T09:44:24.25Z".parse().unwrap();
         let s = format_utc(ts);
         assert_eq!(parse_rfc3339(&s), Some(ts));
+    }
+
+    #[test]
+    fn a_zero_offset_renders_z_whatever_the_zone_is_called() {
+        // Go's `Z07:00` keys off the offset, not the zone's identity.  The
+        // Docker image resolves its zone by name, so comparing against
+        // `TimeZone::UTC` wrote `+00:00` into `querylog.json` where Go writes
+        // `Z`.  Checked against the Go toolchain:
+        //   Etc/UTC        -> "2026-09-14T17:15:46.802463441Z"
+        //   Europe/London  -> "2026-01-14T12:00:00Z"  (winter, offset 0)
+        let ts: Timestamp = "2026-09-14T17:15:46.802463441Z".parse().unwrap();
+        for zone in ["UTC", "Etc/UTC"] {
+            let z = ts.to_zoned(TimeZone::get(zone).unwrap());
+            assert_eq!(
+                format_zoned(&z),
+                "2026-09-14T17:15:46.802463441Z",
+                "zone {zone}"
+            );
+        }
+
+        let winter: Timestamp = "2026-01-14T12:00:00Z".parse().unwrap();
+        let london = winter.to_zoned(TimeZone::get("Europe/London").unwrap());
+        assert_eq!(format_zoned(&london), "2026-01-14T12:00:00Z");
+
+        // A non-zero offset still carries one, as Go renders it.
+        let summer = ts.to_zoned(TimeZone::get("Europe/London").unwrap());
+        assert_eq!(format_zoned(&summer), "2026-09-14T18:15:46.802463441+01:00");
     }
 
     #[test]

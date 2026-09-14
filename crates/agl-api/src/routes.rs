@@ -13,15 +13,25 @@ use crate::error::ApiResult;
 use crate::handlers::{filtering, logs, misc, status};
 use crate::state::Shared;
 
-/// Paths under `/control` that are reachable without a session.
+/// Paths reachable without a session, always.
 ///
-/// Logging in obviously cannot require a login, and the setup wizard runs
-/// before any user exists.
-const PUBLIC: &[&str] = &[
-    "/control/login",
-    "/control/install/get_addresses",
-    "/control/install/check_config",
-    "/control/install/configure",
+/// These are matched against the path *inside* the `/control` router.
+/// `Router::nest` strips the prefix before any middleware layered on the
+/// inner router sees it, so a full path spelled `/control/login` here matches
+/// nothing and silently locks the web interface out — which is exactly what
+/// it did.  `login_is_reachable_without_a_session` drives the whole router so
+/// the stripping is part of the test.
+const PUBLIC: &[&str] = &["/login"];
+
+/// Paths that serve the setup wizard, reachable only until it has run.
+///
+/// Upstream registers these handlers only on the first launch, so once a user
+/// exists they are gone.  Leaving them reachable would let anyone re-run the
+/// wizard over a configured server.
+const INSTALL: &[&str] = &[
+    "/install/get_addresses",
+    "/install/check_config",
+    "/install/configure",
 ];
 
 /// Builds the full application router.
@@ -127,16 +137,41 @@ fn path_and_query(req: &Request) -> String {
 }
 
 /// Serves the embedded web interface.
-async fn serve_ui(headers: HeaderMap, req: Request) -> Response {
-    crate::ui::serve(req.uri().path(), &headers)
+///
+/// Before the wizard has run, everything but the wizard's own assets is
+/// redirected to it, and afterwards the wizard is gone.  Both halves are
+/// upstream's `postInstallHandler`/`preInstallHandler`: without the redirect
+/// a new install opens on a dashboard for a server that has no user, and
+/// without the 403 the wizard stays reachable over a configured one.
+async fn serve_ui(State(s): State<Shared>, headers: HeaderMap, req: Request) -> Response {
+    let path = req.uri().path();
+
+    if s.needs_install() {
+        if !path.starts_with("/install.") && !path.starts_with("/assets/") {
+            return (StatusCode::FOUND, [(header::LOCATION, "install.html")], "").into_response();
+        }
+    } else if path.starts_with("/install.") {
+        return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+    }
+
+    crate::ui::serve(path, &headers)
 }
 
 /// Rejects requests that carry no valid session, once a user exists.
+///
+/// `path` is the path within the `/control` router: see [`PUBLIC`].
 async fn require_auth(State(s): State<Shared>, req: Request, next: Next) -> Response {
     let path = req.uri().path().to_string();
+    let first_run = s.needs_install();
+
+    // The wizard's own endpoints stop existing once it has run, as upstream's
+    // do, rather than staying open for a second pass over a live config.
+    if !first_run && INSTALL.contains(&path.as_str()) {
+        return (StatusCode::NOT_FOUND, "Not Found").into_response();
+    }
 
     // Before the wizard has run there is nobody to authenticate as.
-    let open = s.needs_install() || PUBLIC.contains(&path.as_str());
+    let open = first_run || PUBLIC.contains(&path.as_str());
     if open || misc::current_user(&s, req.headers()).is_some() {
         return next.run(req).await;
     }
@@ -411,6 +446,19 @@ mod tests {
         // server from the web interface.
         let r = dhcp_unsupported().await;
         assert_eq!(r.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[test]
+    fn status_does_not_advertise_a_dhcp_server() {
+        // The interface gates its whole DHCP section on `dhcp_available`:
+        // answering true sends it to `/control/dhcp/status` and renders a
+        // settings page whose every save answers 501.  Checking the source
+        // rather than the value keeps this honest if the handler is rewritten.
+        let src = include_str!("handlers/status.rs");
+        assert!(
+            src.contains("dhcp_available: false"),
+            "status must not advertise a DHCP server that does not exist"
+        );
     }
 
     #[test]

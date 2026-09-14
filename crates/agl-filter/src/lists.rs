@@ -267,6 +267,36 @@ impl Manager {
     }
 
     /// The identifiers of every enabled list.
+    /// The enabled lists whose own refresh interval has elapsed.
+    ///
+    /// Upstream refreshes a list when *its* `last_updated` plus the interval
+    /// has passed, never on a multiple of the server's uptime.  That matters
+    /// twice: a list that has never been fetched is due immediately, so a
+    /// fresh install filters within moments rather than after the interval;
+    /// and because `last_updated` comes from the file on disk, a server
+    /// restarted more often than the interval still updates, where an uptime
+    /// counter would reset and never fire.
+    pub fn stale_ids(&self, interval: jiff::SignedDuration) -> Vec<i64> {
+        let now = Timestamp::now();
+
+        self.blocklists
+            .iter()
+            .chain(&self.allowlists)
+            .filter(|l| l.enabled)
+            .filter(|l| match l.last_updated {
+                None => true,
+                Some(t) => match t.checked_add(interval) {
+                    Ok(due) => due <= now,
+                    // Only an out-of-range interval gets here; treat the list
+                    // as due rather than never refreshing it again.
+                    Err(_) => true,
+                },
+            })
+            .map(|l| l.id)
+            .collect()
+    }
+
+    /// Every enabled list's identifier.
     pub fn enabled_ids(&self) -> Vec<i64> {
         self.blocklists
             .iter()
@@ -528,5 +558,65 @@ mod tests {
         assert_eq!(back.url, f.url);
         assert_eq!(back.name, f.name);
         assert_eq!(back.enabled, f.enabled);
+    }
+
+    #[test]
+    fn staleness_is_per_list_and_survives_a_restart() {
+        // The bug this guards: refreshing on a multiple of the server's
+        // uptime left a fresh install unfiltered for the whole interval, and
+        // a server restarted more often than the interval never refreshed at
+        // all, because the counter reset every boot.
+        let day = jiff::SignedDuration::from_hours(24);
+        let mut m = Manager::default();
+
+        let mut never = List::from_config(
+            &FilterYaml {
+                enabled: true,
+                url: "https://example.com/a.txt".into(),
+                name: "never fetched".into(),
+                id: 1,
+            },
+            false,
+        );
+        never.last_updated = None;
+
+        let mut fresh = List::from_config(
+            &FilterYaml {
+                enabled: true,
+                url: "https://example.com/b.txt".into(),
+                name: "fetched an hour ago".into(),
+                id: 2,
+            },
+            false,
+        );
+        fresh.last_updated = Some(Timestamp::now() - jiff::SignedDuration::from_hours(1));
+
+        let mut old = List::from_config(
+            &FilterYaml {
+                enabled: true,
+                url: "https://example.com/c.txt".into(),
+                name: "fetched two days ago".into(),
+                id: 3,
+            },
+            false,
+        );
+        old.last_updated = Some(Timestamp::now() - jiff::SignedDuration::from_hours(48));
+
+        let mut disabled = List::from_config(
+            &FilterYaml {
+                enabled: false,
+                url: "https://example.com/d.txt".into(),
+                name: "disabled".into(),
+                id: 4,
+            },
+            false,
+        );
+        disabled.last_updated = None;
+
+        m.blocklists = vec![never, fresh, old, disabled];
+
+        // Never-fetched and long-stale are due; the recent one is not, and a
+        // disabled list is never downloaded.
+        assert_eq!(m.stale_ids(day), vec![1, 3]);
     }
 }

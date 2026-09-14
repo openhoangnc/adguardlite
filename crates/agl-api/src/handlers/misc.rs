@@ -40,7 +40,11 @@ const SUPPORTED_TAGS: &[&str] = &[
 ];
 
 /// A configured client, as the API exchanges it.
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
 #[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
 pub struct ClientJson {
     /// The client's display name.
     pub name: String,
@@ -184,7 +188,11 @@ pub async fn clients_add(State(s): State<Shared>, Json(req): Json<ClientJson>) -
 }
 
 /// The `/control/clients/delete` request.
-#[derive(Deserialize)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct DeleteClientReq {
     /// The client to remove.
     pub name: String,
@@ -208,7 +216,11 @@ pub async fn clients_delete(
 }
 
 /// The `/control/clients/update` request.
-#[derive(Deserialize)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct UpdateClientReq {
     /// The client to change.
     pub name: String,
@@ -272,7 +284,11 @@ pub struct SearchClientsReq {
 }
 
 /// One identifier in a search request.
-#[derive(Deserialize)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct SearchClientId {
     /// An address, a CIDR, a MAC or a ClientID.
     pub id: String,
@@ -849,7 +865,11 @@ pub fn current_user(s: &Shared, headers: &HeaderMap) -> Option<String> {
 }
 
 /// The `/control/login` request.
-#[derive(Deserialize)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct LoginReq {
     /// The user name.
     pub name: String,
@@ -908,7 +928,7 @@ pub async fn install_addresses(State(s): State<Shared>) -> Json<serde_json::Valu
     Json(json!({
         "web_port": cfg.http.address.0.port(),
         "dns_port": cfg.dns.port,
-        "interfaces": {},
+        "interfaces": crate::netiface::all(),
         "version": agl_core::AGH_VERSION,
     }))
 }
@@ -928,7 +948,7 @@ pub struct CheckConfigReq {
 }
 
 /// A proposed address and port.
-#[derive(Deserialize)]
+#[derive(Deserialize, Default)]
 pub struct PortCheck {
     /// The address to bind.
     #[serde(default)]
@@ -951,7 +971,11 @@ pub async fn install_check(Json(_req): Json<CheckConfigReq>) -> Json<serde_json:
 }
 
 /// The `/control/install/configure` request.
-#[derive(Deserialize)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct InstallReq {
     /// The web interface binding.
     pub web: PortCheck,

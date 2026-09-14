@@ -76,7 +76,11 @@ pub async fn status(State(s): State<Shared>) -> Json<FilteringStatus> {
 }
 
 /// The `/control/filtering/config` request.
-#[derive(Deserialize)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct FilteringConfigReq {
     /// Whether filtering is on.
     pub enabled: bool,
@@ -107,7 +111,11 @@ pub async fn set_config(
 }
 
 /// The `/control/filtering/add_url` request.
-#[derive(Deserialize)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct AddUrlReq {
     /// The list's display name.
     pub name: String,
@@ -166,7 +174,11 @@ pub async fn add_url(State(s): State<Shared>, Json(req): Json<AddUrlReq>) -> Api
 }
 
 /// The `/control/filtering/remove_url` request.
-#[derive(Deserialize)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct RemoveUrlReq {
     /// The list to remove.
     pub url: String,
@@ -191,7 +203,11 @@ pub async fn remove_url(State(s): State<Shared>, Json(req): Json<RemoveUrlReq>) 
 }
 
 /// The `/control/filtering/set_url` request.
-#[derive(Deserialize)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct SetUrlReq {
     /// The list to change.
     pub url: String,
@@ -203,7 +219,11 @@ pub struct SetUrlReq {
 }
 
 /// The new settings for a list.
-#[derive(Deserialize)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct SetUrlData {
     /// The new display name.
     pub name: String,
@@ -278,7 +298,11 @@ pub async fn refresh(
 }
 
 /// The `/control/filtering/set_rules` request.
-#[derive(Deserialize)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct SetRulesReq {
     /// The user's own rules, one per entry.
     pub rules: Vec<String>,
@@ -292,7 +316,11 @@ pub async fn set_rules(State(s): State<Shared>, Json(req): Json<SetRulesReq>) ->
 }
 
 /// The `/control/filtering/check_host` query parameters.
-#[derive(Deserialize)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct CheckHostReq {
     /// The host to check.
     pub name: String,
@@ -380,7 +408,11 @@ pub async fn check_host(
 }
 
 /// A rewrite as the API reports it.
-#[derive(Serialize, Deserialize, Clone)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
 pub struct RewriteJson {
     /// The domain pattern.
     pub domain: String,
@@ -452,7 +484,11 @@ pub async fn rewrite_delete(
 }
 
 /// The `/control/rewrite/update` request.
-#[derive(Deserialize)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct RewriteUpdateReq {
     /// The rewrite to replace.
     pub target: RewriteJson,
@@ -489,7 +525,11 @@ pub async fn rewrite_settings(State(s): State<Shared>) -> Json<serde_json::Value
 }
 
 /// The `/control/rewrite/settings/update` request.
-#[derive(Deserialize)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct EnabledReq {
     /// Whether the feature is on.
     pub enabled: bool,
@@ -530,7 +570,12 @@ pub async fn parental_status(State(s): State<Shared>) -> Json<serde_json::Value>
 }
 
 /// The safe-search settings, as the API exchanges them.
-#[derive(Serialize, Deserialize)]
+///
+/// Every field defaults, because Go's `encoding/json` leaves a missing bool
+/// `false` rather than failing: a client that sends only the flags it wants
+/// on gets 200 from upstream, and got 422 here.
+#[derive(Serialize, Deserialize, Default)]
+#[serde(default)]
 pub struct SafeSearchJson {
     /// Whether safe search is enforced.
     pub enabled: bool,

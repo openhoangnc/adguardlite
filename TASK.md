@@ -5,7 +5,7 @@ Work status for the Rust backend, against AdGuard Home **v0.107.79**.
 Legend: **[x]** done and verified · **[~]** partial, see the note · **[ ]** not started
 
 Verification claims below are reproducible with `scripts/verify.sh` and
-`cargo test --workspace` (555 tests).
+`cargo test --workspace` (566 tests).
 
 ---
 
@@ -306,6 +306,71 @@ Replace the binary through whatever installed it: the package manager, the
 container image, or `-s stop`, copy, `-s start`.
 
 ---
+
+## Found by running the image, and fixed
+
+The first end-to-end pass over the published container — the setup wizard in a
+browser, then every API surface and the DNS path — turned up nine defects that
+no unit test covered. Each now has one. They are recorded here because the
+shape of the mistakes is worth keeping, not because the work is outstanding.
+
+- **Nobody could log in.** `POST /control/login` answered 401 to correct
+  credentials. The auth gate's allowlist was spelled in full paths
+  (`/control/login`), but `Router::nest` strips the prefix before middleware
+  layered on the inner router sees it, so the comparison never matched and the
+  only unauthenticated route was closed. The wizard hid it: `needs_install()`
+  opens everything, so a fresh instance worked right up until it had a user.
+  `agl-api/tests/gate.rs` drives the assembled router, which is the only place
+  the seam exists.
+
+- **The first launch opened on a dashboard.** Upstream's `postInstallHandler`
+  redirects everything outside `/install.` and `/assets/` to `install.html`
+  until a user exists; its `preInstallHandler` then answers 403 for the wizard
+  once one does. Neither existed here, so a new install showed an empty
+  dashboard, and a configured server still served a wizard that could be run
+  over it again. The wizard's own endpoints now 404 once configured, as
+  upstream's do by never being registered.
+
+- **`+00:00` where Go writes `Z`.** Go's `Z07:00` prints `Z` whenever the
+  *offset* is zero; `format_zoned` also required the zone to be
+  `TimeZone::UTC` by identity. The container resolves its zone by name, so
+  every timestamp the image produced diverged — including the `T` field of
+  `querylog.json`, which is supposed to be byte-identical. The golden fixtures
+  were captured at `+07:00` and never exercised it. Checked against the Go
+  toolchain: `Etc/UTC` and a wintertime `Europe/London` both render `Z`.
+
+- **A partial request body was a 422.** `PUT /control/safesearch/settings`
+  rejected a body missing any flag, where Go's `encoding/json` leaves an
+  omitted field at its zero value and answers 200. Every API request type now
+  carries `#[serde(default)]` for the same reason.
+
+- **A blocked client was cut off rather than refused.** Upstream drops only on
+  UDP and DNSCrypt, where a spoofed source would make the answer
+  amplification; every connected transport gets `REFUSED`. Returning nothing
+  on TCP, DoT, DoH and DoQ closed the connection instead, which `dig +tcp`
+  reports as `communications error: end of file`. The blocked-*host* path had
+  this right; the blocked-*client* path, which runs earlier in
+  `server::Server::handle`, did not.
+
+- **Filter lists refreshed on uptime, not staleness.** The maintenance loop
+  fired when the minute counter hit a multiple of the interval, so a fresh
+  install had no rules for 24 hours, and a server restarted more often than
+  the interval never refreshed at all — the counter reset every boot.
+  Upstream refreshes a list when *its own* `last_updated` plus the interval
+  has passed, which `Manager::stale_ids` now does; `last_updated` comes from
+  the file on disk, so it survives a restart.
+
+- **The wizard had no addresses to show.** `/control/install/get_addresses`
+  returned `"interfaces": {}`, so the setup wizard listed no address to point
+  a router at and both "Listen interface" dropdowns were empty. The interface
+  list is real now (`agl-api/src/netiface.rs`); the wizard reads `name`,
+  `ip_addresses` and `flags`, and greys out anything whose flags lack `up`.
+
+- **`dhcp_available` was `true`.** Upstream sets it from whether it actually
+  built a DHCP server. The interface gates its entire DHCP section on the
+  field, so answering `true` sent it to `/control/dhcp/status` and rendered a
+  settings page whose every save answers 501 — the exact failure the DHCP
+  exclusion exists to avoid.
 
 ## Deliberate deviations
 

@@ -28,7 +28,13 @@ pub struct StatusResp {
     pub start_time: f64,
     /// Whether protection is on.
     pub protection_enabled: bool,
-    /// Whether DHCP is available on this platform.
+    /// Whether a DHCP server exists to configure.
+    ///
+    /// Upstream sets this from whether it actually built one.  DHCP is
+    /// excluded here, so it is always false: the interface gates its whole
+    /// DHCP section on this field, and answering true sends it off to
+    /// `/control/dhcp/status` and renders a settings page whose every save
+    /// answers 501.
     pub dhcp_available: bool,
     /// Whether the server is past the setup wizard.
     pub running: bool,
@@ -47,7 +53,7 @@ pub async fn status(State(s): State<Shared>) -> Json<StatusResp> {
         protection_disabled_duration: 0,
         start_time: agl_core::gotime::unix_millis_f64(s.started),
         protection_enabled: cfg.filtering.protection_enabled,
-        dhcp_available: true,
+        dhcp_available: false,
         running: !cfg.users.is_empty(),
     })
 }
@@ -340,7 +346,11 @@ fn validate_upstreams(v: &[String]) -> ApiResult<()> {
 }
 
 /// The `/control/protection` request.
-#[derive(Deserialize)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct ProtectionReq {
     /// Whether protection should be on.
     pub enabled: bool,

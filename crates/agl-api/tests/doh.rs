@@ -20,6 +20,13 @@ fn state(insecure: bool) -> Shared {
     config.dns.upstream_dns = vec![];
     config.dns.bootstrap_dns = vec![];
     config.filters = vec![];
+    // A configured user, so `/` serves the interface rather than redirecting
+    // to the setup wizard. DoH itself sits outside `/control` and is not
+    // gated either way; this only decides what the UI fallback returns.
+    config.users = vec![agl_config::model::WebUser {
+        name: "admin".to_string(),
+        password: agl_api::auth::hash_password("unused by these tests").expect("hashing"),
+    }];
 
     let resolver = Arc::new(agl_dns::resolver::Resolver::new(
         agl_filter::engine::Engine::build([(1i64, "||ads.example.com^")], []),

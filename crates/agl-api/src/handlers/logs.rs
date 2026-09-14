@@ -392,7 +392,11 @@ pub async fn querylog_config_update(
 }
 
 /// The legacy `/control/querylog_config` request.
-#[derive(Deserialize)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct LegacyQueryLogConfigReq {
     /// Whether the log is collected.
     pub enabled: bool,
@@ -505,7 +509,11 @@ pub async fn stats_config_update(
 }
 
 /// The legacy `/control/stats_config` request.
-#[derive(Deserialize)]
+/// Every field defaults: Go's `encoding/json` leaves a field the caller
+/// omitted at its zero value rather than failing, so a partial body that
+/// upstream answers 200 must not become a 422 here.
+#[derive(Deserialize, Default)]
+#[serde(default)]
 pub struct LegacyStatsConfigReq {
     /// The retention window, in days.
     pub interval: u64,

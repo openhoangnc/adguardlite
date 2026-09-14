@@ -193,7 +193,7 @@ cargo run --release -- --no-check-update -c ./AdGuardHome.yaml -w ./work
 
 ## Verifying
 
-`cargo test --workspace` runs 555 unit and integration tests, including the
+`cargo test --workspace` runs 566 unit and integration tests, including the
 differential against the real filter list and the query-log and gob golden
 files — none of which need a network or a running Go build.
 
@@ -214,7 +214,7 @@ multi-architecture tag to GHCR, and then prunes the package back to the newest
 three releases. Documentation-only commits are skipped, and a newer push
 cancels an in-flight build.
 
-`.github/workflows/ci.yml` — formatting, lints, the 555-test suite, and the
+`.github/workflows/ci.yml` — formatting, lints, the 566-test suite, and the
 differential against a freshly cloned AdGuard Home — is `workflow_dispatch`
 only. It costs nothing until it is started from the Actions tab, because all of
 it also runs locally: `cargo test --workspace` and `scripts/verify.sh`.

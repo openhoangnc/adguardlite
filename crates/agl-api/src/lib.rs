@@ -4,6 +4,7 @@ pub mod error;
 pub mod handlers;
 pub mod http3;
 pub mod https;
+pub mod netiface;
 pub mod routes;
 pub mod state;
 pub mod ui;

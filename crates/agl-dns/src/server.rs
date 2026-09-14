@@ -9,6 +9,7 @@ use hickory_proto::serialize::binary::{BinDecodable, BinEncodable};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 
+use crate::msg;
 use crate::ratelimit::Limiter;
 use crate::resolver::{Action, ClientInfo, Outcome, Proto, Resolver};
 
@@ -130,7 +131,18 @@ impl Server {
         // Access control and rate limiting come before parsing, so a flood of
         // malformed datagrams costs as little as possible.
         if !self.access.read().permits(client.ip()) {
-            return None;
+            // Silence only on a datagram transport, where a spoofed source
+            // would turn the answer into amplification.  A connected client
+            // has already paid for the handshake and upstream tells it
+            // plainly, so closing the connection instead — which is what this
+            // did — reads as a broken server rather than a refusal.
+            if proto.is_datagram() {
+                return None;
+            }
+
+            let req = Message::from_bytes(wire).ok()?;
+
+            return msg::refused(&req).to_bytes().ok();
         }
         if !self.limiter.allow(client.ip()) {
             return None;
@@ -458,6 +470,35 @@ mod tests {
             .await
             .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn a_blocked_client_is_refused_rather_than_cut_off_on_stream_transports() {
+        // Upstream drops only on UDP and DNSCrypt, where a spoofed source
+        // would make the answer amplification; every connected transport gets
+        // REFUSED.  Returning nothing closed the connection instead, which
+        // `dig +tcp` reports as "communications error: end of file".
+        use hickory_proto::op::ResponseCode;
+
+        let s = test_server("||ads.example.com^\n", 0);
+        s.access.write().disallowed = vec![peer().ip()];
+        let q = wire_query("example.com.", RecordType::A);
+
+        for proto in [Proto::Tcp, Proto::Tls, Proto::Https, Proto::Quic] {
+            let out = s
+                .handle(&q, peer(), proto)
+                .await
+                .unwrap_or_else(|| panic!("{proto:?} must answer, not hang up"));
+            let resp = Message::from_bytes(&out).unwrap();
+            assert_eq!(
+                resp.metadata.response_code,
+                ResponseCode::Refused,
+                "{proto:?}"
+            );
+        }
+
+        // UDP still says nothing at all.
+        assert!(s.handle(&q, peer(), Proto::Udp).await.is_none());
     }
 
     #[tokio::test]
