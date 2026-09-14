@@ -376,6 +376,22 @@ pub struct RewriteJson {
     pub domain: String,
     /// The answer.
     pub answer: String,
+    /// Whether the rewrite is active.
+    ///
+    /// Absent in requests, where a new rewrite is always enabled; always
+    /// present in responses, as upstream sends it.
+    #[serde(default = "default_true", skip_serializing_if = "is_never")]
+    pub enabled: bool,
+}
+
+/// The default for a rewrite's `enabled` flag in a request body.
+fn default_true() -> bool {
+    true
+}
+
+/// Never skips a field; the flag is always serialised.
+fn is_never(_: &bool) -> bool {
+    false
 }
 
 /// `GET /control/rewrite/list`
@@ -387,7 +403,11 @@ pub async fn rewrite_list(State(s): State<Shared>) -> Json<Vec<RewriteJson>> {
             .rewrites
             .iter()
             .filter(|r| r.enabled)
-            .map(|r| RewriteJson { domain: r.domain.clone(), answer: r.answer.clone() })
+            .map(|r| RewriteJson {
+                domain: r.domain.clone(),
+                answer: r.answer.clone(),
+                enabled: r.enabled,
+            })
             .collect(),
     )
 }
@@ -404,7 +424,7 @@ pub async fn rewrite_add(
     s.config.write().filtering.rewrites.push(Rewrite {
         domain: req.domain,
         answer: req.answer,
-        enabled: true,
+        enabled: req.enabled,
     });
 
     s.save_config().map_err(ApiError::internal)

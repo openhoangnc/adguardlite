@@ -128,8 +128,23 @@ fn quote_key(k: &str) -> String {
 }
 
 /// Renders a string, quoting only when a plain scalar would not round-trip.
+///
+/// Quoting style follows Go `yaml.v3`: single quotes are preferred, with an
+/// embedded quote doubled; double quotes with escapes are used only when the
+/// value contains something a single-quoted scalar cannot carry.  The empty
+/// string is the one exception -- upstream writes `""`, as in `http_proxy: ""`.
 fn quote_str(s: &str) -> String {
-    if needs_quoting(s) {
+    if !needs_quoting(s) {
+        return s.to_string();
+    }
+
+    if s.is_empty() {
+        return "\"\"".to_string();
+    }
+
+    // A single-quoted scalar carries no escapes, so anything unprintable
+    // forces the double-quoted form.
+    if s.chars().any(|c| c.is_control()) {
         let mut out = String::with_capacity(s.len() + 2);
         out.push('"');
         for c in s.chars() {
@@ -145,10 +160,10 @@ fn quote_str(s: &str) -> String {
         }
         out.push('"');
 
-        out
-    } else {
-        s.to_string()
+        return out;
     }
+
+    format!("'{}'", s.replace('\'', "''"))
 }
 
 /// Reports whether `s` must be quoted to survive a parse as a string.
@@ -334,16 +349,31 @@ mod tests {
         assert_eq!(quote_str("family-block.dns.adguard.com"), "family-block.dns.adguard.com");
         assert_eq!(quote_str("$2a$10$dDdZ"), "$2a$10$dDdZ");
 
-        // Must be quoted: type-confusable or structurally unsafe.
+        // Must be quoted.  Upstream uses single quotes, except for the
+        // empty string, which it writes as `""`.
         assert_eq!(quote_str(""), r#""""#);
-        assert_eq!(quote_str("true"), r#""true""#);
-        assert_eq!(quote_str("123"), r#""123""#);
-        assert_eq!(quote_str("null"), r#""null""#);
-        assert_eq!(quote_str("yes"), r#""yes""#);
-        assert_eq!(quote_str("- x"), r#""- x""#);
-        assert_eq!(quote_str("a: b"), r#""a: b""#);
-        assert_eq!(quote_str("{inline}"), r#""{inline}""#);
-        assert_eq!(quote_str(" pad"), r#"" pad""#);
+        assert_eq!(quote_str("true"), "'true'");
+        assert_eq!(quote_str("123"), "'123'");
+        assert_eq!(quote_str("null"), "'null'");
+        assert_eq!(quote_str("yes"), "'yes'");
+        assert_eq!(quote_str("- x"), "'- x'");
+        assert_eq!(quote_str("a: b"), "'a: b'");
+        assert_eq!(quote_str("{inline}"), "'{inline}'");
+        assert_eq!(quote_str(" pad"), "' pad'");
+
+        // Filtering rules are the common quoted case in a real config.
+        assert_eq!(quote_str("||ads.example.com^"), "'||ads.example.com^'");
+        assert_eq!(quote_str("@@||good.example.com^"), "'@@||good.example.com^'");
+
+        // A quote inside a plain scalar is fine, so nothing is added.
+        assert_eq!(quote_str("it's"), "it's");
+
+        // But when quoting is needed, an embedded quote is doubled
+        // rather than escaped, as the single-quoted form requires.
+        assert_eq!(quote_str("'quoted'"), "'''quoted'''");
+
+        // Control characters force the double-quoted form.
+        assert_eq!(quote_str("a\nb"), r#""a\nb""#);
     }
 
     #[test]

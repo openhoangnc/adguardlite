@@ -74,6 +74,7 @@ dependencies = [
 name = "agl-bolt"
 version = "0.107.79"
 dependencies = [
+ "flate2",
  "thiserror",
 ]
 
@@ -167,8 +168,11 @@ dependencies = [
 name = "agl-stats"
 version = "0.107.79"
 dependencies = [
+ "agl-bolt",
  "agl-core",
+ "agl-gob",
  "ahash",
+ "flate2",
  "parking_lot",
  "serde",
  "serde_json",

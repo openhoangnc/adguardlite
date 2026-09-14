@@ -110,6 +110,18 @@ async fn run(args: Args) -> anyhow::Result<()> {
         ignored_enabled: config.statistics.ignored_enabled,
     }));
 
+    // Pick up the statistics a previous run left behind, including one
+    // written by the Go implementation.
+    let stats_path = paths.stats_db(&config.statistics.dir_path);
+    match agl_stats::store::load(&stats_path) {
+        Ok(units) if !units.is_empty() => {
+            tracing::info!(units = units.len(), "loaded statistics");
+            stats.load(units);
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, path = %stats_path.display(), "loading statistics"),
+    }
+
     let recorder = Arc::new(wiring::Recorder::new(
         querylog.clone(),
         stats.clone(),
@@ -178,7 +190,11 @@ async fn run(args: Args) -> anyhow::Result<()> {
     }));
 
     // Periodic maintenance: flush the log, prune statistics, refresh lists.
-    tasks.push(tokio::spawn(maintenance(state.clone(), shutdown_rx.clone())));
+    tasks.push(tokio::spawn(maintenance(
+        state.clone(),
+        stats_path.clone(),
+        shutdown_rx.clone(),
+    )));
 
     wait_for_shutdown().await;
     tracing::info!("shutting down");
@@ -187,6 +203,9 @@ async fn run(args: Args) -> anyhow::Result<()> {
     // Persist whatever is still buffered before the process exits.
     if let Err(e) = querylog.flush() {
         tracing::warn!(error = %e, "flushing the query log");
+    }
+    if let Err(e) = agl_stats::store::save(&stats_path, &stats.snapshot()) {
+        tracing::warn!(error = %e, "saving statistics");
     }
 
     for t in tasks {
@@ -197,7 +216,11 @@ async fn run(args: Args) -> anyhow::Result<()> {
 }
 
 /// Runs the periodic upkeep the server needs.
-async fn maintenance(state: Shared, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+async fn maintenance(
+    state: Shared,
+    stats_path: std::path::PathBuf,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) {
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -215,6 +238,10 @@ async fn maintenance(state: Shared, mut shutdown: tokio::sync::watch::Receiver<b
         }
         state.stats.prune();
         state.sessions.sweep();
+
+        if let Err(e) = agl_stats::store::save(&stats_path, &state.stats.snapshot()) {
+            tracing::warn!(error = %e, "saving statistics");
+        }
 
         // Refresh filter lists on the configured interval.
         let hours = state.config.read().filtering.filters_update_interval;
