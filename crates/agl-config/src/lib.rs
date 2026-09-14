@@ -3,8 +3,10 @@
 
 pub mod file;
 pub mod model;
+pub mod paths;
 pub mod types;
 pub mod yaml;
 
 pub use file::{load, save};
 pub use model::Config;
+pub use paths::Paths;

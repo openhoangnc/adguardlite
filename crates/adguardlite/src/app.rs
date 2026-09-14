@@ -16,8 +16,8 @@ use agl_dns::resolver::{Resolver, Settings};
 use agl_dns::rewrite::Table;
 use agl_dns::server::{Access, NoopObserver, Observer, Server, bind_tcp, bind_udp, serve_tcp, serve_udp};
 
-use crate::filters::Manager;
-use crate::paths::Paths;
+use agl_config::Paths;
+use agl_filter::lists::Manager;
 
 /// A startup failure.
 #[derive(Debug, thiserror::Error)]
@@ -100,6 +100,7 @@ impl App {
     }
 
     /// Builds an application with no query observer.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub async fn build_quiet(paths: Paths, config: Config) -> Result<Self, Error> {
         Self::build(paths, config, Arc::new(NoopObserver)).await
     }
@@ -152,22 +153,6 @@ impl App {
         Ok(tasks)
     }
 
-    /// Rebuilds the filtering engine from the current lists and rules.
-    pub fn reload_filters(&self) {
-        self.resolver.set_engine(self.filters.build_engine());
-    }
-
-    /// Applies configuration changes that affect request handling.
-    pub fn reload_settings(&self) {
-        self.resolver.set_settings(settings(&self.config));
-        self.resolver.set_rewrites(Table::build(
-            self.config
-                .filtering
-                .rewrites
-                .iter()
-                .map(|r| (r.domain.as_str(), r.answer.as_str(), r.enabled)),
-        ));
-    }
 }
 
 /// Derives resolver settings from the configuration.

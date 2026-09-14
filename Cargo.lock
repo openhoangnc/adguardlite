@@ -6,11 +6,15 @@ version = 4
 name = "adguardlite"
 version = "0.107.79"
 dependencies = [
+ "agl-api",
  "agl-config",
  "agl-core",
  "agl-dns",
  "agl-filter",
+ "agl-querylog",
+ "agl-stats",
  "anyhow",
+ "axum",
  "bytes",
  "clap",
  "hickory-proto",
@@ -39,12 +43,23 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 name = "agl-api"
 version = "0.107.79"
 dependencies = [
+ "agl-config",
+ "agl-core",
+ "agl-dns",
+ "agl-filter",
+ "agl-querylog",
+ "agl-stats",
+ "ahash",
  "axum",
  "base64",
  "bcrypt",
+ "flate2",
+ "hickory-proto",
  "http",
  "hyper",
+ "jiff",
  "mime_guess",
+ "parking_lot",
  "rand",
  "rust-embed",
  "serde",
@@ -114,10 +129,12 @@ dependencies = [
 name = "agl-filter"
 version = "0.107.79"
 dependencies = [
+ "agl-config",
  "agl-core",
  "ahash",
  "aho-corasick",
  "flate2",
+ "jiff",
  "memchr",
  "regex",
  "serde",

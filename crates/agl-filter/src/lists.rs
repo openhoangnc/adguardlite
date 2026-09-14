@@ -5,13 +5,12 @@
 //! installation's downloaded lists are picked up without a re-download.
 
 use std::path::PathBuf;
-use std::time::Duration;
 
 use agl_config::model::FilterYaml;
-use agl_filter::engine::Engine;
+use crate::engine::Engine;
 use jiff::Timestamp;
 
-use crate::paths::Paths;
+use agl_config::Paths;
 
 /// The list identifier used for the user's own rules.
 pub const CUSTOM_LIST_ID: i64 = 0;
@@ -101,7 +100,7 @@ pub fn count_rules(text: &str) -> usize {
 }
 
 /// Holds every list and builds the filtering engine from them.
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Manager {
     /// Blocklists.
     pub blocklists: Vec<List>,
@@ -184,20 +183,16 @@ impl Manager {
         (max + 1).max(1)
     }
 
-    /// Downloads and stores a list's contents.
-    pub async fn refresh(
+    /// Stores freshly fetched contents for a list.
+    ///
+    /// Downloading lives in the caller: this crate stays free of an HTTP
+    /// client so it can be used from tests and tools without one.
+    pub fn apply_fetched(
         &mut self,
         paths: &Paths,
         id: i64,
-        max_bytes: u64,
-        timeout: Duration,
+        text: String,
     ) -> Result<usize, RefreshError> {
-        let url = self
-            .find_mut(id)
-            .map(|l| l.url.clone())
-            .ok_or(RefreshError::NotFound(id))?;
-
-        let text = fetch_list(paths, &url, max_bytes, timeout).await?;
         let count = count_rules(&text);
 
         let list = self.find_mut(id).ok_or(RefreshError::NotFound(id))?;
@@ -209,57 +204,33 @@ impl Manager {
         Ok(count)
     }
 
-    /// Refreshes every enabled list, returning how many changed.
-    pub async fn refresh_all(
-        &mut self,
-        paths: &Paths,
-        max_bytes: u64,
-        timeout: Duration,
-    ) -> usize {
-        let ids: Vec<i64> = self
-            .blocklists
+    /// The URL a list is fetched from.
+    pub fn url_of(&self, id: i64) -> Option<String> {
+        self.blocklists
+            .iter()
+            .chain(&self.allowlists)
+            .find(|l| l.id == id)
+            .map(|l| l.url.clone())
+    }
+
+    /// The identifiers of every enabled list.
+    pub fn enabled_ids(&self) -> Vec<i64> {
+        self.blocklists
             .iter()
             .chain(&self.allowlists)
             .filter(|l| l.enabled)
             .map(|l| l.id)
-            .collect();
-
-        let mut updated = 0;
-        for id in ids {
-            if self.refresh(paths, id, max_bytes, timeout).await.is_ok() {
-                updated += 1;
-            }
-        }
-
-        updated
+            .collect()
     }
-}
-
-/// Loads a list's contents from a URL or a local path.
-async fn fetch_list(
-    paths: &Paths,
-    url: &str,
-    max_bytes: u64,
-    timeout: Duration,
-) -> Result<String, RefreshError> {
-    if url.starts_with("http://") || url.starts_with("https://") {
-        let body = crate::fetch::get(url, max_bytes, timeout)
-            .await
-            .map_err(|e| RefreshError::Download(e.to_string()))?;
-
-        return String::from_utf8(body).map_err(|e| RefreshError::Download(e.to_string()));
-    }
-
-    // A filesystem-backed list.  Resolve it under the user-filters directory
-    // when it is not absolute, so a config cannot read arbitrary files.
-    let p = local_list_path(paths, url)?;
-
-    std::fs::read_to_string(p).map_err(|e| RefreshError::Io(e.to_string()))
 }
 
 /// Resolves a filesystem list path, rejecting traversal outside the data
 /// directory.
-fn local_list_path(paths: &Paths, url: &str) -> Result<PathBuf, RefreshError> {
+///
+/// A list `url` that is not an HTTP(S) URL names a file; anything relative is
+/// resolved under the user-filters directory so a configuration cannot point
+/// the loader at arbitrary files.
+pub fn local_list_path(paths: &Paths, url: &str) -> Result<PathBuf, RefreshError> {
     let raw = url.strip_prefix("file://").unwrap_or(url);
     let candidate = PathBuf::from(raw);
     let joined = if candidate.is_absolute() {
@@ -273,6 +244,11 @@ fn local_list_path(paths: &Paths, url: &str) -> Result<PathBuf, RefreshError> {
     }
 
     Ok(joined)
+}
+
+/// Reports whether a list `url` names a remote list.
+pub fn is_remote(url: &str) -> bool {
+    url.starts_with("http://") || url.starts_with("https://")
 }
 
 /// Why a list could not be refreshed.
@@ -340,7 +316,7 @@ mod tests {
         let e = m.build_engine();
 
         let matched = |h: &str| {
-            e.match_request(&agl_filter::engine::Request {
+            e.match_request(&crate::engine::Request {
                 hostname: h,
                 qtype: 1,
                 ..Default::default()
@@ -360,7 +336,7 @@ mod tests {
         let m = Manager::load(&p, &[], &[], &["||custom.example.com^".to_string()]);
         let e = m.build_engine();
 
-        let r = e.match_request(&agl_filter::engine::Request {
+        let r = e.match_request(&crate::engine::Request {
             hostname: "custom.example.com",
             qtype: 1,
             ..Default::default()
@@ -380,7 +356,7 @@ mod tests {
         let m = Manager::load(&p, &[cfg(1, true)], &[cfg(10, true)], &[]);
         let e = m.build_engine();
 
-        let r = e.match_request(&agl_filter::engine::Request {
+        let r = e.match_request(&crate::engine::Request {
             hostname: "example.com",
             qtype: 1,
             ..Default::default()

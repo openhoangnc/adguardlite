@@ -9,12 +9,23 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+agl-config = { version = "0.107.79", path = "../agl-config" }
+agl-core = { version = "0.107.79", path = "../agl-core" }
+agl-dns = { version = "0.107.79", path = "../agl-dns" }
+agl-filter = { version = "0.107.79", path = "../agl-filter" }
+agl-querylog = { version = "0.107.79", path = "../agl-querylog" }
+agl-stats = { version = "0.107.79", path = "../agl-stats" }
+ahash = "0.8.12"
 axum = { version = "0.8.9", features = ["http1", "http2", "json", "query", "tokio"] }
 base64 = "0.23.1"
 bcrypt = "0.19.3"
+flate2 = "1.1.10"
+hickory-proto = "0.26.3"
 http = "1.5.0"
 hyper = "1.11.1"
+jiff = { version = "0.2.37", features = ["serde"] }
 mime_guess = "2.0.5"
+parking_lot = "0.12.5"
 rand = "0.10.2"
 rust-embed = "8.12.0"
 serde = { version = "1.0.229", features = ["derive"] }

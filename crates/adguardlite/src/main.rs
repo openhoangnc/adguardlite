@@ -3,17 +3,19 @@
 mod app;
 mod cli;
 mod fetch;
-mod filters;
-mod paths;
+mod lists;
+mod wiring;
 
 use std::sync::Arc;
+use std::time::Duration;
 
+use agl_api::state::{AppState, Shared};
+use agl_config::Paths;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use crate::app::App;
 use crate::cli::Args;
-use crate::paths::Paths;
 
 fn main() -> std::process::ExitCode {
     let args = Args::parse();
@@ -41,8 +43,9 @@ fn main() -> std::process::ExitCode {
 /// Configures tracing from the flags and the environment.
 fn init_logging(args: &Args) {
     let default = if args.verbose { "debug" } else { "info" };
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(format!("adguardlite={default},agl_dns={default}")));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        EnvFilter::new(format!("adguardlite={default},agl_dns={default},agl_api={default}"))
+    });
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -77,12 +80,38 @@ async fn run(args: Args) -> anyhow::Result<()> {
         "starting adguardlite"
     );
 
-    let application = App::build(
-        paths.clone(),
-        config,
-        Arc::new(agl_dns::server::NoopObserver),
-    )
-    .await?;
+    // The query log and statistics are shared between the DNS observer and the
+    // HTTP API, so they are built before either.
+    let querylog = Arc::new(agl_querylog::log::QueryLog::new(
+        paths.query_log(&config.querylog.dir_path),
+        paths.query_log_rotated(&config.querylog.dir_path),
+        agl_querylog::log::Config {
+            enabled: config.querylog.enabled,
+            file_enabled: config.querylog.file_enabled,
+            size_memory: config.querylog.size_memory as usize,
+            ignored: config.querylog.ignored.clone(),
+            ignored_enabled: config.querylog.ignored_enabled,
+            anonymize_client_ip: config.dns.anonymize_client_ip,
+        },
+    ));
+
+    let stats = Arc::new(agl_stats::stats::Stats::new(agl_stats::stats::Config {
+        enabled: config.statistics.enabled,
+        limit_hours: config.statistics.interval.as_hours().max(0) as u32,
+        ignored: config.statistics.ignored.clone(),
+        ignored_enabled: config.statistics.ignored_enabled,
+    }));
+
+    let recorder = Arc::new(wiring::Recorder::new(
+        querylog.clone(),
+        stats.clone(),
+        config.dns.anonymize_client_ip,
+    ));
+
+    let web_addr = config.http.address.0;
+    let max_list_bytes = config.filtering.max_http_size.bytes();
+
+    let application = App::build(paths.clone(), config, recorder).await?;
 
     tracing::info!(
         rules = application.filters.rules_count(),
@@ -90,22 +119,129 @@ async fn run(args: Args) -> anyhow::Result<()> {
         "filter lists loaded"
     );
 
+    let dns_addrs: Vec<String> = application
+        .dns_addrs()
+        .iter()
+        .map(|a| a.to_string())
+        .collect();
+
+    let state: Shared = Arc::new(AppState {
+        paths: application.paths.clone(),
+        config: parking_lot::RwLock::new(application.config.clone()),
+        resolver: application.resolver.clone(),
+        filters: parking_lot::RwLock::new(application.filters.clone()),
+        querylog: querylog.clone(),
+        stats: stats.clone(),
+        sessions: agl_api::auth::Sessions::new(),
+        started: jiff::Timestamp::now(),
+        fetcher: Arc::new(wiring::Downloader {
+            paths: application.paths.clone(),
+            max_bytes: max_list_bytes,
+            timeout: app::LIST_TIMEOUT,
+        }),
+        reloader: Arc::new(wiring::LiveReloader {
+            resolver: application.resolver.clone(),
+        }),
+        dns_addresses: parking_lot::RwLock::new(dns_addrs),
+    });
+
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-    let tasks = application.serve_dns(shutdown_rx).await?;
+    let mut tasks = application.serve_dns(shutdown_rx.clone()).await?;
 
     for addr in application.dns_addrs() {
         tracing::info!(%addr, "serving dns");
     }
 
+    // The web interface.
+    let listener = tokio::net::TcpListener::bind(web_addr).await?;
+    tracing::info!(addr = %web_addr, "serving web interface");
+    if state.needs_install() {
+        tracing::info!("no user configured yet; open the web interface to finish setup");
+    }
+
+    let app_router = agl_api::routes::router(state.clone());
+    let mut web_shutdown = shutdown_rx.clone();
+    tasks.push(tokio::spawn(async move {
+        let _ = axum::serve(listener, app_router)
+            .with_graceful_shutdown(async move {
+                let _ = web_shutdown.changed().await;
+            })
+            .await;
+    }));
+
+    // Periodic maintenance: flush the log, prune statistics, refresh lists.
+    tasks.push(tokio::spawn(maintenance(state.clone(), shutdown_rx.clone())));
+
     wait_for_shutdown().await;
     tracing::info!("shutting down");
     let _ = shutdown_tx.send(true);
 
+    // Persist whatever is still buffered before the process exits.
+    if let Err(e) = querylog.flush() {
+        tracing::warn!(error = %e, "flushing the query log");
+    }
+
     for t in tasks {
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), t).await;
+        let _ = tokio::time::timeout(Duration::from_secs(5), t).await;
     }
 
     Ok(())
+}
+
+/// Runs the periodic upkeep the server needs.
+async fn maintenance(state: Shared, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(60));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let mut minutes: u64 = 0;
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            _ = shutdown.changed() => return,
+        }
+
+        minutes += 1;
+
+        if let Err(e) = state.querylog.flush() {
+            tracing::warn!(error = %e, "flushing the query log");
+        }
+        state.stats.prune();
+        state.sessions.sweep();
+
+        // Refresh filter lists on the configured interval.
+        let hours = state.config.read().filtering.filters_update_interval;
+        if hours > 0 && minutes.is_multiple_of(u64::from(hours) * 60) {
+            refresh_lists(&state).await;
+        }
+    }
+}
+
+/// Downloads every enabled list and rebuilds the engine.
+async fn refresh_lists(state: &Shared) {
+    let ids = state.filters.read().enabled_ids();
+    let mut updated = 0;
+
+    for id in ids {
+        let Some(url) = state.filters.read().url_of(id) else {
+            continue;
+        };
+        match state.fetcher.fetch(url.clone()).await {
+            Ok(text) => {
+                let mut filters = state.filters.write();
+                if filters.apply_fetched(&state.paths, id, text).is_ok() {
+                    updated += 1;
+                }
+            }
+            Err(e) => tracing::warn!(list = id, %url, error = %e, "refreshing filter list"),
+        }
+    }
+
+    if updated > 0 {
+        tracing::info!(updated, "filter lists refreshed");
+        if let Err(e) = state.save_filters() {
+            tracing::warn!(error = %e, "saving filter lists");
+        }
+    }
 }
 
 /// Resolves when the process is asked to stop.

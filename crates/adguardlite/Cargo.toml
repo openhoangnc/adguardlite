@@ -13,11 +13,15 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+agl-api = { version = "0.107.79", path = "../agl-api" }
 agl-config = { version = "0.107.79", path = "../agl-config" }
 agl-core = { version = "0.107.79", path = "../agl-core" }
 agl-dns = { version = "0.107.79", path = "../agl-dns" }
 agl-filter = { version = "0.107.79", path = "../agl-filter" }
+agl-querylog = { version = "0.107.79", path = "../agl-querylog" }
+agl-stats = { version = "0.107.79", path = "../agl-stats" }
 anyhow = "1.0.104"
+axum = { version = "0.8.9", features = ["http1", "http2", "json", "query", "tokio"] }
 bytes = "1.12.1"
 clap = { version = "4.6.6", features = ["derive"] }
 hickory-proto = "0.26.3"
