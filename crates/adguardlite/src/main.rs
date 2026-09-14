@@ -41,10 +41,18 @@ fn main() -> std::process::ExitCode {
 }
 
 /// Configures tracing from the flags and the environment.
+///
+/// The default filter sets a global level rather than naming this crate: the
+/// binary target is `AdGuardHome`, so `module_path!` reports that rather than
+/// the package name, and a per-crate filter spelled `adguardlite=info` would
+/// silently drop every message the server logs.
 fn init_logging(args: &Args) {
     let default = if args.verbose { "debug" } else { "info" };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new(format!("adguardlite={default},agl_dns={default},agl_api={default}"))
+        // Quiet the dependencies that are chatty at these levels.
+        EnvFilter::new(format!(
+            "{default},hyper=warn,rustls=warn,h2=warn,hickory_proto=warn,tokio_util=warn"
+        ))
     });
 
     tracing_subscriber::fmt()
@@ -268,5 +276,85 @@ async fn wait_for_shutdown() {
     #[cfg(not(unix))]
     {
         let _ = tokio::signal::ctrl_c().await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tracing::Level;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::{EnvFilter, Registry};
+
+    /// The default filter, as `init_logging` builds it when RUST_LOG is unset.
+    fn default_filter(verbose: bool) -> EnvFilter {
+        let default = if verbose { "debug" } else { "info" };
+
+        EnvFilter::new(format!(
+            "{default},hyper=warn,rustls=warn,h2=warn,hickory_proto=warn,tokio_util=warn"
+        ))
+    }
+
+    /// Reports whether the filter would let an INFO event from `target`
+    /// through.
+    fn enables(filter: EnvFilter, target: &str, level: Level) -> bool {
+        use tracing::subscriber::with_default;
+
+        let subscriber = Registry::default().with(filter);
+        with_default(subscriber, || {
+            tracing::dispatcher::get_default(|d| {
+                let meta = tracing::Metadata::new(
+                    "probe",
+                    target,
+                    level,
+                    None,
+                    None,
+                    None,
+                    tracing::field::FieldSet::new(&[], tracing::callsite::Identifier(&PROBE)),
+                    tracing::metadata::Kind::EVENT,
+                );
+
+                d.enabled(&meta)
+            })
+        })
+    }
+
+    /// A callsite stand-in for the probe metadata.
+    struct Probe;
+    impl tracing::Callsite for Probe {
+        fn set_interest(&self, _: tracing::subscriber::Interest) {}
+        fn metadata(&self) -> &tracing::Metadata<'_> {
+            unreachable!("the probe metadata is constructed directly")
+        }
+    }
+    static PROBE: Probe = Probe;
+
+    #[test]
+    fn the_default_filter_does_not_silence_the_binarys_own_logs() {
+        // The binary target is named AdGuardHome, so `module_path!` reports
+        // that -- not the package name.  A filter spelled `adguardlite=info`
+        // compiles and matches nothing, which is how every startup message
+        // once went missing.
+        assert!(
+            enables(default_filter(false), "AdGuardHome", Level::INFO),
+            "the server's own INFO messages must reach the log"
+        );
+        assert!(enables(default_filter(false), "agl_dns", Level::INFO));
+        assert!(enables(default_filter(false), "agl_api", Level::INFO));
+    }
+
+    #[test]
+    fn verbose_enables_debug() {
+        assert!(enables(default_filter(true), "AdGuardHome", Level::DEBUG));
+        assert!(!enables(default_filter(false), "AdGuardHome", Level::DEBUG));
+    }
+
+    #[test]
+    fn chatty_dependencies_stay_quiet() {
+        for dep in ["hyper", "rustls", "h2", "hickory_proto"] {
+            assert!(
+                !enables(default_filter(false), dep, Level::INFO),
+                "{dep} should be filtered to warnings"
+            );
+        }
     }
 }

@@ -1,0 +1,6 @@
+/target
+/upstream
+/dist
+.git
+.github
+*.md
