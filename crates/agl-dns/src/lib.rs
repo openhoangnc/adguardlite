@@ -4,6 +4,7 @@ pub mod addr;
 pub mod cache;
 pub mod client;
 pub mod clients;
+pub mod conn;
 pub mod ddr;
 pub mod dns64;
 pub mod doq;

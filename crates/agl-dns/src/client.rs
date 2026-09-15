@@ -19,9 +19,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 
 use crate::addr::{Transport, Upstream};
+use crate::conn::Connections;
 
 /// The largest DNS message this client will accept.
-const MAX_MSG: usize = 64 * 1024;
+pub(crate) const MAX_MSG: usize = 64 * 1024;
 
 /// The longest one address is given while others remain untried.
 ///
@@ -70,6 +71,14 @@ pub enum Error {
     /// This build does not implement the upstream's transport.
     #[error("unsupported upstream transport: {0}")]
     Unsupported(String),
+
+    /// A recent attempt to reach this upstream failed.
+    ///
+    /// Held for a moment after a dial fails so that a burst of queries
+    /// against an upstream that is down fails at once, rather than each query
+    /// in turn waiting out the whole `upstream_timeout` behind the same gate.
+    #[error("upstream unreachable: {0}")]
+    Unreachable(String),
 }
 
 /// The trust anchors and the TLS session cache every upstream draws on.
@@ -103,32 +112,18 @@ fn with_alpn(alpn: &[&[u8]]) -> Arc<rustls::ClientConfig> {
 }
 
 /// The profile for DNS-over-TLS.
-static DOT: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| with_alpn(&[]));
+pub(crate) static DOT: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| with_alpn(&[]));
 /// The profile for DNS-over-HTTPS over TCP.
-static HTTPS: LazyLock<Arc<rustls::ClientConfig>> =
+pub(crate) static HTTPS: LazyLock<Arc<rustls::ClientConfig>> =
     LazyLock::new(|| with_alpn(&[b"h2", b"http/1.1"]));
 /// The profile for DNS-over-QUIC.
-static DOQ: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| with_alpn(&[b"doq"]));
+pub(crate) static DOQ: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| with_alpn(&[b"doq"]));
 /// The profile for DNS-over-HTTPS carried by HTTP/3.
-static H3: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| with_alpn(&[b"h3"]));
+pub(crate) static H3: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| with_alpn(&[b"h3"]));
 
 /// The shared rustls client configuration, trusting the webpki roots.
 pub fn tls_config() -> Arc<rustls::ClientConfig> {
     DOT.clone()
-}
-
-/// The rustls configuration that offers HTTP ALPN, for DoH.
-fn https_tls_config() -> Arc<rustls::ClientConfig> {
-    HTTPS.clone()
-}
-
-/// The rustls configuration offering one application protocol.
-fn alpn_tls_config(alpn: &[u8]) -> Arc<rustls::ClientConfig> {
-    match alpn {
-        b"doq" => DOQ.clone(),
-        b"h3" => H3.clone(),
-        other => with_alpn(&[other]),
-    }
 }
 
 /// Resolves the addresses an upstream should be contacted on.
@@ -235,7 +230,7 @@ async fn bootstrap_lookup(
 /// an upstream answering something else poisons that name.  Names compare
 /// case-insensitively, which is what `Name`'s own equality already does and
 /// what dnsproxy's `strings.EqualFold` does.
-fn check_reply(req: &Message, resp: &Message) -> Result<(), Error> {
+pub(crate) fn check_reply(req: &Message, resp: &Message) -> Result<(), Error> {
     let Some(asked) = req.queries.first() else {
         return Ok(());
     };
@@ -306,7 +301,7 @@ pub async fn udp_exchange(
 }
 
 /// Sends a query over a stream that speaks DNS with a two-byte length prefix.
-async fn stream_exchange<S>(
+pub(crate) async fn stream_exchange<S>(
     stream: &mut S,
     req: &Message,
     timeout: Duration,
@@ -377,352 +372,6 @@ pub async fn tcp_exchange(
     stream_exchange(&mut s, req, timeout).await
 }
 
-/// Sends a query over DNS-over-TLS.
-pub async fn tls_exchange(
-    req: &Message,
-    server: SocketAddr,
-    server_name: &str,
-    cfg: Arc<rustls::ClientConfig>,
-    timeout: Duration,
-) -> Result<Message, Error> {
-    let connector = tokio_rustls::TlsConnector::from(cfg);
-    let dnsname = rustls_pki_types::ServerName::try_from(server_name.to_string())
-        .map_err(|e| Error::Tls(format!("invalid server name {server_name:?}: {e}")))?;
-
-    let tcp = tokio::time::timeout(timeout, TcpStream::connect(server))
-        .await
-        .map_err(|_| Error::Timeout(timeout))??;
-    tcp.set_nodelay(true).ok();
-
-    let mut tls = tokio::time::timeout(timeout, connector.connect(dnsname, tcp))
-        .await
-        .map_err(|_| Error::Timeout(timeout))?
-        .map_err(|e| Error::Tls(e.to_string()))?;
-
-    stream_exchange(&mut tls, req, timeout).await
-}
-
-/// Sends a query over DNS-over-HTTPS.
-///
-/// Uses the POST form with `application/dns-message`, which avoids the
-/// base64url encoding of the GET form and is what upstream prefers.
-pub async fn https_exchange(
-    req: &Message,
-    server: SocketAddr,
-    host: &str,
-    path: &str,
-    timeout: Duration,
-) -> Result<Message, Error> {
-    use http_body_util::Full;
-    use hyper::Request;
-
-    let wire = req.to_bytes().map_err(|e| Error::Decode(e.to_string()))?;
-
-    let connector = tokio_rustls::TlsConnector::from(https_tls_config());
-    let dnsname = rustls_pki_types::ServerName::try_from(host.to_string())
-        .map_err(|e| Error::Tls(format!("invalid server name {host:?}: {e}")))?;
-
-    let tcp = tokio::time::timeout(timeout, TcpStream::connect(server))
-        .await
-        .map_err(|_| Error::Timeout(timeout))??;
-    tcp.set_nodelay(true).ok();
-
-    let tls = tokio::time::timeout(timeout, connector.connect(dnsname, tcp))
-        .await
-        .map_err(|_| Error::Timeout(timeout))?
-        .map_err(|e| Error::Tls(e.to_string()))?;
-
-    let is_h2 = tls.get_ref().1.alpn_protocol() == Some(b"h2");
-    let io = hyper_util::rt::TokioIo::new(tls);
-
-    let uri = format!("https://{host}{path}");
-    let build = |body: Full<bytes::Bytes>| {
-        Request::builder()
-            .method("POST")
-            .uri(&uri)
-            .header("content-type", "application/dns-message")
-            .header("accept", "application/dns-message")
-            .body(body)
-            .map_err(|e| Error::Http(e.to_string()))
-    };
-
-    let resp_bytes = if is_h2 {
-        let (mut sender, conn) =
-            hyper::client::conn::http2::handshake(hyper_util::rt::TokioExecutor::new(), io)
-                .await
-                .map_err(|e| Error::Http(e.to_string()))?;
-        let task = tokio::spawn(async move {
-            let _ = conn.await;
-        });
-
-        let resp =
-            tokio::time::timeout(timeout, sender.send_request(build(Full::new(wire.into()))?))
-                .await
-                .map_err(|_| Error::Timeout(timeout))?
-                .map_err(|e| Error::Http(e.to_string()))?;
-        let out = read_body(resp, timeout).await;
-        task.abort();
-        out?
-    } else {
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(io)
-            .await
-            .map_err(|e| Error::Http(e.to_string()))?;
-        let task = tokio::spawn(async move {
-            let _ = conn.await;
-        });
-
-        let resp =
-            tokio::time::timeout(timeout, sender.send_request(build(Full::new(wire.into()))?))
-                .await
-                .map_err(|_| Error::Timeout(timeout))?
-                .map_err(|e| Error::Http(e.to_string()))?;
-        let out = read_body(resp, timeout).await;
-        task.abort();
-        out?
-    };
-
-    Message::from_bytes(&resp_bytes).map_err(|e| Error::Decode(e.to_string()))
-}
-
-/// Sends a query over DNS-over-QUIC.
-///
-/// The framing is the two-byte length prefix TCP and DoT use, so only the
-/// transport differs.  RFC 9250 requires the message identifier to be zero on
-/// the wire, because QUIC's own stream multiplexing already tells answers
-/// apart; the caller's identifier is restored on the way back.
-pub async fn quic_exchange(
-    req: &Message,
-    server: SocketAddr,
-    server_name: &str,
-    timeout: Duration,
-) -> Result<Message, Error> {
-    let id = req.metadata.id;
-    let mut on_wire = req.clone();
-    on_wire.metadata.id = 0;
-
-    let wire = on_wire
-        .to_bytes()
-        .map_err(|e| Error::Decode(e.to_string()))?;
-    let len = u16::try_from(wire.len())
-        .map_err(|_| Error::Decode("request too large for quic framing".into()))?;
-
-    let conn = quic_connect(server, server_name, timeout).await?;
-
-    let mut resp = tokio::time::timeout(timeout, async {
-        let (mut send, mut recv) = conn
-            .open_bi()
-            .await
-            .map_err(|e| Error::Http(format!("opening a quic stream: {e}")))?;
-
-        send.write_all(&len.to_be_bytes())
-            .await
-            .map_err(|e| Error::Http(e.to_string()))?;
-        send.write_all(&wire)
-            .await
-            .map_err(|e| Error::Http(e.to_string()))?;
-        // Closing the send side is how a DoQ client signals a complete query.
-        send.finish().map_err(|e| Error::Http(e.to_string()))?;
-
-        let mut lenbuf = [0u8; 2];
-        recv.read_exact(&mut lenbuf)
-            .await
-            .map_err(|e| Error::Http(e.to_string()))?;
-        let n = usize::from(u16::from_be_bytes(lenbuf));
-        if n > MAX_MSG {
-            return Err(Error::Decode("response too large".into()));
-        }
-
-        let mut buf = vec![0u8; n];
-        recv.read_exact(&mut buf)
-            .await
-            .map_err(|e| Error::Http(e.to_string()))?;
-
-        Message::from_bytes(&buf).map_err(|e| Error::Decode(e.to_string()))
-    })
-    .await
-    .map_err(|_| Error::Timeout(timeout))??;
-
-    resp.metadata.id = id;
-
-    Ok(resp)
-}
-
-/// Opens a QUIC connection to a DoQ server.
-async fn quic_connect(
-    server: SocketAddr,
-    server_name: &str,
-    timeout: Duration,
-) -> Result<quinn::Connection, Error> {
-    quic_connect_alpn(server, server_name, timeout, b"doq").await
-}
-
-/// The QUIC endpoints, one per address family.
-///
-/// `quinn::Endpoint::client` binds a UDP socket and spawns a driver task, and
-/// both were being built and thrown away for every DoQ and HTTP/3 query.  One
-/// endpoint carries any number of connections, so it is built once and cloned.
-///
-/// A `Mutex<Option<_>>` rather than a `OnceLock` for two reasons: a bind that
-/// failed once should not poison QUIC for the life of the process, and the
-/// driver task belongs to the runtime that spawned it, so an endpoint cached
-/// under one runtime is inert under the next.  Tests are where that second
-/// case shows up — each `#[tokio::test]` builds its own runtime — so the
-/// runtime is recorded alongside the endpoint and a mismatch rebuilds.
-static QUIC_V4: parking_lot::Mutex<Option<(tokio::runtime::Id, quinn::Endpoint)>> =
-    parking_lot::Mutex::new(None);
-/// The IPv6 endpoint; see [`QUIC_V4`].
-static QUIC_V6: parking_lot::Mutex<Option<(tokio::runtime::Id, quinn::Endpoint)>> =
-    parking_lot::Mutex::new(None);
-
-/// The endpoint to reach `server` from, building it on first use.
-fn quic_endpoint(server: SocketAddr) -> Result<quinn::Endpoint, Error> {
-    let (slot, bind) = if server.is_ipv4() {
-        (&QUIC_V4, "0.0.0.0:0")
-    } else {
-        (&QUIC_V6, "[::]:0")
-    };
-
-    let here = tokio::runtime::Handle::current().id();
-    let mut held = slot.lock();
-    if let Some((born, ep)) = held.as_ref()
-        && *born == here
-    {
-        return Ok(ep.clone());
-    }
-
-    let ep = quinn::Endpoint::client(bind.parse().expect("static addr")).map_err(Error::Io)?;
-    *held = Some((here, ep.clone()));
-
-    Ok(ep)
-}
-
-/// Opens a QUIC connection offering one application protocol.
-async fn quic_connect_alpn(
-    server: SocketAddr,
-    server_name: &str,
-    timeout: Duration,
-    alpn: &[u8],
-) -> Result<quinn::Connection, Error> {
-    let crypto = quinn::crypto::rustls::QuicClientConfig::try_from(alpn_tls_config(alpn))
-        .map_err(|e| Error::Tls(e.to_string()))?;
-    let cfg = quinn::ClientConfig::new(Arc::new(crypto));
-
-    // Not `set_default_client_config`: DoQ and HTTP/3 share the endpoint but
-    // need different application protocols, so the configuration travels with
-    // the connection rather than the endpoint.
-    let connecting = quic_endpoint(server)?
-        .connect_with(cfg, server, server_name)
-        .map_err(|e| Error::Tls(e.to_string()))?;
-
-    tokio::time::timeout(timeout, connecting)
-        .await
-        .map_err(|_| Error::Timeout(timeout))?
-        .map_err(|e| Error::Http(format!("quic handshake: {e}")))
-}
-
-/// Sends a query over DNS-over-HTTPS carried by HTTP/3.
-///
-/// This is `use_http3_upstreams`.  The exchange is the same POST as over
-/// HTTP/2; only the transport underneath differs, so a server that does not
-/// speak HTTP/3 simply fails the handshake and the caller falls back.
-pub async fn https3_exchange(
-    req: &Message,
-    server: SocketAddr,
-    host: &str,
-    path: &str,
-    timeout: Duration,
-) -> Result<Message, Error> {
-    use bytes::Buf as _;
-
-    let wire = req.to_bytes().map_err(|e| Error::Decode(e.to_string()))?;
-
-    let conn = quic_connect_alpn(server, host, timeout, b"h3").await?;
-    let (mut driver, mut sender) = h3::client::new(h3_quinn::Connection::new(conn))
-        .await
-        .map_err(|e| Error::Http(format!("http/3 handshake: {e}")))?;
-
-    // The connection has to be driven while the request is in flight.
-    let task = tokio::spawn(async move {
-        let _ = std::future::poll_fn(|cx| driver.poll_close(cx)).await;
-    });
-
-    let out = tokio::time::timeout(timeout, async {
-        let request = hyper::Request::builder()
-            .method("POST")
-            .uri(format!("https://{host}{path}"))
-            .header("content-type", "application/dns-message")
-            .header("accept", "application/dns-message")
-            .body(())
-            .map_err(|e| Error::Http(e.to_string()))?;
-
-        let mut stream = sender
-            .send_request(request)
-            .await
-            .map_err(|e| Error::Http(e.to_string()))?;
-        stream
-            .send_data(bytes::Bytes::from(wire))
-            .await
-            .map_err(|e| Error::Http(e.to_string()))?;
-        stream
-            .finish()
-            .await
-            .map_err(|e| Error::Http(e.to_string()))?;
-
-        let resp = stream
-            .recv_response()
-            .await
-            .map_err(|e| Error::Http(e.to_string()))?;
-        if !resp.status().is_success() {
-            return Err(Error::Http(format!("upstream returned {}", resp.status())));
-        }
-
-        let mut body = Vec::new();
-        while let Some(mut chunk) = stream
-            .recv_data()
-            .await
-            .map_err(|e| Error::Http(e.to_string()))?
-        {
-            if body.len() + chunk.remaining() > MAX_MSG {
-                return Err(Error::Http("response body too large".into()));
-            }
-            body.extend_from_slice(chunk.copy_to_bytes(chunk.remaining()).as_ref());
-        }
-
-        Message::from_bytes(&body).map_err(|e| Error::Decode(e.to_string()))
-    })
-    .await;
-
-    task.abort();
-
-    out.map_err(|_| Error::Timeout(timeout))?
-}
-
-/// Reads and size-limits an HTTP response body.
-async fn read_body<B>(resp: hyper::Response<B>, timeout: Duration) -> Result<Vec<u8>, Error>
-where
-    B: hyper::body::Body + Unpin,
-    B::Error: std::fmt::Display,
-{
-    use http_body_util::BodyExt;
-
-    let status = resp.status();
-    if !status.is_success() {
-        return Err(Error::Http(format!("upstream returned {status}")));
-    }
-
-    let collected = tokio::time::timeout(timeout, resp.into_body().collect())
-        .await
-        .map_err(|_| Error::Timeout(timeout))?
-        .map_err(|e| Error::Http(e.to_string()))?;
-
-    let bytes = collected.to_bytes();
-    if bytes.len() > MAX_MSG {
-        return Err(Error::Http("response body too large".into()));
-    }
-
-    Ok(bytes.to_vec())
-}
-
 /// A resolved, ready-to-use upstream.
 #[derive(Debug)]
 pub struct Client {
@@ -730,8 +379,11 @@ pub struct Client {
     pub upstream: Upstream,
     /// The addresses to contact, in preference order.
     addrs: Vec<SocketAddr>,
-    /// Shared TLS settings for DoT.
-    tls: Arc<rustls::ClientConfig>,
+    /// What is kept open to each of those addresses.
+    ///
+    /// Indexed by position in `addrs`, which is resolved once and never
+    /// reordered, so the two stay aligned for the life of the client.
+    conns: Connections,
     /// Whether DNS-over-HTTPS should be tried over HTTP/3 first.
     prefer_http3: bool,
     /// The index into `addrs` that answered last.
@@ -756,11 +408,12 @@ impl Client {
         }
 
         let addrs = resolve_upstream(&upstream, bootstrap, timeout, prefer_ipv6).await?;
+        let conns = Connections::new(&addrs, &tls);
 
         Ok(Self {
             upstream,
             addrs,
-            tls,
+            conns,
             prefer_http3: false,
             preferred: AtomicUsize::new(0),
         })
@@ -785,10 +438,20 @@ impl Client {
         Self {
             upstream,
             addrs: Vec::new(),
-            tls: tls_config(),
+            conns: Connections::new(&[], &tls_config()),
             prefer_http3: false,
             preferred: AtomicUsize::new(0),
         }
+    }
+
+    /// Closes every connection this client is holding open.
+    ///
+    /// `POST /control/test_upstream_dns` builds a throwaway client for each
+    /// probe, and a connection kept for a client nobody will ask again is a
+    /// socket and a driver task leaked per probe.  [`Drop`] calls this, so
+    /// the only reason to call it directly is to hang up early.
+    pub fn close(&self) {
+        self.conns.close();
     }
 
     /// Sends a query and returns the reply.
@@ -828,19 +491,18 @@ impl Client {
             let i = (first + step) % n;
             let addr = self.addrs[i];
 
+            let host = &self.upstream.host;
+            let path = &self.upstream.path;
+
             let r = match self.upstream.transport {
                 Transport::Udp => match udp_exchange(req, addr, budget).await {
-                    Ok(resp) if resp.metadata.truncation => tcp_exchange(req, addr, budget).await,
+                    Ok(resp) if resp.metadata.truncation => self.conns.tcp(i, req, budget).await,
                     other => other,
                 },
-                Transport::Tcp => tcp_exchange(req, addr, budget).await,
-                Transport::Tls => {
-                    tls_exchange(req, addr, &self.upstream.host, self.tls.clone(), budget).await
-                }
+                Transport::Tcp => self.conns.tcp(i, req, budget).await,
+                Transport::Tls => self.conns.tls(i, req, host, budget).await,
                 Transport::Https if self.prefer_http3 => {
-                    let host = &self.upstream.host;
-                    let path = &self.upstream.path;
-                    match https3_exchange(req, addr, host, path, budget).await {
+                    match self.conns.https3(i, req, host, path, budget).await {
                         Ok(resp) => Ok(resp),
                         Err(e) => {
                             tracing::debug!(
@@ -849,15 +511,12 @@ impl Client {
                                 "http/3 failed; falling back to http/2"
                             );
 
-                            https_exchange(req, addr, host, path, budget).await
+                            self.conns.https(i, req, host, path, budget).await
                         }
                     }
                 }
-                Transport::Https => {
-                    https_exchange(req, addr, &self.upstream.host, &self.upstream.path, budget)
-                        .await
-                }
-                Transport::Quic => quic_exchange(req, addr, &self.upstream.host, budget).await,
+                Transport::Https => self.conns.https(i, req, host, path, budget).await,
+                Transport::Quic => self.conns.quic(i, req, host, budget).await,
                 Transport::Stamp => unreachable!("rejected above"),
             };
 
@@ -879,6 +538,13 @@ impl Client {
     /// The addresses this client will contact.
     pub fn addrs(&self) -> &[SocketAddr] {
         &self.addrs
+    }
+}
+
+impl Drop for Client {
+    /// Hangs up rather than leaving the connections to time out.
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -911,7 +577,7 @@ mod tests {
     fn tls_config_loads_the_webpki_roots() {
         let c = tls_config();
         assert!(Arc::strong_count(&c) >= 1);
-        assert!(https_tls_config().alpn_protocols.contains(&b"h2".to_vec()));
+        assert!(HTTPS.alpn_protocols.contains(&b"h2".to_vec()));
     }
 
     #[tokio::test]
@@ -1048,10 +714,11 @@ mod tests {
         // TEST-NET-1 is routed nowhere, so it times out rather than being
         // refused: the shape a genuinely dead upstream address has.
         let dead: SocketAddr = "192.0.2.1:53".parse().unwrap();
+        let addrs = vec![dead, live];
         let c = Client {
             upstream: addr::parse("192.0.2.1").unwrap().upstream.unwrap(),
-            addrs: vec![dead, live],
-            tls: tls_config(),
+            conns: Connections::new(&addrs, &tls_config()),
+            addrs,
             prefer_http3: false,
             preferred: AtomicUsize::new(0),
         };
