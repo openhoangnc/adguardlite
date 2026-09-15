@@ -11,13 +11,28 @@ use hickory_proto::op::{Message, ResponseCode};
 use hickory_proto::rr::RecordType;
 use parking_lot::Mutex;
 
-/// How a cached entry was produced, so callers can decide whether to refresh.
+/// How a cached entry stands against its TTL.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Freshness {
     /// The entry is within its TTL.
     Fresh,
     /// The entry has expired but is being served optimistically.
     Stale,
+}
+
+/// What a lookup found.
+pub struct Hit {
+    /// The stored response, with its TTLs adjusted for this caller.
+    pub msg: Message,
+    /// Whether the entry is still inside its TTL.
+    pub freshness: Freshness,
+    /// Whether this caller should start a background refresh of the entry.
+    ///
+    /// The claim is made under the shard lock, so a burst of lookups produces
+    /// one refresh rather than one each.  Whoever is told to refresh must
+    /// release the claim with [`Cache::end_refresh`] once it is done, or the
+    /// entry is never refreshed again.
+    pub refresh: bool,
 }
 
 /// The key identifying a cached response.
@@ -71,6 +86,17 @@ struct Entry {
     ttl: Duration,
     /// The approximate size of the entry in bytes.
     weight: usize,
+    /// How many times the entry has been served.
+    hits: u32,
+    /// Whether a background refresh of this entry is already running.
+    refreshing: bool,
+    /// The eviction slot this entry owns.
+    ///
+    /// A key stored again -- after expiry, or by a refresh -- is pushed onto
+    /// `order` a second time, so the slot left behind names an entry that no
+    /// longer exists.  Matching the sequence number is what stops it from
+    /// evicting the live entry under the same key.
+    seq: u64,
 }
 
 impl Entry {
@@ -96,6 +122,12 @@ pub struct Config {
     pub ttl_max: u32,
     /// Whether expired entries may still be served while a refresh runs.
     pub optimistic: bool,
+    /// The TTL put on an optimistically served answer.
+    ///
+    /// Not what is left of the entry's own TTL, which has already run out: a
+    /// fixed, short number telling the client to come back once the refresh
+    /// behind it has landed.  This is `cache_optimistic_answer_ttl`.
+    pub optimistic_answer_ttl: Duration,
     /// How long an expired entry may still be served.
     pub optimistic_max_age: Duration,
 }
@@ -107,6 +139,7 @@ impl Default for Config {
             ttl_min: 0,
             ttl_max: 0,
             optimistic: false,
+            optimistic_answer_ttl: Duration::from_secs(30),
             optimistic_max_age: Duration::from_secs(12 * 3600),
         }
     }
@@ -114,6 +147,19 @@ impl Default for Config {
 
 /// The number of shards.  A power of two so the index is a mask.
 const SHARDS: usize = 16;
+
+/// How many times an entry must be served before it is refreshed ahead of its
+/// expiry.
+///
+/// A refresh costs an upstream exchange, so a name asked for exactly once --
+/// most of them -- is left to expire quietly.
+const REFRESH_MIN_HITS: u32 = 2;
+
+/// How many dead eviction slots a shard tolerates before compacting.
+///
+/// Compaction is one pass over `order`, and can only run again once the shard
+/// has grown again, which is what makes it amortised.
+const COMPACT_SLACK: usize = 64;
 
 /// A sharded, size-bounded DNS cache.
 pub struct Cache {
@@ -125,22 +171,49 @@ pub struct Cache {
 struct Shard {
     map: HashMap<Key, Entry>,
     /// Keys in rough insertion order, used for eviction.
-    order: std::collections::VecDeque<Key>,
+    ///
+    /// Each slot carries the sequence number of the entry it was pushed for.
+    /// Entries leave `map` without their slot being found and removed -- that
+    /// would be a linear scan on a hot path -- so a slot may name an entry
+    /// that is gone, or an older incarnation of one that is still there.
+    order: std::collections::VecDeque<(u64, Key)>,
     bytes: usize,
     budget: usize,
+    /// The next sequence number to hand out.
+    next_seq: u64,
 }
 
 impl Shard {
     /// Evicts oldest entries until the shard fits its budget.
     fn evict_to_fit(&mut self) {
         while self.bytes > self.budget {
-            let Some(k) = self.order.pop_front() else {
+            let Some((seq, k)) = self.order.pop_front() else {
                 break;
             };
-            if let Some(e) = self.map.remove(&k) {
+
+            // A slot naming an entry that is gone, or one stored again since,
+            // is simply dropped: evicting on it would throw away a live entry
+            // that has its own slot further along.
+            let live = self.map.get(&k).is_some_and(|e| e.seq == seq);
+            if live && let Some(e) = self.map.remove(&k) {
                 self.bytes = self.bytes.saturating_sub(e.weight);
             }
         }
+    }
+
+    /// Drops eviction slots that no longer name a live entry.
+    ///
+    /// Without this `order` grows with every expiry and every re-store, on a
+    /// shard whose `bytes` never reach its budget and so never evict -- which
+    /// is the common case, and was an unbounded leak.
+    fn compact_order(&mut self) {
+        if self.order.len() <= self.map.len() * 2 + COMPACT_SLACK {
+            return;
+        }
+
+        let map = &self.map;
+        self.order
+            .retain(|(seq, k)| map.get(k).is_some_and(|e| e.seq == *seq));
     }
 }
 
@@ -155,6 +228,7 @@ impl Cache {
                     order: std::collections::VecDeque::new(),
                     bytes: 0,
                     budget: per_shard,
+                    next_seq: 0,
                 })
             })
             .collect();
@@ -205,45 +279,81 @@ impl Cache {
     ///
     /// Returns `None` on a miss, or when the entry has expired and optimistic
     /// serving is off.
-    pub fn get(&self, k: &Key) -> Option<(Message, Freshness)> {
-        if self.is_disabled() {
+    pub fn get(&self, k: &Key) -> Option<Hit> {
+        // `Config` is `Copy`, so one acquisition covers every field the
+        // lookup needs.
+        let cfg = *self.cfg.read();
+        if cfg.size_bytes == 0 {
             return None;
         }
 
         let now = Instant::now();
         let mut sh = self.shard_of(k).lock();
-        let e = sh.map.get(k)?;
+        let e = sh.map.get_mut(k)?;
 
         let age = e.age(now);
         let expired = e.is_expired(now);
 
         // An expired entry is dropped unless optimistic serving is on and it
         // is still inside the stale window.
-        let (optimistic, optimistic_max_age) = {
-            let cfg = self.cfg.read();
-
-            (cfg.optimistic, cfg.optimistic_max_age)
-        };
-        if expired && (!optimistic || age > optimistic_max_age) {
+        if expired && (!cfg.optimistic || age > cfg.optimistic_max_age) {
             let weight = e.weight;
             sh.map.remove(k);
             sh.bytes = sh.bytes.saturating_sub(weight);
+            // The entry's slot in `order` outlives it, and nothing else would
+            // ever collect it on a shard that stays under its budget.
+            sh.compact_order();
 
             return None;
         }
 
-        let mut msg = e.msg.clone();
-        let elapsed = age.as_secs() as u32;
-        decrement_ttls(&mut msg, elapsed);
+        e.hits = e.hits.saturating_add(1);
 
-        Some((
+        // Refreshing shortly before the TTL runs out keeps a popular name
+        // from being served stale at all.  It is worth an upstream exchange
+        // only for a name that has been asked for more than once.
+        let remaining = e.ttl.saturating_sub(age);
+        let expiring = cfg.optimistic
+            && e.hits >= REFRESH_MIN_HITS
+            && remaining <= (e.ttl / 10).max(Duration::from_secs(1));
+
+        let refresh = (expired || expiring) && !e.refreshing;
+        if refresh {
+            e.refreshing = true;
+        }
+
+        let mut msg = e.msg.clone();
+        if expired {
+            // A running AdGuard Home stamps `cache_optimistic_answer_ttl` on
+            // an optimistically served answer rather than counting down from
+            // what it stored; counting down would hand the client a TTL that
+            // had already run out.
+            set_ttls(&mut msg, secs_u32(cfg.optimistic_answer_ttl));
+        } else {
+            decrement_ttls(&mut msg, age.as_secs() as u32);
+        }
+
+        Some(Hit {
             msg,
-            if expired {
+            freshness: if expired {
                 Freshness::Stale
             } else {
                 Freshness::Fresh
             },
-        ))
+            refresh,
+        })
+    }
+
+    /// Releases the refresh claim on an entry.
+    ///
+    /// A refresh that produced an answer has already replaced the entry
+    /// through [`Cache::put`], which clears the claim with it.  This is what
+    /// keeps a refresh that *failed* from leaving the key marked forever, and
+    /// so never refreshed again.
+    pub fn end_refresh(&self, k: &Key) {
+        if let Some(e) = self.shard_of(k).lock().map.get_mut(k) {
+            e.refreshing = false;
+        }
     }
 
     /// Stores a response, if it is cacheable.
@@ -266,6 +376,9 @@ impl Cache {
             return false;
         }
 
+        let seq = sh.next_seq;
+        sh.next_seq += 1;
+
         if let Some(old) = sh.map.insert(
             k.clone(),
             Entry {
@@ -273,13 +386,20 @@ impl Cache {
                 stored: Instant::now(),
                 ttl,
                 weight,
+                hits: 0,
+                refreshing: false,
+                seq,
             },
         ) {
             sh.bytes = sh.bytes.saturating_sub(old.weight);
-        } else {
-            sh.order.push_back(k);
         }
+        // Always a new slot, even when replacing: finding the old one would
+        // be a linear scan, and the sequence number makes it harmless to
+        // leave behind.  A re-stored entry moving to the back of the eviction
+        // order is what you want anyway.
+        sh.order.push_back((seq, k));
         sh.bytes += weight;
+        sh.compact_order();
         sh.evict_to_fit();
 
         true
@@ -341,6 +461,24 @@ impl Cache {
     pub fn bytes(&self) -> usize {
         self.shards.iter().map(|s| s.lock().bytes).sum()
     }
+
+    /// Moves an entry's clock back, so a test can reach expiry without
+    /// sleeping through it.
+    #[cfg(test)]
+    fn backdate(&self, k: &Key, by: Duration) {
+        if let Some(e) = self.shard_of(k).lock().map.get_mut(k) {
+            e.stored = e.stored.checked_sub(by).unwrap_or(e.stored);
+        }
+    }
+
+    /// The number of eviction slots held across every shard.
+    ///
+    /// Only the tests care: this is the number that used to grow without
+    /// bound, so it is the one worth asserting on.
+    #[cfg(test)]
+    fn order_len(&self) -> usize {
+        self.shards.iter().map(|s| s.lock().order.len()).sum()
+    }
 }
 
 /// Reduces every record's TTL by `secs`, flooring at one second so a cached
@@ -354,6 +492,26 @@ fn decrement_ttls(msg: &mut Message, secs: u32) {
     {
         r.ttl = r.ttl.saturating_sub(secs).max(1);
     }
+}
+
+/// Replaces every record's TTL with `secs`.
+///
+/// The same sections as [`decrement_ttls`]: the OPT pseudo-record lives in
+/// `Message::edns`, not in `additionals`, so none of this touches it.
+fn set_ttls(msg: &mut Message, secs: u32) {
+    for r in msg
+        .answers
+        .iter_mut()
+        .chain(&mut msg.authorities)
+        .chain(&mut msg.additionals)
+    {
+        r.ttl = secs;
+    }
+}
+
+/// A duration in whole seconds, saturating rather than wrapping.
+fn secs_u32(d: Duration) -> u32 {
+    u32::try_from(d.as_secs()).unwrap_or(u32::MAX)
 }
 
 /// A rough byte cost for a message.
@@ -460,9 +618,9 @@ mod tests {
         let k = Key::from_request(&req("example.com.")).unwrap();
         assert!(c.put(k.clone(), &resp("example.com.", 300)));
 
-        let (got, fresh) = c.get(&k).expect("should hit");
-        assert_eq!(fresh, Freshness::Fresh);
-        assert_eq!(got.answers.len(), 1);
+        let hit = c.get(&k).expect("should hit");
+        assert_eq!(hit.freshness, Freshness::Fresh);
+        assert_eq!(hit.msg.answers.len(), 1);
         assert_eq!(c.len(), 1);
     }
 
@@ -590,6 +748,206 @@ mod tests {
         c.clear();
         assert!(c.is_empty());
         assert_eq!(c.bytes(), 0);
+    }
+
+    #[test]
+    fn an_expired_entry_is_served_with_the_configured_optimistic_ttl() {
+        // Captured from AdGuard Home v0.107.79 with `cache_optimistic` on and
+        // `cache_optimistic_answer_ttl: 7s`: a stale answer came back with a
+        // TTL of 7, not with what was left of the two seconds it was stored
+        // for.  The value is non-default on purpose -- an implementation that
+        // hardcoded the 30s default would pass a test written against it.
+        let c = Cache::new(Config {
+            optimistic: true,
+            optimistic_answer_ttl: Duration::from_secs(7),
+            ..Default::default()
+        });
+        let k = Key::from_request(&req("example.com.")).unwrap();
+        c.put(k.clone(), &resp("example.com.", 300));
+        c.backdate(&k, Duration::from_secs(400));
+
+        let hit = c.get(&k).expect("optimistic serving keeps it");
+        assert_eq!(hit.freshness, Freshness::Stale);
+        assert_eq!(hit.msg.answers[0].ttl, 7);
+        assert!(hit.refresh, "and its caller is told to refresh it");
+    }
+
+    #[test]
+    fn an_expired_entry_is_still_dropped_when_optimistic_serving_is_off() {
+        let c = Cache::new(Config::default());
+        let k = Key::from_request(&req("example.com.")).unwrap();
+        c.put(k.clone(), &resp("example.com.", 300));
+        c.backdate(&k, Duration::from_secs(400));
+
+        assert!(c.get(&k).is_none());
+        assert_eq!(c.len(), 0, "and it is gone rather than kept");
+    }
+
+    #[test]
+    fn an_entry_past_the_stale_window_is_dropped_rather_than_served() {
+        let c = Cache::new(Config {
+            optimistic: true,
+            optimistic_max_age: Duration::from_secs(60),
+            ..Default::default()
+        });
+        let k = Key::from_request(&req("example.com.")).unwrap();
+        c.put(k.clone(), &resp("example.com.", 300));
+        c.backdate(&k, Duration::from_secs(3600));
+
+        assert!(c.get(&k).is_none());
+    }
+
+    #[test]
+    fn only_one_caller_at_a_time_is_told_to_refresh() {
+        // Otherwise a burst on one expired name queues a job per client.
+        let c = Cache::new(Config {
+            optimistic: true,
+            ..Default::default()
+        });
+        let k = Key::from_request(&req("example.com.")).unwrap();
+        c.put(k.clone(), &resp("example.com.", 300));
+        c.backdate(&k, Duration::from_secs(400));
+
+        assert!(c.get(&k).expect("a hit").refresh, "the first claims it");
+        assert!(
+            !c.get(&k).expect("a hit").refresh,
+            "the rest are served the same stale answer and refresh nothing"
+        );
+
+        c.end_refresh(&k);
+        assert!(
+            c.get(&k).expect("a hit").refresh,
+            "and the claim can be taken again once it is released"
+        );
+    }
+
+    #[test]
+    fn a_popular_entry_is_refreshed_before_it_expires() {
+        // The last tenth of the TTL is the window.  Refreshing there is what
+        // keeps a name that is asked for constantly from ever going stale.
+        let c = Cache::new(Config {
+            optimistic: true,
+            ..Default::default()
+        });
+        let k = Key::from_request(&req("example.com.")).unwrap();
+        c.put(k.clone(), &resp("example.com.", 100));
+        c.backdate(&k, Duration::from_secs(95));
+
+        let first = c.get(&k).expect("a hit");
+        assert_eq!(first.freshness, Freshness::Fresh);
+        assert!(
+            !first.refresh,
+            "a name asked for once is left to expire quietly"
+        );
+        assert!(
+            c.get(&k).expect("a hit").refresh,
+            "a second ask pays for the exchange"
+        );
+    }
+
+    #[test]
+    fn an_entry_well_inside_its_ttl_is_left_alone() {
+        let c = Cache::new(Config {
+            optimistic: true,
+            ..Default::default()
+        });
+        let k = Key::from_request(&req("example.com.")).unwrap();
+        c.put(k.clone(), &resp("example.com.", 100));
+        c.backdate(&k, Duration::from_secs(10));
+
+        for _ in 0..5 {
+            assert!(!c.get(&k).expect("a hit").refresh);
+        }
+    }
+
+    #[test]
+    fn refreshing_ahead_is_gated_on_optimistic_serving() {
+        // It is not an AdGuard Home feature and has no config key of its own,
+        // so `cache_optimistic` is what turns it on.
+        let c = Cache::new(Config::default());
+        let k = Key::from_request(&req("example.com.")).unwrap();
+        c.put(k.clone(), &resp("example.com.", 100));
+        c.backdate(&k, Duration::from_secs(95));
+
+        assert!(!c.get(&k).expect("a hit").refresh);
+        assert!(!c.get(&k).expect("a hit").refresh);
+    }
+
+    #[test]
+    fn the_eviction_order_does_not_grow_without_bound() {
+        // An expiring lookup takes the entry out of `map` without finding its
+        // slot in `order`, and storing the key again adds a second slot.
+        // Only eviction drained `order`, and eviction only runs when the
+        // shard is over budget -- so on a cache holding almost nothing,
+        // `order` grew forever.
+        let c = Cache::new(Config::default());
+        let k = Key::from_request(&req("example.com.")).unwrap();
+
+        for _ in 0..10_000 {
+            c.put(k.clone(), &resp("example.com.", 300));
+            c.backdate(&k, Duration::from_secs(400));
+            assert!(c.get(&k).is_none(), "expired, and dropped by the lookup");
+        }
+
+        assert_eq!(c.len(), 0, "the cache is empty");
+        assert!(
+            c.order_len() <= COMPACT_SLACK * 2,
+            "{} eviction slots for an empty cache",
+            c.order_len()
+        );
+    }
+
+    #[test]
+    fn a_dead_eviction_slot_does_not_take_the_live_entry_with_it() {
+        // A key stored again after expiring leaves its first slot behind.
+        // That slot sorts ahead of everything stored since, so an eviction
+        // that acted on it threw away the newest entry and kept the oldest --
+        // exactly backwards.
+        let c = Cache::new(Config::default());
+        let k = Key::from_request(&req("example.com.")).unwrap();
+
+        c.put(k.clone(), &resp("example.com.", 300));
+        c.backdate(&k, Duration::from_secs(400));
+        assert!(c.get(&k).is_none(), "the lookup drops it, leaving its slot");
+
+        // Something else in the same shard, stored between the dead slot and
+        // the live one, is what eviction should actually take.
+        let other = name_in_shard_of(&c, &k);
+        let ok = Key::from_request(&req(&other)).unwrap();
+        c.put(ok.clone(), &resp(&other, 300));
+        c.put(k.clone(), &resp("example.com.", 300));
+
+        // Just enough pressure to need one entry's worth freed.
+        {
+            let mut sh = c.shard_of(&k).lock();
+            assert_eq!(sh.order.len(), 3, "the dead slot is still in the order");
+            sh.budget = sh.bytes - 1;
+            sh.evict_to_fit();
+        }
+
+        assert!(
+            c.get(&k).is_some(),
+            "the entry stored last must survive its own dead slot"
+        );
+        assert!(
+            c.get(&ok).is_none(),
+            "the genuinely older entry is what goes instead"
+        );
+    }
+
+    /// A name landing in the same shard as `k`, so one shard's eviction order
+    /// can be driven without the other fifteen muddying it.
+    fn name_in_shard_of(c: &Cache, k: &Key) -> String {
+        let target = c.shard_of(k);
+
+        (0..10_000)
+            .map(|i| format!("filler{i}.example.com."))
+            .find(|n| {
+                let other = Key::from_request(&req(n)).expect("a key");
+
+                std::ptr::eq(c.shard_of(&other), target)
+            })
+            .expect("some name shares the shard")
     }
 
     #[test]

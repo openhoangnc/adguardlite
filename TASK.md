@@ -5,7 +5,7 @@ Work status for the Rust backend, against AdGuard Home **v0.107.79**.
 Legend: **[x]** done and verified · **[~]** partial, see the note · **[ ]** not started
 
 Verification claims below are reproducible with `scripts/verify.sh` and
-`cargo test --workspace` (621 tests).
+`cargo test --workspace` (633 tests).
 
 ---
 
@@ -88,9 +88,13 @@ Verification claims below are reproducible with `scripts/verify.sh` and
       deferral form
 - [x] Upstream modes: load balance (latency-ranked), parallel, fastest address
 - [x] Fallback resolvers
-- [x] Response cache: sized in bytes, sharded, TTL bounds, optimistic serving,
-      keyed on the EDNS `DO` bit so a validating client is never served a
-      stripped answer
+- [x] Response cache: sized in bytes, sharded, TTL bounds, keyed on the EDNS
+      `DO` bit so a validating client is never served a stripped answer
+- [x] **Optimistic caching**: an expired entry still inside
+      `cache_optimistic_max_age` is served at once, stamped with
+      `cache_optimistic_answer_ttl`, and fetched again out of band. Measured
+      answer-for-answer against the Go build — see *Found optimising the
+      upstream query path* below
 - [x] Blocking modes: default, custom IP, NXDOMAIN, null IP, REFUSED —
       including the negative-caching SOA's exact field values
 - [x] Rate limiting per client subnet, with an exemption list
@@ -720,6 +724,67 @@ and a name dropped from the list is answered again. Twelve tests in
 `agl-dns/src/blocked.rs` carry the measured cases, each noted with what the Go
 build did.
 
+## Found optimising the upstream query path, and fixed
+
+`cache_optimistic` was carried from the config file into the cache and then
+ignored. That is the failure mode CLAUDE.md warns about: a setting the
+interface offers, the config file records, and nothing acts on.
+
+- **An expired entry was recognised and then thrown away.** `Cache::get`
+  returned `Freshness::Stale` for an entry inside `cache_optimistic_max_age`,
+  and the resolver acted only on `Freshness::Fresh` — so the stale answer was
+  cloned, had its TTLs decremented, and was dropped on the floor on the way
+  upstream. `Freshness::Stale` was constructed in one place and read in none.
+  Switching optimistic caching on bought nothing but the memory to hold expired
+  entries for twelve hours, and a wasted clone per lookup.
+
+  The entry is served immediately now, and fetched again behind the client.
+  Measured against a running AdGuard Home v0.107.79 whose upstream answered a
+  different address every time, so each answer says which exchange produced it,
+  with a record TTL of 2s and `cache_optimistic_answer_ttl: 7s`:
+
+  | | Go v0.107.79 | this build |
+  |---|---|---|
+  | t=0.0 first, a miss | `10.0.0.2` ttl 2 | `10.0.0.2` ttl 2 |
+  | t=1.0 inside the TTL | `10.0.0.2` ttl 1 | `10.0.0.2` ttl 1 |
+  | t=4.0 expired | `10.0.0.2` **ttl 7** | `10.0.0.2` **ttl 7** |
+  | t=5.0 just after | `10.0.0.3` ttl 1 | `10.0.0.3` ttl 1 |
+  | t=6.0 | `10.0.0.3` ttl 7 | `10.0.0.3` ttl 7 |
+  | t=12.0 | `10.0.0.4` ttl 7 | `10.0.0.4` ttl 7 |
+  | upstream exchanges for the name | 4 | 4 |
+  | query log lines | 6 | 6 |
+
+- **`cache_optimistic_answer_ttl` had no readers at all.** It defaulted to 30s
+  in `agl-config` and nothing outside that crate ever looked at it. The run
+  above is what settled its meaning: the configured TTL is *stamped* on an
+  optimistically served answer rather than counted down from what the entry had
+  left — which would hand the client a number that had already run out. The
+  value used was a deliberately non-default 7s, so a build that hardcoded the
+  30s default would have shown it. It now reaches `CacheConfig`, and applies on
+  reload with the rest of the cache settings.
+
+  `tests/compat/dns_diff.py` could not have caught this: it unpacks a record
+  with `">HHIH"` and binds the TTL field to `_`.
+
+- **The shard's eviction order leaked, without bound.** `Shard::order` was
+  drained only by `evict_to_fit`, which runs only while a shard is over its
+  budget. The expiry path in `get` removed the entry from `map` and decremented
+  `bytes` without touching `order` — so on a cache comfortably inside its
+  budget, which is the normal case, `order` grew by a slot for every
+  expired-then-looked-up key and nothing ever collected them. Serving stale
+  entries makes it far worse, because an expired entry now survives to be
+  looked up again and again.
+
+  Worse, a key stored again after expiring was pushed a second time, and the
+  dead slot sorted ahead of the live one: the next eviction threw away the
+  entry that had just been stored and kept an older one, which is exactly
+  backwards. Slots carry the sequence number of the entry they were pushed for
+  now, so a dead one is recognised and skipped, and a shard compacts its order
+  once the dead slots outnumber the live entries — one pass, and it cannot run
+  again until the shard has grown again.
+
+---
+
 ## Deliberate deviations
 
 **A first launch as a non-root user is allowed.** The Go build refuses one —
@@ -761,6 +826,20 @@ Not bugs; recorded so nobody "fixes" them.
 - **User and group lookups read `/etc/passwd` and `/etc/group`.** A numeric id
   is used directly. Names defined only through NSS — LDAP, for instance — are
   not resolved; the container this ships in has a plain passwd file.
+- **Refresh-ahead on a popular name.** Not an AdGuard Home feature, and given
+  no config key of its own on purpose: adding one would change the file
+  `reproduces_the_reference_config_byte_for_byte` guards. An entry in the last
+  tenth of its TTL that has been served more than once is fetched again before
+  it expires, so a name under constant query is never served stale at all. It
+  is gated on `cache_optimistic` — the setting that says a stale answer is
+  acceptable in the first place — so with optimistic caching off the cache
+  behaves exactly as the Go build's does. A refresh calls `Resolver::forward`
+  directly and never `Server::handle`, so it is not rate limited, not counted
+  in `/control/stats` and not written to `querylog.json`: the Go build logs six
+  lines for six client queries over a name it refreshed four times, and so does
+  this one. The queue holds 1024 jobs with 32 running at once, and a job is
+  dropped rather than queued when it is full — no client ever waits on somebody
+  else's refresh.
 - **A changed listener *port* still needs a restart.** The certificate is
   live-reloadable; which ports are bound is decided when the listeners start.
   Everything else on the DNS settings page now applies without one.

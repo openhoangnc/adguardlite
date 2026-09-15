@@ -25,6 +25,7 @@ use crate::hashprefix::{self, Checker};
 use crate::msg::{self, BlockingConfig};
 use crate::pending::{Entry as PendingEntry, Pending, PendingKey};
 use crate::pool::SharedPool;
+use crate::refresh;
 use crate::rewrite::{self, Table};
 
 /// The transport a request arrived on.
@@ -291,6 +292,11 @@ pub struct Resolver {
     private_pool: RwLock<Option<Arc<SharedPool>>>,
     /// Identical in-flight requests.
     pending: Pending,
+    /// Where background cache refreshes are queued, when a worker is running.
+    ///
+    /// The worker owns an `Arc<Resolver>` and this end is only a `Sender`, so
+    /// handling a request never has to reach a `'static` copy of `self`.
+    refresh: RwLock<Option<refresh::Sender>>,
     /// Handling settings, replaceable while running.
     settings: RwLock<Arc<Settings>>,
 }
@@ -317,6 +323,7 @@ impl Resolver {
             pool,
             private_pool: RwLock::new(None),
             pending: Pending::new(),
+            refresh: RwLock::new(None),
             settings: RwLock::new(Arc::new(settings)),
         }
     }
@@ -364,6 +371,35 @@ impl Resolver {
     /// Replaces the settings.
     pub fn set_settings(&self, s: Settings) {
         *self.settings.write() = Arc::new(s);
+    }
+
+    /// Attaches the queue a [`crate::refresh`] worker is draining.
+    ///
+    /// Until one is attached, an expired entry is never served: see the cache
+    /// step in [`Resolver::resolve`].
+    pub fn set_refresh_sender(&self, tx: refresh::Sender) {
+        *self.refresh.write() = Some(tx);
+    }
+
+    /// Reports whether background refreshes are running.
+    fn refreshes(&self) -> bool {
+        self.refresh.read().is_some()
+    }
+
+    /// Queues a background refresh, dropping it when the queue is full.
+    ///
+    /// Never waits.  A client waiting for its own answer must not also wait
+    /// for somebody else's entry to be refreshed, so a saturated worker
+    /// simply loses the job -- the entry is still served, and the next
+    /// lookup asks again.
+    fn queue_refresh(&self, job: refresh::Job) {
+        let Some(tx) = self.refresh.read().clone() else {
+            return;
+        };
+
+        if let Err(e) = tx.try_send(job) {
+            self.cache.end_refresh(&e.into_inner().key);
+        }
     }
 
     /// A snapshot of the current settings.
@@ -733,10 +769,31 @@ impl Resolver {
         // 9. Cache.
         let key = Key::from_request(req).filter(|_| crate::cache::is_cacheable_type(qtype));
         if let Some(k) = &key
-            && let Some((mut cached, freshness)) = self.cache.get(k)
+            && let Some(hit) = self.cache.get(k)
         {
-            cached.metadata.id = req.metadata.id;
-            if freshness == Freshness::Fresh {
+            // An expired entry is only worth serving if it can be replaced.
+            // Without a refresh worker the honest answer is the slow one, so
+            // a resolver built without one behaves as it did before.
+            let serve = hit.freshness == Freshness::Fresh || self.refreshes();
+
+            if hit.refresh {
+                if serve {
+                    self.queue_refresh(refresh::Job {
+                        req: req.clone(),
+                        host: host.clone(),
+                        client: who.clone(),
+                        key: k.clone(),
+                    });
+                } else {
+                    // The claim was made inside the lookup; nothing will
+                    // release it if the refresh is not going to happen.
+                    self.cache.end_refresh(k);
+                }
+            }
+
+            if serve {
+                let mut cached = hit.msg;
+                cached.metadata.id = req.metadata.id;
                 let (reason, rules) = allowed.clone().unwrap_or_default();
 
                 return finish(Outcome {
@@ -775,7 +832,7 @@ impl Resolver {
     ///
     /// Returns the answer, the upstream that gave it and the client subnet
     /// that was sent, or `None` when nothing answered.
-    async fn forward(
+    pub(crate) async fn forward(
         &self,
         req: &Message,
         host: &str,

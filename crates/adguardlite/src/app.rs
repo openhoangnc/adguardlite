@@ -110,6 +110,13 @@ impl App {
             pool,
             settings(&config),
         ));
+        // Background cache refreshes.  The worker holds an `Arc<Resolver>`,
+        // which is why it is spawned from here rather than from inside the
+        // resolver: handling a request only ever reaches the queue's sender.
+        let (refresh_tx, refresh_rx) = agl_dns::refresh::channel();
+        resolver.set_refresh_sender(refresh_tx);
+        tokio::spawn(agl_dns::refresh::run(resolver.clone(), refresh_rx));
+
         resolver.set_services(filters.build_services_engine());
         resolver.set_safe_search(agl_filter::safesearch::engine(&safe_search(
             &config.filtering.safe_search,
@@ -419,6 +426,7 @@ pub fn cache_config(c: &Config) -> CacheConfig {
         ttl_min: c.dns.cache_ttl_min,
         ttl_max: c.dns.cache_ttl_max,
         optimistic: c.dns.cache_optimistic,
+        optimistic_answer_ttl: c.dns.cache_optimistic_answer_ttl.to_std(),
         optimistic_max_age: c.dns.cache_optimistic_max_age.to_std(),
     }
 }
