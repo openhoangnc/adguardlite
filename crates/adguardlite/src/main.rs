@@ -236,6 +236,7 @@ async fn run(args: Args, paths: Paths, mut config: agl_config::Config) -> anyhow
         querylog: querylog.clone(),
         stats: stats.clone(),
         sessions: agl_api::auth::Sessions::open(application.paths.sessions_db()),
+        login_limiter: login_limiter(&application.config),
         started: jiff::Timestamp::now(),
         fetcher: Arc::new(wiring::Downloader {
             paths: application.paths.clone(),
@@ -246,7 +247,13 @@ async fn run(args: Args, paths: Paths, mut config: agl_config::Config) -> anyhow
             resolver: application.resolver.clone(),
             server: application.server.clone(),
             certificate: certificate.clone(),
-            upstreams: parking_lot::Mutex::new(None),
+            upstream_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            // Seeded from the config the pools were just built from, so the
+            // first settings save does not reconnect every upstream for
+            // nothing.
+            upstream_fingerprint: Arc::new(parking_lot::Mutex::new(Some(
+                wiring::upstream_fingerprint(&application.config),
+            ))),
         }),
         dns_addresses: parking_lot::RwLock::new(dns_addrs),
         version: Arc::new(wiring::ReleaseChecker {
@@ -485,6 +492,20 @@ async fn start_hashprefix_checkers(
             Err(e) => tracing::error!(error = %e, "parental control is on but unreachable"),
         }
     }
+}
+
+/// Builds the login throttle, saying so when the config switches it off.
+///
+/// `auth_attempts: 0` or `block_auth_min: 0` disables it, as upstream's
+/// `emptyRateLimiter` does -- and upstream warns when it happens, because an
+/// admin password nothing throttles can be guessed at line rate.
+fn login_limiter(cfg: &agl_config::Config) -> agl_api::auth::LoginLimiter {
+    let limiter = agl_api::auth::LoginLimiter::from_config(cfg);
+    if !limiter.is_enabled() {
+        tracing::warn!("login rate limiting is disabled");
+    }
+
+    limiter
 }
 
 /// Installs the configured certificate, reporting whether encryption can run.

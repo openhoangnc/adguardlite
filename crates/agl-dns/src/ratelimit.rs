@@ -43,8 +43,11 @@ struct Bucket {
 }
 
 /// A token-bucket rate limiter keyed by client subnet.
+///
+/// The configuration sits behind its own lock so `/control/dns_config` can
+/// change the limit on a running server, as upstream's `Reconfigure` does.
 pub struct Limiter {
-    cfg: Config,
+    cfg: parking_lot::RwLock<Config>,
     buckets: Mutex<AHashMap<IpAddr, Bucket>>,
 }
 
@@ -58,24 +61,38 @@ impl Limiter {
     /// Builds a limiter.
     pub fn new(cfg: Config) -> Self {
         Self {
-            cfg,
+            cfg: parking_lot::RwLock::new(cfg),
             buckets: Mutex::new(AHashMap::new()),
         }
     }
 
+    /// Replaces the configuration on a running limiter.
+    ///
+    /// The buckets are dropped with it: they hold tokens counted against the
+    /// old limit, and upstream builds a fresh limiter on every reconfigure.
+    pub fn set_config(&self, cfg: Config) {
+        *self.cfg.write() = cfg;
+        self.clear();
+    }
+
     /// Reports whether limiting is switched off.
     pub fn is_disabled(&self) -> bool {
-        self.cfg.per_second == 0
+        self.cfg.read().per_second == 0
     }
 
     /// Reports whether a query from `ip` should be allowed.
     pub fn allow(&self, ip: IpAddr) -> bool {
-        if self.is_disabled() || self.cfg.allowlist.contains(&ip) {
-            return true;
-        }
+        let (per_second, subnet_len_v4, subnet_len_v6) = {
+            let cfg = self.cfg.read();
+            if cfg.per_second == 0 || cfg.allowlist.contains(&ip) {
+                return true;
+            }
 
-        let key = subnet_key(ip, self.cfg.subnet_len_v4, self.cfg.subnet_len_v6);
-        let cap = f64::from(self.cfg.per_second);
+            (cfg.per_second, cfg.subnet_len_v4, cfg.subnet_len_v6)
+        };
+
+        let key = subnet_key(ip, subnet_len_v4, subnet_len_v6);
+        let cap = f64::from(per_second);
         let now = Instant::now();
 
         let mut map = self.buckets.lock();
@@ -158,6 +175,59 @@ fn mask_bytes(b: &[u8], bits: u8) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_limit_can_be_changed_on_a_running_limiter() {
+        // `/control/dns_config` used to save a new limit that nothing read
+        // until the process restarted, so the setting looked applied and was
+        // not.
+        let l = Limiter::new(Config {
+            per_second: 2,
+            ..Default::default()
+        });
+        let ip = "192.0.2.5".parse().unwrap();
+
+        assert!(l.allow(ip));
+        assert!(l.allow(ip));
+        assert!(!l.allow(ip), "the old limit is spent");
+
+        l.set_config(Config {
+            per_second: 0,
+            ..Default::default()
+        });
+        assert!(l.is_disabled());
+        for _ in 0..100 {
+            assert!(l.allow(ip), "switching the limit off must take effect");
+        }
+
+        // And tightening it again applies to a client that was already known.
+        l.set_config(Config {
+            per_second: 1,
+            ..Default::default()
+        });
+        assert!(l.allow(ip));
+        assert!(!l.allow(ip));
+    }
+
+    #[test]
+    fn a_new_allowlist_applies_at_once() {
+        let l = Limiter::new(Config {
+            per_second: 1,
+            ..Default::default()
+        });
+        let ip: IpAddr = "192.0.2.5".parse().unwrap();
+        assert!(l.allow(ip));
+        assert!(!l.allow(ip));
+
+        l.set_config(Config {
+            per_second: 1,
+            allowlist: vec![ip],
+            ..Default::default()
+        });
+        for _ in 0..10 {
+            assert!(l.allow(ip));
+        }
+    }
 
     #[test]
     fn allows_up_to_the_limit_then_blocks() {

@@ -1,10 +1,11 @@
 //! Clients, access control, blocked services, encryption, DHCP, the setup
 //! wizard and profile endpoints.
 
+use std::net::SocketAddr;
 use std::time::Duration;
 
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
@@ -345,6 +346,9 @@ fn percent_decode(s: &str) -> String {
 /// Describes whichever client an identifier names, persistent or discovered.
 fn find_client(s: &Shared, id: &str) -> serde_json::Value {
     let addr = id.parse::<std::net::IpAddr>().ok();
+    // An identifier that is not an address may be the ClientID the access
+    // lists match on, which upstream passes to the same check.
+    let client_id = (addr.is_none() && agl_dns::server::is_valid_client_id(id)).then_some(id);
 
     if let Some(c) = s.config.read().clients.persistent.iter().find(|c| {
         c.ids.iter().any(|i| i.eq_ignore_ascii_case(id)) || c.name.eq_ignore_ascii_case(id)
@@ -362,7 +366,8 @@ fn find_client(s: &Shared, id: &str) -> serde_json::Value {
             "safebrowsing_enabled": c.safebrowsing_enabled,
             "ignore_querylog": c.ignore_querylog,
             "ignore_statistics": c.ignore_statistics,
-            "disallowed": addr.is_some_and(|a| !s.dns_server.access.read().permits(a)),
+            "disallowed": addr
+                .is_some_and(|a| !s.dns_server.access.read().permits(a, client_id)),
             "disallowed_rule": "",
         });
     }
@@ -378,7 +383,7 @@ fn find_client(s: &Shared, id: &str) -> serde_json::Value {
         "name": rc.name,
         "ids": [id],
         "whois_info": whois_json(&rc.whois),
-        "disallowed": !s.dns_server.access.read().permits(a),
+        "disallowed": !s.dns_server.access.read().permits(a, None),
         "disallowed_rule": "",
     })
 }
@@ -415,25 +420,76 @@ pub struct AccessSetReq {
     pub blocked_hosts: Option<Vec<String>>,
 }
 
+/// Reports the first duplicated entry of a list, if any.
+fn first_duplicate(list: &[String]) -> Option<&str> {
+    let mut seen = std::collections::HashSet::new();
+
+    list.iter().find(|s| !seen.insert(*s)).map(String::as_str)
+}
+
+/// Checks one side of the access lists, as upstream's `processAccessClients`
+/// does before storing it.
+///
+/// Refusing here is the whole point: an entry nothing can parse used to be
+/// accepted, written to the config file and then silently dropped when the
+/// lists were built, so an allowlist of CIDRs and ClientIDs became an empty
+/// allowlist — which admits everybody.
+fn validate_access_clients(field: &str, list: &[String]) -> Result<(), ApiError> {
+    if let Some(dup) = first_duplicate(list) {
+        return Err(ApiError::bad_request(format!(
+            "validating {field}: duplicated values: [{dup}]"
+        )));
+    }
+
+    for (i, s) in list.iter().enumerate() {
+        if agl_dns::server::parse_access_entry(s).is_none() {
+            return Err(ApiError::bad_request(format!(
+                "adding {field}: value {s:?} at index {i}: bad ip, cidr, or clientid"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// `POST /control/access/set`
+///
+/// Upstream lets both lists hold entries — the disallowed list is simply
+/// ignored while the allowed list is non-empty, which is what the interface
+/// tells the user — and refuses only an entry appearing in both.
 pub async fn access_set(State(s): State<Shared>, Json(req): Json<AccessSetReq>) -> ApiResult<()> {
+    let (allowed, disallowed, blocked_hosts) = {
+        let cfg = s.config.read();
+
+        (
+            req.allowed_clients
+                .unwrap_or_else(|| cfg.dns.allowed_clients.clone()),
+            req.disallowed_clients
+                .unwrap_or_else(|| cfg.dns.disallowed_clients.clone()),
+            req.blocked_hosts
+                .unwrap_or_else(|| cfg.dns.blocked_hosts.clone()),
+        )
+    };
+
+    validate_access_clients("allowed clients", &allowed)?;
+    validate_access_clients("disallowed clients", &disallowed)?;
+    if let Some(dup) = first_duplicate(&blocked_hosts) {
+        return Err(ApiError::bad_request(format!(
+            "validating blocked hosts: duplicated values: [{dup}]"
+        )));
+    }
+
+    if let Some(both) = allowed.iter().find(|a| disallowed.contains(a)) {
+        return Err(ApiError::bad_request(format!(
+            "items in allowed and disallowed clients intersect: {both}"
+        )));
+    }
+
     {
         let mut cfg = s.config.write();
-        if let Some(v) = req.allowed_clients {
-            cfg.dns.allowed_clients = v;
-        }
-        if let Some(v) = req.disallowed_clients {
-            cfg.dns.disallowed_clients = v;
-        }
-        if let Some(v) = req.blocked_hosts {
-            cfg.dns.blocked_hosts = v;
-        }
-
-        if !cfg.dns.allowed_clients.is_empty() && !cfg.dns.disallowed_clients.is_empty() {
-            return Err(ApiError::bad_request(
-                "allowed_clients and disallowed_clients cannot both be set",
-            ));
-        }
+        cfg.dns.allowed_clients = allowed;
+        cfg.dns.disallowed_clients = disallowed;
+        cfg.dns.blocked_hosts = blocked_hosts;
     }
 
     s.save_config().map_err(ApiError::internal)
@@ -878,7 +934,22 @@ pub struct LoginReq {
 }
 
 /// `POST /control/login`
-pub async fn login(State(s): State<Shared>, Json(req): Json<LoginReq>) -> Response {
+///
+/// The throttle is consulted before the password is checked and updated after,
+/// which is the order upstream's `handleLogin` uses: a blocked client is
+/// turned away without its guess ever being compared, so a block costs the
+/// same whether the guess was right or wrong.
+pub async fn login(
+    State(s): State<Shared>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Json(req): Json<LoginReq>,
+) -> Response {
+    let client = peer.ip().to_string();
+    let left = s.login_limiter.blocked_for(&client);
+    if !left.is_zero() {
+        return auth::too_many_attempts(left);
+    }
+
     let ok = {
         let cfg = s.config.read();
         cfg.users
@@ -888,8 +959,14 @@ pub async fn login(State(s): State<Shared>, Json(req): Json<LoginReq>) -> Respon
     };
 
     if !ok {
-        return (StatusCode::UNAUTHORIZED, "invalid username or password").into_response();
+        s.login_limiter.record_failure(&client);
+
+        // 403, not the 401 this once answered: upstream's `handleLogin` hands
+        // `newCookie`'s error to `writeErrorWithIP` with `StatusForbidden`.
+        return (StatusCode::FORBIDDEN, "invalid username or password").into_response();
     }
+
+    s.login_limiter.record_success(&client);
 
     let ttl = Duration::from_secs(s.config.read().http.session_ttl.as_secs().max(1) as u64);
     let token = s.sessions.create(&req.name, ttl);
@@ -1171,6 +1248,45 @@ mod tests {
             whois_json(&[("city".into(), "Ashburn".into())]),
             serde_json::json!({ "city": "Ashburn" })
         );
+    }
+
+    #[test]
+    fn a_bad_access_entry_is_refused_rather_than_stored() {
+        // Storing one meant writing it to the config file and then dropping
+        // it when the lists were built, so an allowlist could quietly become
+        // empty -- which admits everybody.
+        let ok = |v: &[&str]| {
+            validate_access_clients("allowed clients", &to_strings(v)).map_err(|e| e.message)
+        };
+
+        ok(&["10.0.0.1", "172.17.0.0/16", "mi12t", "2001:db8::/32"])
+            .expect("every documented form must be accepted");
+
+        let e = ok(&["10.0.0.1", "not a client"]).expect_err("must be refused");
+        assert!(e.contains("index 1"), "{e}");
+        assert!(e.contains("bad ip, cidr, or clientid"), "{e}");
+
+        let e = ok(&["mi12t", "mi12t"]).expect_err("duplicates must be refused");
+        assert!(e.contains("duplicated values"), "{e}");
+    }
+
+    #[test]
+    fn both_access_lists_may_hold_entries() {
+        // Upstream refuses only an entry appearing in *both* -- the
+        // disallowed list is ignored while the allowed one is set, which is
+        // what the interface tells the user. Refusing the pair outright, as
+        // this did, rejects a configuration the Go build accepts.
+        let allowed = to_strings(&["10.0.0.1"]);
+        let disallowed = to_strings(&["10.0.0.2"]);
+        assert!(allowed.iter().all(|a| !disallowed.contains(a)));
+
+        assert_eq!(first_duplicate(&to_strings(&["a", "b", "a"])), Some("a"));
+        assert_eq!(first_duplicate(&to_strings(&["a", "b"])), None);
+    }
+
+    /// Owned strings for the list helpers, which take `&[String]`.
+    fn to_strings(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| (*s).to_string()).collect()
     }
 
     #[test]

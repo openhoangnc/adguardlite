@@ -110,6 +110,13 @@ impl App {
             pool,
             settings(&config),
         ));
+        // Background cache refreshes.  The worker holds an `Arc<Resolver>`,
+        // which is why it is spawned from here rather than from inside the
+        // resolver: handling a request only ever reaches the queue's sender.
+        let (refresh_tx, refresh_rx) = agl_dns::refresh::channel();
+        resolver.set_refresh_sender(refresh_tx);
+        tokio::spawn(agl_dns::refresh::run(resolver.clone(), refresh_rx));
+
         resolver.set_services(filters.build_services_engine());
         resolver.set_safe_search(agl_filter::safesearch::engine(&safe_search(
             &config.filtering.safe_search,
@@ -134,10 +141,8 @@ impl App {
 
         let server = Arc::new(Server::new(resolver.clone(), limiter, observer));
         server.set_max_concurrent(config.dns.max_goroutines);
-        *server.access.write() = Access {
-            allowed: parse_ips(&config.dns.allowed_clients),
-            disallowed: parse_ips(&config.dns.disallowed_clients),
-        };
+        *server.access.write() =
+            Access::new(&config.dns.allowed_clients, &config.dns.disallowed_clients);
 
         Ok(Self {
             paths,
@@ -376,7 +381,7 @@ pub fn settings(c: &Config) -> Settings {
             },
             ttl: c.filtering.blocked_response_ttl,
         },
-        blocked_hosts: c.dns.blocked_hosts.clone(),
+        blocked_hosts: agl_dns::blocked::BlockedHosts::shared(&c.dns.blocked_hosts),
         aaaa_disabled: c.dns.aaaa_disabled,
         refuse_any: c.dns.refuse_any,
         cache_ttl_min: c.dns.cache_ttl_min,
@@ -421,6 +426,7 @@ pub fn cache_config(c: &Config) -> CacheConfig {
         ttl_min: c.dns.cache_ttl_min,
         ttl_max: c.dns.cache_ttl_max,
         optimistic: c.dns.cache_optimistic,
+        optimistic_answer_ttl: c.dns.cache_optimistic_answer_ttl.to_std(),
         optimistic_max_age: c.dns.cache_optimistic_max_age.to_std(),
     }
 }
@@ -619,10 +625,6 @@ fn bootstrap_addrs(specs: &[String]) -> Vec<SocketAddr> {
 
 /// Parses the address entries of the access lists, ignoring CIDRs and
 /// ClientIDs, which are matched elsewhere.
-fn parse_ips(v: &[String]) -> Vec<std::net::IpAddr> {
-    v.iter().filter_map(|s| s.parse().ok()).collect()
-}
-
 /// Loads the configuration, writing a default one on a fresh installation.
 ///
 /// An older schema is migrated and the upgraded file written back, as upstream

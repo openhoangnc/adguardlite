@@ -46,7 +46,7 @@ installation.
 ```bash
 cargo build --release            # fast to build and to run
 cargo build --profile dist       # fat LTO, panic=abort, stripped: ~10.7 MB
-cargo test --workspace           # 585 tests, no network or Go build needed
+cargo test --workspace           # 633 tests, no network or Go build needed
 cargo clippy --workspace --all-targets
 ```
 
@@ -98,7 +98,9 @@ the moment two servers were compared:
 - every filtering pattern is compiled case-insensitively;
 - an allowlist match is still the query's recorded verdict;
 - `/control/querylog/config` reports its interval in **milliseconds**, while
-  the legacy `/control/querylog_info` reports **days**.
+  the legacy `/control/querylog_info` reports **days**;
+- a plain entry in `dns.blocked_hosts` matches that name and *nothing else* —
+  not its subdomains — while `||name^` matches the subdomains too.
 
 The comparison harnesses live in `tests/compat/`:
 
@@ -215,6 +217,11 @@ toggles, its own blocked services and its own safe search.
   the clock. `agl-core/src/schedule.rs` exposes `blocks_at` for that reason.
 - **Blocked services are a separate engine** from the blocklists, so the
   schedule can pause them per request without rebuilding anything.
+- **`dns.blocked_hosts` holds rules, not names**, and an `@@` exception in it
+  *blocks*. Upstream's `isBlockedHost` keeps only "something matched" from its
+  engine and throws the match itself away, so an exception rule refuses the
+  query like any other. `agl-dns/src/blocked.rs` reproduces that deliberately,
+  and its tests record what a running Go build answered for each form.
 - **The config is read before the tokio runtime starts.** Two of the things it
   decides — where the log goes and which user to run as — must be settled while
   the process is still single-threaded, because `setuid` acts on the calling

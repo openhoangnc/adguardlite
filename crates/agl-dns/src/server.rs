@@ -50,23 +50,174 @@ pub struct Event<'a> {
     pub proto: Proto,
 }
 
+/// One entry of an access list.
+///
+/// The field takes three forms, and the web interface says so: an address, a
+/// CIDR network, or a ClientID -- the name a DoH path segment, a DoT server
+/// name or a DoQ connection carries.  Upstream's `processAccessClients` sorts
+/// each string into one of them and refuses anything else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum AccessEntry {
+    /// One exact address.
+    Ip(IpAddr),
+    /// A network, as an address and a prefix length.
+    Net(IpAddr, u8),
+    /// A ClientID.
+    Id(String),
+}
+
+/// Classifies one access-list entry, or `None` when it is none of the three.
+///
+/// The order is upstream's: an address, then a network, then a ClientID,
+/// which is why `10.0.0.1` is an address and not a one-label name.
+pub fn parse_access_entry(s: &str) -> Option<AccessEntry> {
+    if let Ok(ip) = s.parse::<IpAddr>() {
+        return Some(AccessEntry::Ip(ip));
+    }
+
+    if let Some((addr, bits)) = s.split_once('/')
+        && let Ok(ip) = addr.parse::<IpAddr>()
+        && let Ok(bits) = bits.parse::<u8>()
+    {
+        let width = if ip.is_ipv4() { 32 } else { 128 };
+
+        return (bits <= width).then_some(AccessEntry::Net(ip, bits));
+    }
+
+    is_valid_client_id(s).then(|| AccessEntry::Id(s.to_string()))
+}
+
+/// Reports whether a string is a usable ClientID.
+///
+/// Upstream's `client.ValidateClientID` is `netutil.ValidateHostnameLabel`: a
+/// single DNS label, because that is what has to survive being a DoH path
+/// segment and a DoT server name.
+pub fn is_valid_client_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 63
+        && !s.starts_with('-')
+        && !s.ends_with('-')
+        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// One side of the access lists, sorted into the forms it accepts.
+#[derive(Clone, Debug, Default)]
+pub struct AccessList {
+    /// Exact addresses.
+    ips: Vec<IpAddr>,
+    /// Networks.
+    nets: Vec<(IpAddr, u8)>,
+    /// ClientIDs.
+    ids: Vec<String>,
+}
+
+impl AccessList {
+    /// Sorts configured entries into the three forms.
+    ///
+    /// An entry that is none of them is dropped with a warning rather than
+    /// refused: `/control/access/set` rejects one before it can be stored, so
+    /// reaching here means a file edited by hand, and refusing to start over
+    /// a typo would be worse than ignoring it loudly.
+    pub fn parse(entries: &[String]) -> Self {
+        let mut out = Self::default();
+        for e in entries {
+            match parse_access_entry(e) {
+                Some(AccessEntry::Ip(ip)) => out.ips.push(ip),
+                Some(AccessEntry::Net(ip, bits)) => out.nets.push((ip, bits)),
+                Some(AccessEntry::Id(id)) => out.ids.push(id),
+                None => {
+                    tracing::warn!(entry = %e, "ignoring an access list entry that is not an ip address, a cidr or a clientid");
+                }
+            }
+        }
+
+        out
+    }
+
+    /// Reports whether nothing at all is listed.
+    pub fn is_empty(&self) -> bool {
+        self.ips.is_empty() && self.nets.is_empty() && self.ids.is_empty()
+    }
+
+    /// Reports whether an address is listed, by itself or by a network.
+    fn has_ip(&self, ip: IpAddr) -> bool {
+        self.ips.contains(&ip) || self.nets.iter().any(|&(net, bits)| in_net(ip, net, bits))
+    }
+
+    /// Reports whether a ClientID is listed.
+    ///
+    /// A request that carries none matches nothing, which is what keeps an
+    /// allowlist of addresses working over plain UDP.
+    fn has_id(&self, id: Option<&str>) -> bool {
+        id.is_some_and(|id| self.ids.iter().any(|x| x == id))
+    }
+}
+
+/// Reports whether `ip` falls inside the network `net/bits`.
+///
+/// Host bits in `net` are ignored rather than rejected, as Go's
+/// `netip.Prefix.Contains` ignores them: `192.168.99.3/31` is the pair
+/// `.2`-`.3`, not an error.
+fn in_net(ip: IpAddr, net: IpAddr, bits: u8) -> bool {
+    match (ip, net) {
+        (IpAddr::V4(a), IpAddr::V4(n)) => {
+            mask_bits(u32::from(a).into(), bits, 32) == mask_bits(u32::from(n).into(), bits, 32)
+        }
+        (IpAddr::V6(a), IpAddr::V6(n)) => {
+            mask_bits(u128::from(a), bits, 128) == mask_bits(u128::from(n), bits, 128)
+        }
+        _ => false,
+    }
+}
+
+/// Zeroes every bit of `v` below the top `bits` of a `width`-bit address.
+///
+/// A v4 address arrives widened into the low 32 bits, so the mask reaching
+/// above `width` costs nothing: those bits are already zero on both sides.
+fn mask_bits(v: u128, bits: u8, width: u32) -> u128 {
+    if u32::from(bits) >= width {
+        return v;
+    }
+
+    v & (u128::MAX << (width - u32::from(bits)))
+}
+
 /// Which clients may query this server.
+///
+/// Upstream's `accessManager`.  Holding only bare addresses -- which this
+/// once did -- silently dropped every CIDR and every ClientID, so an
+/// allowlist written in those forms parsed to nothing, and an empty allowlist
+/// admits everybody.
 #[derive(Clone, Debug, Default)]
 pub struct Access {
-    /// If non-empty, only these clients may query.
-    pub allowed: Vec<IpAddr>,
+    /// If anything is listed, only these clients may query.
+    pub allowed: AccessList,
     /// These clients may not query.
-    pub disallowed: Vec<IpAddr>,
+    pub disallowed: AccessList,
 }
 
 impl Access {
-    /// Reports whether `ip` may query.
-    pub fn permits(&self, ip: IpAddr) -> bool {
+    /// Builds the access control from the two configured lists.
+    pub fn new(allowed: &[String], disallowed: &[String]) -> Self {
+        Self {
+            allowed: AccessList::parse(allowed),
+            disallowed: AccessList::parse(disallowed),
+        }
+    }
+
+    /// Reports whether a client may query.
+    ///
+    /// Upstream's `IsBlockedClient` combines the two checks differently in
+    /// each mode, and the asymmetry is the point: in allowlist mode a client
+    /// is refused only when *both* refuse it, so a listed ClientID gets in
+    /// from an unlisted address and a listed address gets in with no ClientID
+    /// at all.  In blocklist mode either one refusing is enough.
+    pub fn permits(&self, ip: IpAddr, client_id: Option<&str>) -> bool {
         if !self.allowed.is_empty() {
-            return self.allowed.contains(&ip);
+            return self.allowed.has_ip(ip) || self.allowed.has_id(client_id);
         }
 
-        !self.disallowed.contains(&ip)
+        !self.disallowed.has_ip(ip) && !self.disallowed.has_id(client_id)
     }
 }
 
@@ -130,7 +281,11 @@ impl Server {
     ) -> Option<Vec<u8>> {
         // Access control and rate limiting come before parsing, so a flood of
         // malformed datagrams costs as little as possible.
-        if !self.access.read().permits(client.ip()) {
+        if !self
+            .access
+            .read()
+            .permits(client.ip(), client_id.as_deref())
+        {
             // Silence only on a datagram transport, where a spoofed source
             // would turn the answer into amplification.  A connected client
             // has already paid for the handshake and upstream tells it
@@ -460,7 +615,7 @@ mod tests {
     #[tokio::test]
     async fn access_control_blocks_disallowed_clients() {
         let s = test_server("||ads.example.com^\n", 0);
-        s.access.write().disallowed = vec![peer().ip()];
+        s.access.write().disallowed = AccessList::parse(&[peer().ip().to_string()]);
         assert!(
             s.handle(
                 &wire_query("ads.example.com.", RecordType::A),
@@ -481,7 +636,7 @@ mod tests {
         use hickory_proto::op::ResponseCode;
 
         let s = test_server("||ads.example.com^\n", 0);
-        s.access.write().disallowed = vec![peer().ip()];
+        s.access.write().disallowed = AccessList::parse(&[peer().ip().to_string()]);
         let q = wire_query("example.com.", RecordType::A);
 
         for proto in [Proto::Tcp, Proto::Tls, Proto::Https, Proto::Quic] {
@@ -504,7 +659,7 @@ mod tests {
     #[tokio::test]
     async fn allowlist_mode_rejects_everyone_else() {
         let s = test_server("||ads.example.com^\n", 0);
-        s.access.write().allowed = vec!["10.0.0.1".parse().unwrap()];
+        s.access.write().allowed = AccessList::parse(&["10.0.0.1".to_string()]);
         assert!(
             s.handle(
                 &wire_query("ads.example.com.", RecordType::A),
@@ -515,7 +670,7 @@ mod tests {
             .is_none()
         );
 
-        s.access.write().allowed = vec![peer().ip()];
+        s.access.write().allowed = AccessList::parse(&[peer().ip().to_string()]);
         assert!(
             s.handle(
                 &wire_query("ads.example.com.", RecordType::A),
@@ -731,7 +886,158 @@ mod tests {
     #[test]
     fn access_defaults_to_permitting_everyone() {
         let a = Access::default();
-        assert!(a.permits("1.2.3.4".parse().unwrap()));
+        assert!(a.permits("1.2.3.4".parse().unwrap(), None));
+    }
+
+    /// The three forms the field documents, in one list.
+    fn mixed_allowlist() -> Access {
+        Access::new(
+            &[
+                "mi12t".to_string(),
+                "hoangnc-chrome".to_string(),
+                "172.17.0.0/16".to_string(),
+                "192.168.99.2/31".to_string(),
+                "10.0.0.7".to_string(),
+            ],
+            &[],
+        )
+    }
+
+    #[test]
+    fn an_allowlist_of_cidrs_and_clientids_is_not_an_empty_allowlist() {
+        // The defect: every entry that was not a bare address was dropped, so
+        // a list written entirely in CIDRs and ClientIDs parsed to nothing --
+        // and an empty allowlist admits everybody, which is the opposite of
+        // what the operator asked for.
+        let a = mixed_allowlist();
+        assert!(!a.allowed.is_empty(), "nothing parsed");
+
+        let ip = |s: &str| s.parse::<IpAddr>().unwrap();
+        assert!(a.permits(ip("172.17.0.5"), None), "inside the /16");
+        assert!(a.permits(ip("192.168.99.3"), None), "inside the /31");
+        assert!(a.permits(ip("10.0.0.7"), None), "the bare address");
+
+        assert!(!a.permits(ip("172.18.0.5"), None), "outside the /16");
+        assert!(!a.permits(ip("192.168.99.4"), None), "outside the /31");
+        assert!(!a.permits(ip("8.8.8.8"), None), "not listed at all");
+    }
+
+    #[test]
+    fn a_listed_clientid_gets_in_from_an_unlisted_address() {
+        // Upstream refuses in allowlist mode only when *both* checks refuse,
+        // which is what makes a ClientID worth listing: the phone is on a
+        // different network every day.
+        let a = mixed_allowlist();
+        let elsewhere = "203.0.113.9".parse().unwrap();
+
+        assert!(a.permits(elsewhere, Some("mi12t")));
+        assert!(a.permits(elsewhere, Some("hoangnc-chrome")));
+        assert!(!a.permits(elsewhere, Some("someone-else")));
+        assert!(!a.permits(elsewhere, None));
+
+        // And an allowed address still gets in carrying no ClientID at all,
+        // which is every plain UDP query.
+        assert!(a.permits("172.17.0.5".parse().unwrap(), None));
+    }
+
+    #[test]
+    fn a_blocklist_refuses_on_either_check() {
+        // The other half of upstream's asymmetry: with no allowlist, one
+        // match is enough to refuse.
+        let a = Access::new(&[], &["10.0.0.0/8".to_string(), "guest-tablet".to_string()]);
+
+        assert!(!a.permits("10.1.2.3".parse().unwrap(), None));
+        assert!(!a.permits("203.0.113.9".parse().unwrap(), Some("guest-tablet")));
+        assert!(a.permits("203.0.113.9".parse().unwrap(), Some("laptop")));
+        assert!(a.permits("203.0.113.9".parse().unwrap(), None));
+    }
+
+    #[test]
+    fn access_entries_are_sorted_the_way_upstream_sorts_them() {
+        use AccessEntry::*;
+
+        assert_eq!(
+            parse_access_entry("10.0.0.1"),
+            Some(Ip("10.0.0.1".parse().unwrap()))
+        );
+        assert_eq!(
+            parse_access_entry("2001:db8::1"),
+            Some(Ip("2001:db8::1".parse().unwrap()))
+        );
+        assert_eq!(
+            parse_access_entry("172.17.0.0/16"),
+            Some(Net("172.17.0.0".parse().unwrap(), 16))
+        );
+        assert_eq!(
+            parse_access_entry("2001:db8::/32"),
+            Some(Net("2001:db8::".parse().unwrap(), 32))
+        );
+        assert_eq!(parse_access_entry("mi12t"), Some(Id("mi12t".to_string())));
+
+        // A prefix too long for its family is not a network, and is not a
+        // label either.
+        assert_eq!(parse_access_entry("10.0.0.0/33"), None);
+        assert_eq!(parse_access_entry("2001:db8::/129"), None);
+
+        // Neither is anything that is not a single DNS label.
+        for bad in [
+            "",
+            "-x",
+            "x-",
+            "a.b",
+            "has space",
+            "under_score",
+            &"x".repeat(64),
+        ] {
+            assert_eq!(parse_access_entry(bad), None, "{bad:?} must be refused");
+        }
+        assert!(is_valid_client_id(&"x".repeat(63)));
+    }
+
+    #[test]
+    fn an_ipv6_network_matches_only_its_own_family() {
+        let a = Access::new(&["2001:db8::/32".to_string()], &[]);
+        assert!(a.permits("2001:db8::1".parse().unwrap(), None));
+        assert!(!a.permits("2001:db9::1".parse().unwrap(), None));
+        // A v4 address must not fall into a v6 prefix through the masking.
+        assert!(!a.permits("10.0.0.1".parse().unwrap(), None));
+    }
+
+    #[test]
+    fn a_zero_length_prefix_matches_its_whole_family() {
+        let a = Access::new(&["0.0.0.0/0".to_string()], &[]);
+        assert!(a.permits("8.8.8.8".parse().unwrap(), None));
+        assert!(!a.permits("2001:db8::1".parse().unwrap(), None));
+    }
+
+    #[tokio::test]
+    async fn a_clientid_opens_the_allowlist_over_a_named_transport() {
+        // The check runs in `handle_as`, so the ClientID a DoH path segment
+        // or a DoT server name carries has to reach it.
+        let s = test_server("||ads.example.com^\n", 0);
+        *s.access.write() = Access::new(&["kids-tablet".to_string()], &[]);
+        let q = wire_query("example.com.", RecordType::A);
+
+        assert!(
+            s.handle_as(&q, peer(), Proto::Https, Some("kids-tablet".to_string()))
+                .await
+                .is_some(),
+            "the listed ClientID must get in"
+        );
+        assert!(
+            s.handle_as(&q, peer(), Proto::Https, Some("other".to_string()))
+                .await
+                .is_some_and(|w| {
+                    let m = Message::from_bytes(&w).unwrap();
+
+                    m.metadata.response_code == hickory_proto::op::ResponseCode::Refused
+                }),
+            "an unlisted one must be refused"
+        );
+        assert!(
+            s.handle(&q, peer(), Proto::Udp).await.is_none(),
+            "and a query carrying no ClientID is not on the allowlist"
+        );
     }
 
     #[test]

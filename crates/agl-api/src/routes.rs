@@ -1,5 +1,7 @@
 //! The control API's routing table and its authentication gate.
 
+use std::time::Duration;
+
 use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
@@ -143,6 +145,14 @@ fn path_and_query(req: &Request) -> String {
 /// upstream's `postInstallHandler`/`preInstallHandler`: without the redirect
 /// a new install opens on a dashboard for a server that has no user, and
 /// without the 403 the wizard stays reachable over a configured one.
+///
+/// Once a user exists the pages sit behind the same gate as the API, because
+/// upstream's authentication middleware wraps its whole mux rather than only
+/// `/control`.  The redirect from `/` is the *only* way a signed-out browser
+/// reaches the login form: the shipped interface sends itself to
+/// `/login.html` when an API call answers **403**, and the gate answers 401,
+/// so a dashboard handed to a signed-out visitor is a dashboard that can
+/// never load.
 async fn serve_ui(State(s): State<Shared>, headers: HeaderMap, req: Request) -> Response {
     let path = req.uri().path();
 
@@ -150,11 +160,95 @@ async fn serve_ui(State(s): State<Shared>, headers: HeaderMap, req: Request) -> 
         if !path.starts_with("/install.") && !path.starts_with("/assets/") {
             return (StatusCode::FOUND, [(header::LOCATION, "install.html")], "").into_response();
         }
-    } else if path.starts_with("/install.") {
+
+        return crate::ui::serve(path, &headers);
+    }
+
+    if path.starts_with("/install.") {
         return (StatusCode::FORBIDDEN, "Forbidden").into_response();
     }
 
+    let user = match authenticate(&s, &req) {
+        Ok(u) => u,
+        Err(left) => return crate::auth::too_many_attempts(left),
+    };
+
+    if user.is_some() {
+        // Someone who is already signed in has no use for the login form.
+        if path == "/login.html" || path == "/forgot_password.html" {
+            return (StatusCode::FOUND, [(header::LOCATION, "/")], "").into_response();
+        }
+    } else if !is_public_page(path) {
+        if path == "/" || path == "/index.html" {
+            return (StatusCode::FOUND, [(header::LOCATION, "login.html")], "").into_response();
+        }
+
+        return (StatusCode::UNAUTHORIZED, "").into_response();
+    }
+
     crate::ui::serve(path, &headers)
+}
+
+/// Reports whether a page is served without a session.
+///
+/// Upstream's `isPublicResource`, minus the API paths it also lists: the
+/// login and password-reset pages, the hashed script and stylesheet built
+/// beside them, and the icons under `/assets/`.  The dashboard's own
+/// `main.<hash>.js` is deliberately not here.
+fn is_public_page(path: &str) -> bool {
+    path.starts_with("/assets/")
+        || path.starts_with("/login.")
+        || path.starts_with("/forgot_password.")
+}
+
+/// Identifies the caller, throttling Basic-credential guessing as it goes.
+///
+/// `Err` carries how long a client that has spent its attempts must wait;
+/// building the refusal is left to the caller, which keeps the response types
+/// out of a function whose answer is a user name.
+///
+/// Upstream throttles its Basic path and not its cookie path, and so does
+/// this: a session token is sixteen random bytes, so guessing one is not a
+/// threat worth slowing down, while guessing a password is.  A request with
+/// no `Authorization` header at all therefore costs a client nothing, which
+/// is how a signed-out browser can keep asking for `/` without locking the
+/// address out.
+fn authenticate(s: &Shared, req: &Request) -> Result<Option<String>, Duration> {
+    let headers = req.headers();
+    if !headers.contains_key(header::AUTHORIZATION) {
+        return Ok(misc::current_user(s, headers));
+    }
+
+    let client = peer_ip(req);
+    let left = s.login_limiter.blocked_for(&client);
+    if !left.is_zero() {
+        return Err(left);
+    }
+
+    let user = misc::current_user(s, headers);
+    if user.is_some() {
+        s.login_limiter.record_success(&client);
+    } else {
+        s.login_limiter.record_failure(&client);
+    }
+
+    Ok(user)
+}
+
+/// The address a request arrived from, which the throttle keys on.
+///
+/// The connection's own peer, never a forwarded-for header: upstream refuses
+/// to read one here because anyone able to set it could otherwise spend
+/// someone else's attempts, or dodge their own block by changing it.
+/// See <https://github.com/AdguardTeam/AdGuardHome/issues/2799>.
+///
+/// The port is dropped, or every fresh connection would be a fresh client and
+/// the throttle would hold nobody back.
+pub fn peer_ip(req: &Request) -> String {
+    req.extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|c| c.0.ip().to_string())
+        .unwrap_or_default()
 }
 
 /// Rejects requests that carry no valid session, once a user exists.
@@ -172,17 +266,22 @@ async fn require_auth(State(s): State<Shared>, req: Request, next: Next) -> Resp
 
     // Before the wizard has run there is nobody to authenticate as.
     let open = first_run || PUBLIC.contains(&path.as_str());
-    if open || misc::current_user(&s, req.headers()).is_some() {
+    if open {
         return next.run(req).await;
     }
 
-    // The UI watches for 401 and redirects to the login page itself.
-    (
-        StatusCode::UNAUTHORIZED,
-        [(header::WWW_AUTHENTICATE, "Basic realm=\"AdGuard Home\"")],
-        "forbidden",
-    )
-        .into_response()
+    match authenticate(&s, &req) {
+        Ok(Some(_)) => return next.run(req).await,
+        Ok(None) => {}
+        Err(left) => return crate::auth::too_many_attempts(left),
+    }
+
+    // A bare 401, as upstream writes.  Adding `WWW-Authenticate: Basic` here
+    // -- which this did -- hands the exchange to the browser, which answers
+    // the web interface's own background request with its native sign-in
+    // dialog and never lets `/login.html` render.  Basic credentials are
+    // still *accepted*; they are simply not solicited.
+    (StatusCode::UNAUTHORIZED, "forbidden").into_response()
 }
 
 /// The `/control` sub-router.

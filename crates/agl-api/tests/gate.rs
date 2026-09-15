@@ -65,6 +65,10 @@ fn state(user: Option<(&str, &str)>) -> Shared {
     let paths = agl_config::Paths::new(base.join("work"), base.join("conf/AdGuardHome.yaml"));
     paths.ensure().expect("preparing the working directory");
 
+    // Built before the config moves into the state, and from the same
+    // config, so the tests run against the bounds a real install uses.
+    let login_limiter = agl_api::auth::LoginLimiter::from_config(&config);
+
     Arc::new(AppState {
         paths: paths.clone(),
         config: parking_lot::RwLock::new(config),
@@ -83,6 +87,7 @@ fn state(user: Option<(&str, &str)>) -> Shared {
             agl_stats::stats::Config::default(),
         )),
         sessions: agl_api::auth::Sessions::new(),
+        login_limiter,
         started: jiff::Timestamp::now(),
         fetcher: Arc::new(NoFetcher),
         reloader: Arc::new(NoReloader),
@@ -117,6 +122,32 @@ async fn request(
     body: Option<&str>,
     cookie: Option<&str>,
 ) -> (u16, Option<String>, String) {
+    let extra: Vec<(&str, &str)> = cookie.map(|c| ("cookie", c)).into_iter().collect();
+    let (status, headers, body) = send(addr, method, path, body, &extra).await;
+
+    let location = header(&headers, "location");
+    // The session cookie is what the caller needs back from a login.
+    let out = header(&headers, "set-cookie").unwrap_or(body);
+
+    (status, location, out)
+}
+
+/// A response header as a string, if it is present and printable.
+fn header(headers: &hyper::HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .map(ToString::to_string)
+}
+
+/// One request, returning the whole response head as well as the body.
+async fn send(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    extra: &[(&str, &str)],
+) -> (u16, hyper::HeaderMap, String) {
     use http_body_util::{BodyExt, Full};
 
     let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -133,8 +164,8 @@ async fn request(
     if body.is_some() {
         builder = builder.header("content-type", "application/json");
     }
-    if let Some(c) = cookie {
-        builder = builder.header("cookie", c);
+    for (name, value) in extra {
+        builder = builder.header(*name, *value);
     }
 
     let req = builder
@@ -145,23 +176,11 @@ async fn request(
 
     let res = sender.send_request(req).await.unwrap();
     let status = res.status().as_u16();
-    let location = res
-        .headers()
-        .get("location")
-        .and_then(|v| v.to_str().ok())
-        .map(ToString::to_string);
-    let set_cookie = res
-        .headers()
-        .get("set-cookie")
-        .and_then(|v| v.to_str().ok())
-        .map(ToString::to_string);
+    let headers = res.headers().clone();
     let bytes = res.into_body().collect().await.unwrap().to_bytes();
     task.abort();
 
-    // The session cookie is what the caller needs back from a login.
-    let out = set_cookie.unwrap_or_else(|| String::from_utf8_lossy(&bytes).to_string());
-
-    (status, location, out)
+    (status, headers, String::from_utf8_lossy(&bytes).to_string())
 }
 
 #[tokio::test]
@@ -203,10 +222,109 @@ async fn a_wrong_password_is_still_refused() {
         None,
     )
     .await;
-    assert_eq!(status, 401);
+    // Upstream's `handleLogin` hands `newCookie`'s error to
+    // `writeErrorWithIP` with `StatusForbidden`, not 401.
+    assert_eq!(status, 403);
 
     let (status, _, _) = request(addr, "GET", "/control/status", None, None).await;
     assert_eq!(status, 401, "the API stays shut without a session");
+}
+
+#[tokio::test]
+async fn repeated_failures_are_throttled() {
+    // Nothing throttled this, so the admin password could be guessed at line
+    // rate. The bounds are the config's, which default to upstream's five
+    // attempts and a fifteen-minute block.
+    let addr = serve(Some(("admin", "correct horse"))).await;
+    let wrong = r#"{"name":"admin","password":"wrong"}"#;
+
+    // Five attempts are answered; it is spending the fifth that starts the
+    // block, so the sixth is the first one turned away unexamined.
+    for n in 1..=5 {
+        let (status, _, _) = request(addr, "POST", "/control/login", Some(wrong), None).await;
+        assert_eq!(status, 403, "attempt {n} should be refused, not blocked");
+    }
+
+    let (status, headers, _) = send(addr, "POST", "/control/login", Some(wrong), &[]).await;
+    assert_eq!(status, 429, "the sixth attempt must be turned away");
+
+    let left: u64 = header(&headers, "retry-after")
+        .expect("a 429 must say how long to wait")
+        .parse()
+        .expect("retry-after is whole seconds");
+    assert!(
+        left > 0 && left <= 15 * 60,
+        "retry-after should be what is left of the block, not {left}s"
+    );
+
+    // The block is on the login form and on the Basic credentials every other
+    // endpoint accepts -- otherwise an attacker just guesses somewhere else.
+    let basic = ("authorization", "Basic YWRtaW46Y29ycmVjdCBob3JzZQ==");
+    let (status, _, _) = send(addr, "GET", "/control/status", None, &[basic]).await;
+    assert_eq!(status, 429, "correct credentials do not lift a live block");
+
+    // A request that presents no credentials is not an attempt, so it is not
+    // throttled -- a signed-out browser must still reach the login page.
+    let (status, _, _) = request(addr, "GET", "/control/status", None, None).await;
+    assert_eq!(status, 401);
+    let (status, _, _) = request(addr, "GET", "/login.html", None, None).await;
+    assert_eq!(status, 200);
+}
+
+#[tokio::test]
+async fn guessing_basic_credentials_is_throttled_too() {
+    // The gate accepts Basic credentials on every endpoint, so leaving that
+    // path unthrottled would leave the whole throttle decorative.
+    let addr = serve(Some(("admin", "correct horse"))).await;
+    let wrong = ("authorization", "Basic YWRtaW46d3Jvbmc="); // admin:wrong
+
+    for n in 1..=5 {
+        let (status, _, _) = send(addr, "GET", "/control/status", None, &[wrong]).await;
+        assert_eq!(status, 401, "attempt {n} should be refused, not blocked");
+    }
+
+    let (status, headers, _) = send(addr, "GET", "/control/status", None, &[wrong]).await;
+    assert_eq!(status, 429);
+    assert!(header(&headers, "retry-after").is_some());
+
+    // And the login form is shut to that client as well.
+    let (status, _, _) = request(
+        addr,
+        "POST",
+        "/control/login",
+        Some(r#"{"name":"admin","password":"correct horse"}"#),
+        None,
+    )
+    .await;
+    assert_eq!(status, 429);
+}
+
+#[tokio::test]
+async fn a_successful_sign_in_clears_the_failures() {
+    let addr = serve(Some(("admin", "correct horse"))).await;
+    let wrong = r#"{"name":"admin","password":"wrong"}"#;
+
+    for _ in 0..4 {
+        request(addr, "POST", "/control/login", Some(wrong), None).await;
+    }
+
+    let (status, _, cookie) = request(
+        addr,
+        "POST",
+        "/control/login",
+        Some(r#"{"name":"admin","password":"correct horse"}"#),
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "four failures must not shut the fifth try out");
+    assert!(cookie.contains("agh_session"));
+
+    // The count is back to zero. Were it not cleared, the second slip after
+    // this would be the sixth overall and would answer 429.
+    for n in 1..=2 {
+        let (status, _, _) = request(addr, "POST", "/control/login", Some(wrong), None).await;
+        assert_eq!(status, 403, "slip {n} after signing in must not be blocked");
+    }
 }
 
 #[tokio::test]
@@ -250,4 +368,75 @@ async fn the_first_launch_redirects_everything_to_the_wizard() {
     // And its endpoints are open, because there is nobody to authenticate as.
     let (status, _, _) = request(addr, "GET", "/control/install/get_addresses", None, None).await;
     assert_eq!(status, 200);
+}
+
+#[tokio::test]
+async fn the_gate_never_asks_the_browser_for_basic_credentials() {
+    // `WWW-Authenticate: Basic` on this 401 hands the exchange to the
+    // browser: it answers the interface's own background request with its
+    // native sign-in dialog, which becomes the only prompt the user ever
+    // sees, and `/login.html` never renders. Upstream writes a bare 401 for
+    // that reason.
+    let addr = serve(Some(("admin", "correct horse"))).await;
+
+    let (status, headers, _) = send(addr, "GET", "/control/status", None, &[]).await;
+    assert_eq!(status, 401);
+    assert_eq!(
+        header(&headers, "www-authenticate"),
+        None,
+        "the API must not summon the browser's own sign-in dialog"
+    );
+
+    // Not soliciting Basic credentials is not the same as refusing them:
+    // the scripted API users send them on every request.
+    let basic = ("authorization", "Basic YWRtaW46Y29ycmVjdCBob3JzZQ==");
+    let (status, _, _) = send(addr, "GET", "/control/status", None, &[basic]).await;
+    assert_eq!(status, 200, "basic credentials must still be accepted");
+}
+
+#[tokio::test]
+async fn a_signed_out_browser_is_sent_to_the_login_form() {
+    // The interface redirects itself to `/login.html` only when an API call
+    // answers 403, and the gate answers 401, so without this redirect a
+    // signed-out visit to `/` renders a dashboard that can never load.
+    let addr = serve(Some(("admin", "correct horse"))).await;
+
+    for path in ["/", "/index.html"] {
+        let (status, location, _) = request(addr, "GET", path, None, None).await;
+        assert_eq!(status, 302, "{path} must redirect when signed out");
+        assert_eq!(location.as_deref(), Some("login.html"), "{path}");
+    }
+
+    // The form and what it is built from are served without a session.
+    for path in ["/login.html", "/assets/favicon.png"] {
+        let (status, _, _) = request(addr, "GET", path, None, None).await;
+        assert_eq!(status, 200, "{path} must be reachable when signed out");
+    }
+
+    // Anything else is not.
+    let (status, _, _) = request(addr, "GET", "/dashboard.html", None, None).await;
+    assert_eq!(status, 401);
+}
+
+#[tokio::test]
+async fn a_signed_in_browser_gets_the_dashboard_rather_than_the_form() {
+    let addr = serve(Some(("admin", "correct horse"))).await;
+
+    let (_, _, cookie) = request(
+        addr,
+        "POST",
+        "/control/login",
+        Some(r#"{"name":"admin","password":"correct horse"}"#),
+        None,
+    )
+    .await;
+    let jar = cookie.split(';').next().unwrap().to_string();
+
+    let (status, _, _) = request(addr, "GET", "/", None, Some(&jar)).await;
+    assert_eq!(status, 200, "a session must open the interface");
+
+    // Upstream bounces a signed-in visitor off the login form.
+    let (status, location, _) = request(addr, "GET", "/login.html", None, Some(&jar)).await;
+    assert_eq!(status, 302);
+    assert_eq!(location.as_deref(), Some("/"));
 }

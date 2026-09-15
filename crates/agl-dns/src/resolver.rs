@@ -25,6 +25,7 @@ use crate::hashprefix::{self, Checker};
 use crate::msg::{self, BlockingConfig};
 use crate::pending::{Entry as PendingEntry, Pending, PendingKey};
 use crate::pool::SharedPool;
+use crate::refresh;
 use crate::rewrite::{self, Table};
 
 /// The transport a request arrived on.
@@ -99,7 +100,7 @@ pub struct Settings {
     /// How blocked queries are answered.
     pub blocking: BlockingConfig,
     /// Hosts refused before any other processing.
-    pub blocked_hosts: Vec<String>,
+    pub blocked_hosts: Arc<crate::blocked::BlockedHosts>,
     /// Whether `AAAA` queries are answered with nothing.
     pub aaaa_disabled: bool,
     /// Whether `ANY` queries are refused.
@@ -139,11 +140,11 @@ impl Default for Settings {
             safebrowsing_enabled: false,
             parental_enabled: false,
             blocking: BlockingConfig::default(),
-            blocked_hosts: vec![
+            blocked_hosts: crate::blocked::BlockedHosts::shared(&[
                 "version.bind".into(),
                 "id.server".into(),
                 "hostname.bind".into(),
-            ],
+            ]),
             aaaa_disabled: false,
             refuse_any: true,
             cache_ttl_min: 0,
@@ -291,6 +292,11 @@ pub struct Resolver {
     private_pool: RwLock<Option<Arc<SharedPool>>>,
     /// Identical in-flight requests.
     pending: Pending,
+    /// Where background cache refreshes are queued, when a worker is running.
+    ///
+    /// The worker owns an `Arc<Resolver>` and this end is only a `Sender`, so
+    /// handling a request never has to reach a `'static` copy of `self`.
+    refresh: RwLock<Option<refresh::Sender>>,
     /// Handling settings, replaceable while running.
     settings: RwLock<Arc<Settings>>,
 }
@@ -317,6 +323,7 @@ impl Resolver {
             pool,
             private_pool: RwLock::new(None),
             pending: Pending::new(),
+            refresh: RwLock::new(None),
             settings: RwLock::new(Arc::new(settings)),
         }
     }
@@ -364,6 +371,35 @@ impl Resolver {
     /// Replaces the settings.
     pub fn set_settings(&self, s: Settings) {
         *self.settings.write() = Arc::new(s);
+    }
+
+    /// Attaches the queue a [`crate::refresh`] worker is draining.
+    ///
+    /// Until one is attached, an expired entry is never served: see the cache
+    /// step in [`Resolver::resolve`].
+    pub fn set_refresh_sender(&self, tx: refresh::Sender) {
+        *self.refresh.write() = Some(tx);
+    }
+
+    /// Reports whether background refreshes are running.
+    fn refreshes(&self) -> bool {
+        self.refresh.read().is_some()
+    }
+
+    /// Queues a background refresh, dropping it when the queue is full.
+    ///
+    /// Never waits.  A client waiting for its own answer must not also wait
+    /// for somebody else's entry to be refreshed, so a saturated worker
+    /// simply loses the job -- the entry is still served, and the next
+    /// lookup asks again.
+    fn queue_refresh(&self, job: refresh::Job) {
+        let Some(tx) = self.refresh.read().clone() else {
+            return;
+        };
+
+        if let Err(e) = tx.try_send(job) {
+            self.cache.end_refresh(&e.into_inner().key);
+        }
     }
 
     /// A snapshot of the current settings.
@@ -507,7 +543,7 @@ impl Resolver {
 
         // 3. Access-blocked hosts.  On UDP the request is dropped rather than
         //    answered, so a spoofed source address gains nothing.
-        if is_blocked_host(&settings.blocked_hosts, &host) {
+        if settings.blocked_hosts.blocks(&host, u16::from(qtype)) {
             let action = if proto.is_datagram() {
                 Action::Drop
             } else {
@@ -730,10 +766,31 @@ impl Resolver {
         // 9. Cache.
         let key = Key::from_request(req).filter(|_| crate::cache::is_cacheable_type(qtype));
         if let Some(k) = &key
-            && let Some((mut cached, freshness)) = self.cache.get(k)
+            && let Some(hit) = self.cache.get(k)
         {
-            cached.metadata.id = req.metadata.id;
-            if freshness == Freshness::Fresh {
+            // An expired entry is only worth serving if it can be replaced.
+            // Without a refresh worker the honest answer is the slow one, so
+            // a resolver built without one behaves as it did before.
+            let serve = hit.freshness == Freshness::Fresh || self.refreshes();
+
+            if hit.refresh {
+                if serve {
+                    self.queue_refresh(refresh::Job {
+                        req: req.clone(),
+                        host: host.clone(),
+                        client: who.clone(),
+                        key: k.clone(),
+                    });
+                } else {
+                    // The claim was made inside the lookup; nothing will
+                    // release it if the refresh is not going to happen.
+                    self.cache.end_refresh(k);
+                }
+            }
+
+            if serve {
+                let mut cached = hit.msg;
+                cached.metadata.id = req.metadata.id;
                 let (reason, rules) = allowed.clone().unwrap_or_default();
 
                 return finish(Outcome {
@@ -772,7 +829,7 @@ impl Resolver {
     ///
     /// Returns the answer, the upstream that gave it and the client subnet
     /// that was sent, or `None` when nothing answered.
-    async fn forward(
+    pub(crate) async fn forward(
         &self,
         req: &Message,
         host: &str,
@@ -1049,16 +1106,6 @@ fn reason_for_list(reason: Reason, rules: &[MatchedRule]) -> Reason {
         ETC_HOSTS_LIST_ID => Reason::RewrittenAutoHosts,
         _ => reason,
     }
-}
-
-/// Reports whether `host` is in the access blocklist.
-///
-/// Entries match the host itself and any subdomain, as upstream's rule engine
-/// does for bare domain rules.
-fn is_blocked_host(blocked: &[String], host: &str) -> bool {
-    blocked
-        .iter()
-        .any(|b| agl_core::name::is_subdomain_of(host, &b.to_ascii_lowercase()))
 }
 
 /// Extracts the addresses from a response, for statistics and DNS64.
@@ -1603,12 +1650,33 @@ mod tests {
         assert!(!is_bogus_nxdomain(&other, &m));
     }
 
-    #[test]
-    fn blocked_host_matching_covers_subdomains() {
-        let b = vec!["version.bind".to_string()];
-        assert!(is_blocked_host(&b, "version.bind"));
-        assert!(is_blocked_host(&b, "sub.version.bind"));
-        assert!(!is_blocked_host(&b, "notversion.bind"));
+    #[tokio::test]
+    async fn a_blocked_host_entry_reaches_the_resolver_with_the_query_type() {
+        // The step feeds the question's type to the matcher, because the
+        // entries are rules and a rule may carry `$dnstype`.  Measured on the
+        // Go build: `||typed.example.org^$dnstype=AAAA` refuses AAAA and
+        // answers A.  `crate::blocked` holds the matching rules themselves.
+        let s = Settings {
+            blocked_hosts: crate::blocked::BlockedHosts::shared(&[
+                "||typed.example.org^$dnstype=AAAA".into(),
+            ]),
+            ..Settings::default()
+        };
+        let r = resolver("", Table::default(), s);
+
+        let out = resolve(&r, "typed.example.org.", RecordType::AAAA, Proto::Tcp).await;
+        assert_eq!(
+            out.response().unwrap().metadata.response_code,
+            ResponseCode::Refused,
+            "AAAA is the type the rule names"
+        );
+
+        let out = resolve(&r, "typed.example.org.", RecordType::A, Proto::Tcp).await;
+        assert_ne!(
+            out.response().unwrap().metadata.response_code,
+            ResponseCode::Refused,
+            "A is not"
+        );
     }
 
     #[test]

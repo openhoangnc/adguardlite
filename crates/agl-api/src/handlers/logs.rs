@@ -217,7 +217,11 @@ fn client_info(s: &Shared, e: &Entry, name: &str) -> serde_json::Value {
         "whois": whois,
         "name": name,
         "disallowed_rule": "",
-        "disallowed": addr.is_some_and(|a| !s.dns_server.access.read().permits(a)),
+        "disallowed": addr.is_some_and(|a| {
+            let id = Some(e.client_id.as_str()).filter(|s| !s.is_empty());
+
+            !s.dns_server.access.read().permits(a, id)
+        }),
     })
 }
 
