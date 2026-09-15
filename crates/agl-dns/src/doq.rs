@@ -261,7 +261,7 @@ mod tests {
         use agl_filter::engine::Engine;
 
         let resolver = Resolver::new(
-            Engine::build([(1i64, "||ads.example.com^")], []),
+            Engine::build([(1i64, "||ads.example.com^")], agl_filter::engine::NO_LISTS),
             Table::default(),
             Cache::new(CacheConfig::default()),
             SharedPool::new(Pool::new(

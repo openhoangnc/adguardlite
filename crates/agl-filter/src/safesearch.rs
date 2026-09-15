@@ -148,7 +148,10 @@ pub fn engine(cfg: &Config) -> Option<Engine> {
         return None;
     }
 
-    Some(Engine::build([(LIST_ID, rules.as_str())], []))
+    Some(Engine::build(
+        [(LIST_ID, rules.as_str())],
+        crate::engine::NO_LISTS,
+    ))
 }
 
 #[cfg(test)]

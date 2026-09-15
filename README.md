@@ -41,6 +41,27 @@ the absolute numbers as a floor. The binary sizes compare against AdGuard's
 published release, not a local `go build`, which is larger because it keeps
 its debug info.
 
+### At a larger list count
+
+That table is one 179,334-rule list, which is a modest deployment. A real one
+with **37 lists and 2,272,040 rules**, measured the same way on the same
+machine with the same data:
+
+| | Go v0.107.79 | adguardlite | |
+|---|---:|---:|---|
+| Time to answer DNS from a cold start | 4 s | 6 s | 1.5× slower |
+| Memory, after loading the lists | 363 MB | 532 MB | 1.5× more |
+
+So the memory advantage in the first table does not hold as lists are added —
+it inverts. The startup gap is the honest number to plan around: both are
+seconds, not minutes, but Go is still quicker off the mark.
+
+This is worth stating plainly because it was worse. Every rule that is not
+`||domain^` needs a regular expression, and those used to be compiled at load
+rather than on first use: the same deployment took **55 seconds and 4.2 GB**
+before that changed. `rules_needing_an_expression_load_as_cheaply_as_plain_ones`
+in `crates/agl-filter/tests/differential.rs` fails if it comes back.
+
 ## The published image
 
 A multi-architecture image — `linux/amd64` and `linux/arm64`, so it runs on a

@@ -69,6 +69,18 @@ impl App {
     ) -> Result<Self, Error> {
         paths.ensure()?;
 
+        // Said before the work, not after: a large installation — 37 lists
+        // and a couple of million rules is real — spends seconds here with
+        // nothing else to show, and silence between "starting" and "serving"
+        // reads as a hang.
+        let enabled = config.filters.iter().filter(|f| f.enabled).count()
+            + config
+                .whitelist_filters
+                .iter()
+                .filter(|f| f.enabled)
+                .count();
+        tracing::info!(lists = enabled, "loading filter lists");
+
         let mut filters = Manager::load(
             &paths,
             &config.filters,

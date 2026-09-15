@@ -12,6 +12,8 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
+use std::sync::OnceLock;
+
 use regex::Regex;
 
 use crate::pattern::{self, Target};
@@ -68,8 +70,6 @@ impl HostRule {
 /// carries no payload because reaching it already proves the match.
 #[derive(Clone, Debug)]
 pub struct NetworkRule {
-    /// The original rule text, as shown in the query log and API.
-    pub text: Box<str>,
     /// The pattern to match.
     pub pattern: Pattern,
     /// The modifiers attached to the rule, if it has any.
@@ -118,6 +118,72 @@ impl NetworkRule {
     }
 }
 
+/// A rule's expression, compiled the first time it is needed.
+///
+/// A real deployment loads a couple of million rules, of which a few hundred
+/// thousand are not `||domain^` and so need an expression. Building every
+/// automaton at load cost about twenty seconds and most of a gigabyte on one
+/// such installation — for expressions that are only ever consulted once the
+/// domain index or the Aho-Corasick scan has already picked that rule as a
+/// candidate, which is a handful per query. Nearly all of them are never
+/// consulted at all.
+///
+/// So the source is kept and the automaton is built on first use. The result
+/// is cached, including a failure: a source that will not compile can never
+/// match, which is what dropping the rule at load achieved.
+pub struct LazyRegex {
+    /// The expression source, as [`crate::pattern::to_regex`] produced it.
+    src: Box<str>,
+    /// The compiled form, built once.
+    re: OnceLock<Option<Regex>>,
+}
+
+impl LazyRegex {
+    /// Holds an expression without compiling it.
+    pub fn new(src: String) -> Self {
+        Self {
+            src: src.into_boxed_str(),
+            re: OnceLock::new(),
+        }
+    }
+
+    /// Holds an already-compiled expression.
+    ///
+    /// Used for the `/regex/` form, which a user writes by hand and which is
+    /// therefore compiled at load so a malformed one is still rejected there.
+    pub fn compiled(src: String, re: Regex) -> Self {
+        let cell = OnceLock::new();
+        let _ = cell.set(Some(re));
+
+        Self {
+            src: src.into_boxed_str(),
+            re: cell,
+        }
+    }
+
+    /// Reports whether the expression matches, compiling it if needed.
+    pub fn is_match(&self, haystack: &str) -> bool {
+        self.re
+            .get_or_init(|| Regex::new(&self.src).ok())
+            .as_ref()
+            .is_some_and(|re| re.is_match(haystack))
+    }
+
+    /// The expression source.
+    pub fn source(&self) -> &str {
+        &self.src
+    }
+}
+
+impl std::fmt::Debug for LazyRegex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LazyRegex")
+            .field("src", &self.src)
+            .field("compiled", &self.re.get().is_some())
+            .finish()
+    }
+}
+
 /// The matchable part of a network rule.
 #[derive(Clone, Debug)]
 pub enum Pattern {
@@ -129,10 +195,11 @@ pub enum Pattern {
     /// index, whose key *is* the domain, so arriving here already proves the
     /// hostname matched.
     DomainAnchor,
-    /// Any other pattern, compiled to a regex by [`crate::pattern::to_regex`].
+    /// Any other pattern, expressed as the regex
+    /// [`crate::pattern::to_regex`] produces, built on first use.
     Rx {
-        /// The compiled expression.
-        re: Arc<Regex>,
+        /// The expression.
+        re: Arc<LazyRegex>,
         /// What the expression is matched against.
         target: Target,
     },
@@ -382,7 +449,6 @@ fn parse_network_rule(t: &str, list_id: i64) -> Result<ParsedNetwork, ParseError
 
     Ok(ParsedNetwork {
         rule: NetworkRule {
-            text: t.to_string().into_boxed_str(),
             list_id,
             allowlist,
             pattern,
@@ -611,12 +677,24 @@ fn parse_pattern(s: &str) -> Result<(Pattern, Option<String>), ParseError> {
     }
 
     let src = pattern::to_regex(s);
-    let re = Regex::new(&src)
-        .map_err(|e| ParseError::Invalid(format!("pattern {s:?} -> {src:?}: {e}")))?;
+
+    // A `/regex/` pattern is written by hand, so it is compiled here and a
+    // malformed one is still rejected at load. Everything else is generated
+    // by `to_regex` from a wildcard pattern -- `generated_patterns_compile`
+    // covers that -- and compiling a few hundred thousand of those up front
+    // is the single most expensive thing a large installation does at start.
+    let lazy = if pattern::is_regex_pattern(s) {
+        let re = Regex::new(&src)
+            .map_err(|e| ParseError::Invalid(format!("pattern {s:?} -> {src:?}: {e}")))?;
+
+        LazyRegex::compiled(src, re)
+    } else {
+        LazyRegex::new(src)
+    };
 
     Ok((
         Pattern::Rx {
-            re: Arc::new(re),
+            re: Arc::new(lazy),
             target: pattern::target_for(s),
         },
         None,
@@ -662,6 +740,48 @@ mod tests {
             Rule::Host(h) => h,
             other => panic!("expected a host rule, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_expression_is_not_built_until_something_needs_it() {
+        // The regression this guards: every rule that is not `||domain^`
+        // compiled its own automaton at load. On a real installation with
+        // 2.27 million rules across 37 lists that was ~22s of the ~55s
+        // startup and most of a gigabyte, for expressions that a query only
+        // reaches once the index has already named the rule a candidate.
+        let Ok(Rule::Network(n)) = parse("/ads/banner", 1) else {
+            panic!("expected a network rule");
+        };
+        let Pattern::Rx { re, .. } = &n.rule.pattern else {
+            panic!("expected an expression pattern");
+        };
+
+        assert!(
+            re.re.get().is_none(),
+            "the automaton was built at parse time"
+        );
+        assert!(re.is_match("http://example.com/ads/banner.png"));
+        assert!(re.re.get().is_some(), "the automaton should now be cached");
+    }
+
+    #[test]
+    fn a_handwritten_regex_is_still_rejected_at_load() {
+        // Deferring compilation must not defer *validation* of the one form a
+        // user writes by hand, or a typo in a custom rule would be accepted
+        // and then silently never match.
+        assert!(parse("/[unclosed/", 1).is_err());
+
+        // A valid one is compiled there and then.
+        let Ok(Rule::Network(n)) = parse("/^ads?\\./", 1) else {
+            panic!("expected a network rule");
+        };
+        let Pattern::Rx { re, .. } = &n.rule.pattern else {
+            panic!("expected an expression pattern");
+        };
+        assert!(
+            re.re.get().is_some(),
+            "a handwritten regex compiles at load"
+        );
     }
 
     #[test]

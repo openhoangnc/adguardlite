@@ -13,11 +13,43 @@
 use std::net::IpAddr;
 
 use agl_core::Reason;
+use std::borrow::Cow;
+use std::sync::Arc;
+
 use ahash::{AHashMap, AHashSet};
 use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 
+use crate::domidx::DomainIndex;
 use crate::pattern::Target;
-use crate::rule::{DnsRewrite, HostRule, MIN_SHORTCUT_LEN, NetworkRule, Pattern, Rule, parse};
+use crate::rule::{
+    DnsRewrite, HostRule, MIN_SHORTCUT_LEN, NetworkRule, Options, Pattern, Rule, parse,
+};
+
+/// An empty set of lists, for a build with no allowlist.
+///
+/// `Engine::build` is generic over the text type now, and a bare `[]` gives
+/// the compiler nothing to infer it from.
+pub const NO_LISTS: [(i64, &str); 0] = [];
+
+/// A candidate rule and its index, which the caller needs to recover the
+/// rule's text from the arena.
+type Candidate<'a> = (u32, &'a NetworkRule);
+
+/// A rule's text, as a slice of the list it was read from.
+///
+/// Eight bytes, and no bytes of its own: the text is the line still sitting in
+/// the source the rule was parsed from. Which source is not stored per rule —
+/// rules are added list by list, so `src_starts` recovers it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct TextRef {
+    /// Byte offset into the source.
+    off: u32,
+    /// Length in bytes. A line longer than this can hold is not a rule
+    /// anyone wrote; such a rule still matches, it just reports no text.
+    len: u16,
+    /// Which source, indexing `RuleSet::sources`.
+    src: u16,
+}
 
 /// The rule indices stored under one index key.
 ///
@@ -98,8 +130,14 @@ impl MatchResult {
 #[derive(Default)]
 pub struct RuleSet {
     net: Vec<NetworkRule>,
+    /// The list texts the rules were parsed from, shared with whatever owns
+    /// them rather than copied: the manager keeps every list in memory to
+    /// rebuild from, so an arena here held a second copy of the same bytes.
+    sources: Vec<Arc<str>>,
+    /// Where each network rule's text sits within its source.
+    net_text: Vec<TextRef>,
     hosts: Vec<HostRule>,
-    domain_index: AHashMap<Box<str>, Refs>,
+    domain_index: DomainIndex,
     host_index: AHashMap<Box<str>, Refs>,
     ac: Option<AhoCorasick>,
     ac_rules: Vec<Vec<u32>>,
@@ -113,13 +151,145 @@ impl RuleSet {
     ///
     /// `lists` pairs a list identifier with its text.  Unparseable lines are
     /// skipped, as upstream does, rather than failing the whole list.
-    pub fn build<'a>(lists: impl IntoIterator<Item = (i64, &'a str)>) -> Self {
+    ///
+    /// The text is kept, not copied: rules point into it for the life of the
+    /// set.  Hand it an `Arc<str>` that something else already holds and it
+    /// costs nothing; a `&str` is copied once, which is what tests want.
+    pub fn build<T: Into<Arc<str>>>(lists: impl IntoIterator<Item = (i64, T)>) -> Self {
         let mut b = Builder::default();
         for (id, text) in lists {
-            b.add_list(id, text);
+            b.add_list(id, text.into());
         }
 
         b.finish()
+    }
+
+    /// A rough breakdown of where the set's memory goes.
+    ///
+    /// Heap estimates rather than an allocator reading: enough to tell which
+    /// structure to attack, which is all it is for.
+    pub fn footprint(&self) -> String {
+        use std::mem::size_of;
+
+        let net_structs = self.net.capacity() * size_of::<NetworkRule>();
+        let net_text = self.net_text.capacity() * size_of::<TextRef>()
+            + self.sources.capacity() * size_of::<Arc<str>>();
+        let net_opts =
+            self.net.iter().filter(|r| r.opts.is_some()).count() * (size_of::<Options>() + 32);
+
+        let host_structs = self.hosts.capacity() * size_of::<HostRule>();
+        let host_text: usize = self
+            .hosts
+            .iter()
+            .map(|h| {
+                h.text.len()
+                    + 32
+                    + h.hostnames.iter().map(|n| n.len() + 32).sum::<usize>()
+                    + h.hostnames.capacity() * size_of::<String>()
+            })
+            .sum();
+
+        let idx = |m: &AHashMap<Box<str>, Refs>| -> (usize, usize, usize) {
+            let keys: usize = m.keys().map(|k| k.len() + 32).sum();
+            let spill: usize = m
+                .values()
+                .map(|r| match r {
+                    Refs::One(_) => 0,
+                    Refs::Many(v) => v.capacity() * 4 + 32,
+                })
+                .sum();
+            let table = m.capacity() * (size_of::<Box<str>>() + size_of::<Refs>() + 1);
+
+            (keys, spill, table)
+        };
+
+        let (dk, ds, dt) = (0usize, 0usize, self.domain_index.footprint());
+        let (hk, hs, ht) = idx(&self.host_index);
+
+        let ac = self.ac.as_ref().map_or(0, |a| a.memory_usage());
+        let ac_rules: usize = self
+            .ac_rules
+            .iter()
+            .map(|v| v.capacity() * 4 + 32)
+            .sum::<usize>()
+            + self.ac_rules.capacity() * size_of::<Vec<u32>>();
+        let scan = self.scan.capacity() * 4;
+        let badfilter: usize = self.badfilter.iter().map(|k| k.len() + 32).sum();
+
+        let total = net_structs
+            + net_text
+            + net_opts
+            + host_structs
+            + host_text
+            + dk
+            + ds
+            + dt
+            + hk
+            + hs
+            + ht
+            + ac
+            + ac_rules
+            + scan
+            + badfilter;
+        let mb = |b: usize| b as f64 / 1e6;
+
+        let mut out = String::from("footprint (estimated heap)\n");
+        for (label, bytes, note) in [
+            (
+                "network rule structs",
+                net_structs,
+                format!("{} rules", self.net.len()),
+            ),
+            ("network rule text", net_text, String::new()),
+            ("network rule options", net_opts, String::new()),
+            (
+                "host rule structs",
+                host_structs,
+                format!("{} rules", self.hosts.len()),
+            ),
+            ("host rule text+names", host_text, String::new()),
+            (
+                "domain index keys",
+                dk,
+                format!("{} entries", self.domain_index.len()),
+            ),
+            ("domain index spill", ds, String::new()),
+            (
+                "domain index table",
+                dt,
+                format!("cap {}", self.domain_index.capacity()),
+            ),
+            (
+                "host index keys",
+                hk,
+                format!("{} entries", self.host_index.len()),
+            ),
+            ("host index spill", hs, String::new()),
+            ("host index table", ht, String::new()),
+            ("aho-corasick", ac, String::new()),
+            ("aho-corasick rule map", ac_rules, String::new()),
+            ("full-scan list", scan, String::new()),
+            ("badfilter set", badfilter, String::new()),
+            ("TOTAL", total, String::new()),
+        ] {
+            out.push_str(&format!("  {label:<22} {:>8.1} MB  {note}\n", mb(bytes)));
+        }
+
+        out
+    }
+
+    /// One network rule's original text, from the list it was read from.
+    fn text_of(&self, idx: u32) -> &str {
+        let Some(r) = self.net_text.get(idx as usize) else {
+            return "";
+        };
+
+        let Some(text) = self.sources.get(r.src as usize) else {
+            return "";
+        };
+
+        text.get(r.off as usize..r.off as usize + r.len as usize)
+            .unwrap_or("")
     }
 
     /// The number of rules that were loaded.
@@ -134,61 +304,86 @@ impl RuleSet {
 
     /// Finds the applicable network rules for `req` and returns the winner,
     /// plus every `$dnsrewrite` rule that applies.
-    fn match_network(&self, req: &Request<'_>) -> (Option<&NetworkRule>, Vec<&NetworkRule>) {
-        let url = format!("http://{}", req.hostname);
+    fn match_network(&self, req: &Request<'_>) -> (Option<Candidate<'_>>, Vec<Candidate<'_>>) {
+        // Built on the stack: a hostname is at most 253 bytes, and this ran
+        // once per query.
+        let mut buf = [0u8; URL_BUF];
+        let url = url_for(&mut buf, req.hostname);
+        let url = url.as_ref();
 
         let mut best: Option<(u32, &NetworkRule)> = None;
-        let mut rewrites: Vec<&NetworkRule> = Vec::new();
-        let mut seen = AHashSet::new();
+        let mut rewrites: Vec<(u32, &NetworkRule)> = Vec::new();
 
-        // 1. Domain index: walk the query's parent domains.
+        // 1. Domain index: walk the query's parent domains.  A rule is filed
+        //    under exactly one key, so this phase cannot repeat one.
         for suffix in agl_core::name::suffixes(req.hostname) {
-            if let Some(ids) = self.domain_index.get(suffix) {
-                for i in ids.iter() {
-                    self.consider(i, req, &url, &mut best, &mut rewrites, &mut seen);
-                }
+            // No key strings are stored, so the rule's own text is what
+            // confirms a probe: a 64-bit collision cannot be mistaken for a
+            // match. Only ever called on a hit.
+            for &i in self.domain_index.get(suffix, |first| {
+                anchored_domain_is(self.text_of(first), suffix)
+            }) {
+                self.consider(i, req, url, &mut best, &mut rewrites);
             }
         }
 
-        // 2. Shortcut index.
+        // 2. Shortcut index.  The only phase that can hand back a rule twice,
+        //    because one pattern can match at several positions — so dedupe
+        //    the *patterns*, of which there are far fewer than rules.  The
+        //    vector stays empty, and therefore unallocated, for the common
+        //    case of a hostname that matches no shortcut at all.
         if let Some(ac) = &self.ac {
-            for m in ac.find_overlapping_iter(&url) {
-                for &i in &self.ac_rules[m.pattern().as_usize()] {
-                    self.consider(i, req, &url, &mut best, &mut rewrites, &mut seen);
+            let mut hit: Vec<u32> = Vec::new();
+            for m in ac.find_overlapping_iter(url) {
+                let p = m.pattern().as_u32();
+                if hit.contains(&p) {
+                    continue;
+                }
+                hit.push(p);
+
+                for &i in &self.ac_rules[p as usize] {
+                    self.consider(i, req, url, &mut best, &mut rewrites);
                 }
             }
         }
 
         // 3. Everything that could not be indexed.
         for &i in &self.scan {
-            self.consider(i, req, &url, &mut best, &mut rewrites, &mut seen);
+            self.consider(i, req, url, &mut best, &mut rewrites);
         }
 
-        (best.map(|(_, r)| r), rewrites)
+        (best, rewrites)
     }
 
     /// Folds candidate rule `idx` into the running best rule and rewrite list.
-    #[allow(clippy::too_many_arguments)]
     fn consider<'r>(
         &'r self,
         idx: u32,
         req: &Request<'_>,
         url: &str,
         best: &mut Option<(u32, &'r NetworkRule)>,
-        rewrites: &mut Vec<&'r NetworkRule>,
-        seen: &mut AHashSet<u32>,
+        rewrites: &mut Vec<(u32, &'r NetworkRule)>,
     ) {
-        if !seen.insert(idx) {
+        let r = &self.net[idx as usize];
+
+        // `$badfilter` is rare — a real 37-list installation has none at all —
+        // and answering it needs the rule's text, which nothing else on this
+        // path touches. Ask the cheap question first, so the common case
+        // never reaches the arena.
+        if !self.badfilter.is_empty()
+            && self
+                .badfilter
+                .contains(canonical_text(self.text_of(idx)).as_ref())
+        {
             return;
         }
 
-        let r = &self.net[idx as usize];
         if !self.applies(r, req, url) {
             return;
         }
 
         if r.dnsrewrite().is_some() {
-            rewrites.push(r);
+            rewrites.push((idx, r));
 
             return;
         }
@@ -201,7 +396,7 @@ impl RuleSet {
     /// Reports whether `r` applies to `req`, checking both the pattern and the
     /// modifiers.
     fn applies(&self, r: &NetworkRule, req: &Request<'_>, url: &str) -> bool {
-        if r.badfilter() || self.badfilter.contains(canonical_text(&r.text).as_str()) {
+        if r.badfilter() {
             return false;
         }
 
@@ -315,9 +510,11 @@ fn higher_priority(a: (u32, &NetworkRule), b: (u32, &NetworkRule)) -> bool {
 
 /// Strips the `$badfilter` modifier so a badfilter rule can be compared with
 /// the rule it cancels.
-fn canonical_text(text: &str) -> String {
+fn canonical_text(text: &str) -> Cow<'_, str> {
     let Some(dollar) = text.rfind('$') else {
-        return text.to_string();
+        // No modifiers at all, which is nearly every rule: the text is
+        // already canonical, so hand it back rather than copying it.
+        return Cow::Borrowed(text);
     };
 
     let (head, mods) = text.split_at(dollar);
@@ -327,10 +524,50 @@ fn canonical_text(text: &str) -> String {
         .collect();
 
     if kept.is_empty() {
-        head.to_string()
+        Cow::Borrowed(head)
     } else {
-        format!("{head}${}", kept.join(","))
+        Cow::Owned(format!("{head}${}", kept.join(",")))
     }
+}
+
+/// Reports whether `text` is a `||domain^` rule naming exactly `domain`.
+///
+/// The domain index keeps no keys, so this recovers one from the rule's own
+/// text. `text` is the line as written: an optional `@@`, then `||`, then the
+/// domain, then `^`, then any modifiers.
+fn anchored_domain_is(text: &str, domain: &str) -> bool {
+    let t = text.strip_prefix("@@").unwrap_or(text);
+    let Some(t) = t.strip_prefix("||") else {
+        return false;
+    };
+    let Some(end) = t.find('^') else {
+        return false;
+    };
+
+    t[..end].eq_ignore_ascii_case(domain)
+}
+
+/// Room for `http://` plus the longest legal hostname.
+const URL_BUF: usize = 7 + 253;
+
+/// Renders the `http://<host>` form the patterns are written against.
+///
+/// Upstream matches rules against a URL, so a hostname query is given one.
+/// Borrowing a stack buffer keeps it off the heap; a hostname longer than DNS
+/// permits falls back to allocating rather than being truncated.
+fn url_for<'a>(buf: &'a mut [u8; URL_BUF], hostname: &str) -> Cow<'a, str> {
+    const SCHEME: &[u8] = b"http://";
+
+    if hostname.len() > URL_BUF - SCHEME.len() {
+        return Cow::Owned(format!("http://{hostname}"));
+    }
+
+    buf[..SCHEME.len()].copy_from_slice(SCHEME);
+    buf[SCHEME.len()..SCHEME.len() + hostname.len()].copy_from_slice(hostname.as_bytes());
+
+    let n = SCHEME.len() + hostname.len();
+    // Valid UTF-8: an ASCII scheme followed by the caller's `&str`.
+    Cow::Borrowed(std::str::from_utf8(&buf[..n]).unwrap_or(""))
 }
 
 /// Inserts a rule index into a `Refs`-valued map.
@@ -347,8 +584,10 @@ fn push_ref(map: &mut AHashMap<Box<str>, Refs>, key: Box<str>, idx: u32) {
 #[derive(Default)]
 struct Builder {
     net: Vec<NetworkRule>,
+    sources: Vec<Arc<str>>,
+    net_text: Vec<TextRef>,
     hosts: Vec<HostRule>,
-    domain_index: AHashMap<Box<str>, Refs>,
+    domain_pairs: Vec<(Box<str>, u32)>,
     host_index: AHashMap<Box<str>, Refs>,
     shortcuts: AHashMap<String, Vec<u32>>,
     scan: Vec<u32>,
@@ -358,10 +597,20 @@ struct Builder {
 
 impl Builder {
     /// Parses and indexes every line of one list.
-    fn add_list(&mut self, id: i64, text: &str) {
+    fn add_list(&mut self, id: i64, text: Arc<str>) {
+        let src = self.sources.len() as u16;
+        self.sources.push(Arc::clone(&text));
+
+        let base = text.as_ptr() as usize;
         for line in text.lines() {
             match parse(line, id) {
-                Ok(Rule::Network(n)) => self.add_network(n.rule, n.shortcut),
+                Ok(Rule::Network(n)) => {
+                    // `parse` trims, so this is exactly the text it used, and
+                    // it is a slice of `text` — hence the offset arithmetic.
+                    let t = line.trim();
+                    let off = (t.as_ptr() as usize - base) as u32;
+                    self.add_network(n.rule, t, src, off, n.shortcut);
+                }
                 Ok(Rule::Host(h)) => self.add_host(h),
                 Err(_) => {}
             }
@@ -369,19 +618,31 @@ impl Builder {
     }
 
     /// Indexes one network rule.
-    fn add_network(&mut self, r: NetworkRule, shortcut: Option<String>) {
+    fn add_network(
+        &mut self,
+        r: NetworkRule,
+        text: &str,
+        src: u16,
+        off: u32,
+        shortcut: Option<String>,
+    ) {
         self.rules_count += 1;
 
         if r.badfilter() {
             self.badfilter
-                .insert(canonical_text(&r.text).into_boxed_str());
+                .insert(canonical_text(text).into_owned().into_boxed_str());
         }
 
         let idx = self.net.len() as u32;
+        self.net_text.push(TextRef {
+            off,
+            len: u16::try_from(text.len()).unwrap_or(0),
+            src,
+        });
 
         match (&r.pattern, shortcut) {
             (Pattern::DomainAnchor, Some(d)) => {
-                push_ref(&mut self.domain_index, d.into_boxed_str(), idx);
+                self.domain_pairs.push((d.into_boxed_str(), idx));
             }
             (Pattern::Rx { .. }, Some(sc)) if sc.len() >= MIN_SHORTCUT_LEN => {
                 self.shortcuts.entry(sc).or_default().push(idx);
@@ -403,11 +664,22 @@ impl Builder {
     }
 
     /// Finalises the indexes into a queryable rule set.
-    fn finish(self) -> RuleSet {
+    fn finish(mut self) -> RuleSet {
+        // A `Vec` grows by doubling, so each of these can be holding up to
+        // twice what it needs. They are written once and read for the life of
+        // the process, so hand the overshoot back.
+        self.net.shrink_to_fit();
+        self.net_text.shrink_to_fit();
+        self.hosts.shrink_to_fit();
+        self.scan.shrink_to_fit();
+        self.domain_pairs.shrink_to_fit();
+
         let Builder {
             net,
+            sources,
+            net_text,
             hosts,
-            domain_index,
+            domain_pairs,
             host_index,
             shortcuts,
             scan,
@@ -428,8 +700,10 @@ impl Builder {
 
         RuleSet {
             net,
+            sources,
+            net_text,
             hosts,
-            domain_index,
+            domain_index: DomainIndex::build(domain_pairs),
             host_index,
             ac,
             ac_rules,
@@ -452,9 +726,9 @@ pub struct Engine {
 
 impl Engine {
     /// Builds an engine from blocklist and allowlist sources.
-    pub fn build<'a>(
-        block: impl IntoIterator<Item = (i64, &'a str)>,
-        allow: impl IntoIterator<Item = (i64, &'a str)>,
+    pub fn build<T: Into<Arc<str>>, U: Into<Arc<str>>>(
+        block: impl IntoIterator<Item = (i64, T)>,
+        allow: impl IntoIterator<Item = (i64, U)>,
     ) -> Self {
         Self {
             allow: RuleSet::build(allow),
@@ -484,10 +758,10 @@ impl Engine {
         // 1. Allowlists short-circuit.
         if !self.allow.is_empty() {
             let (net, _) = self.allow.match_network(req);
-            if let Some(r) = net {
+            if let Some((idx, r)) = net {
                 return MatchResult {
                     reason: Reason::NotFilteredAllowList,
-                    rules: vec![to_matched(r)],
+                    rules: vec![to_matched(&self.allow, r, idx)],
                     rewrites: Vec::new(),
                 };
             }
@@ -507,21 +781,24 @@ impl Engine {
         if !rewrites.is_empty() {
             let excluded = rewrites
                 .iter()
-                .any(|r| matches!(r.dnsrewrite(), Some(DnsRewrite::Exclude)));
+                .any(|(_, r)| matches!(r.dnsrewrite(), Some(DnsRewrite::Exclude)));
             if !excluded {
                 return MatchResult {
                     reason: Reason::RewrittenRule,
-                    rules: rewrites.iter().map(|r| to_matched(r)).collect(),
+                    rules: rewrites
+                        .iter()
+                        .map(|&(i, r)| to_matched(&self.block, r, i))
+                        .collect(),
                     rewrites: rewrites
                         .iter()
-                        .filter_map(|r| r.dnsrewrite().cloned())
+                        .filter_map(|(_, r)| r.dnsrewrite().cloned())
                         .collect(),
                 };
             }
         }
 
         // 3. The winning basic rule.
-        if let Some(r) = net {
+        if let Some((idx, r)) = net {
             let reason = if r.allowlist {
                 Reason::NotFilteredAllowList
             } else {
@@ -530,7 +807,7 @@ impl Engine {
 
             return MatchResult {
                 reason,
-                rules: vec![to_matched(r)],
+                rules: vec![to_matched(&self.block, r, idx)],
                 rewrites: Vec::new(),
             };
         }
@@ -565,9 +842,9 @@ impl Engine {
 }
 
 /// Converts a network rule into its reportable form.
-fn to_matched(r: &NetworkRule) -> MatchedRule {
+fn to_matched(set: &RuleSet, r: &NetworkRule, idx: u32) -> MatchedRule {
     MatchedRule {
-        text: r.text.to_string(),
+        text: set.text_of(idx).to_string(),
         list_id: r.list_id,
         ip: None,
     }
@@ -591,7 +868,7 @@ mod tests {
     const TXT: u16 = 16;
 
     fn engine(block: &str) -> Engine {
-        Engine::build([(1i64, block)], [])
+        Engine::build([(1i64, block)], NO_LISTS)
     }
 
     fn req<'a>(host: &'a str, qtype: u16) -> Request<'a> {

@@ -4,3 +4,6 @@
 **/*.rs.bk
 .DS_Store
 /tests/compat/tmp/
+
+# Scratch worktrees created for parallel agent runs.
+.claude/

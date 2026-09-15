@@ -403,6 +403,51 @@ hold.
 upstream reads, and it is disabled for release builds, so it does nothing in
 the image a user runs. Nothing to implement.
 
+## Found on a real deployment, and fixed
+
+A 37-list installation on an Orange Pi 5 — 2,272,040 rules — appeared not to
+start: the log stopped after `loaded statistics` and nothing followed. It was
+not stuck. It was compiling regular expressions.
+
+**Expressions were built at load, not on first use.** Every rule that is not
+`||domain^` needs one, and that installation had 156,557 of them. Building all
+of those automata up front cost **22 seconds of parsing and most of a
+gigabyte**, for expressions that a query only ever reaches once the domain
+index or the Aho-Corasick scan has already named that rule a candidate —
+a handful per query, and the overwhelming majority never at all.
+
+`Pattern::Rx` now holds a `LazyRegex`: the source, and a `OnceLock` filled the
+first time something matches against it. The `/regex/` form is still compiled
+at load, because a user writes that one by hand and a typo in it should be
+refused there rather than silently never matching.
+
+Measured on that deployment's own filter files, same machine, same data:
+
+| | before | after | Go v0.107.79 |
+|---|---:|---:|---:|
+| Time to answer DNS | 55 s | **6 s** | 4 s |
+| Memory after loading | 4,196 MB | **532 MB** | 363 MB |
+
+Two guards, both confirmed to fail against the eager code:
+`an_expression_is_not_built_until_something_needs_it` asserts the automaton is
+absent until a match needs it, and
+`rules_needing_an_expression_load_as_cheaply_as_plain_ones` loads 60,000
+expression rules and fails over three seconds — it took 9.4 eagerly.
+
+**Why no test caught it.** Every fixture is the AdGuard DNS filter, which is
+almost entirely `||domain^`; those take the fast path and never compile
+anything. The cost only appears with the lists people actually stack up —
+HaGeZi, OISD, 1Hosts — which carry wildcards and modifiers. The differential
+fixture proves *verdicts*, and said nothing about what loading them costs.
+
+**The README was wrong about memory.** Its "2.2× less than Go" was one list;
+at 37 the ratio inverts to 1.5× more. Both figures are now stated with the
+list count they were measured at.
+
+`loading filter lists` is also logged before the work starts, not only after:
+several seconds of silence between "starting" and "serving" is what made this
+look like a hang in the first place.
+
 ## Deliberate deviations
 
 **A first launch as a non-root user is allowed.** The Go build refuses one —

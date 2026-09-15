@@ -382,7 +382,7 @@ impl Persistent {
 
                 Arc::new(Engine::build(
                     [(agl_filter::lists::BLOCKED_SERVICE_LIST_ID, rules.as_str())],
-                    [],
+                    agl_filter::engine::NO_LISTS,
                 ))
             });
 

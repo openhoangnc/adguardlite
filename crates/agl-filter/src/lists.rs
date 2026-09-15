@@ -5,9 +5,11 @@
 //! installation's downloaded lists are picked up without a re-download.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::engine::Engine;
 use agl_config::model::FilterYaml;
+
 use jiff::Timestamp;
 
 use agl_config::Paths;
@@ -38,7 +40,10 @@ pub struct List {
     /// Whether this is an allowlist.
     pub allowlist: bool,
     /// The rule text, as loaded from disk.
-    pub text: String,
+    ///
+    /// Shared rather than owned outright: the engine's rules point into these
+    /// bytes instead of keeping a second copy of them.
+    pub text: Arc<str>,
     /// The number of rules the text holds.
     pub rules_count: usize,
     /// When the list was last written.
@@ -54,7 +59,7 @@ impl List {
             name: f.name.clone(),
             enabled: f.enabled,
             allowlist,
-            text: String::new(),
+            text: Arc::from(""),
             rules_count: 0,
             last_updated: None,
         }
@@ -82,7 +87,7 @@ impl List {
             .ok()
             .map(|t| Timestamp::try_from(t).unwrap_or(Timestamp::UNIX_EPOCH));
         self.rules_count = count_rules(&text);
-        self.text = text;
+        self.text = Arc::from(text);
     }
 
     /// Writes the list's contents to disk, with upstream's modes.
@@ -169,7 +174,7 @@ impl Manager {
 
         Some(Engine::build(
             [(BLOCKED_SERVICE_LIST_ID, self.service_rules.as_str())],
-            [],
+            crate::engine::NO_LISTS,
         ))
     }
 
@@ -180,24 +185,27 @@ impl Manager {
     pub fn build_engine(&self) -> Engine {
         let user_text = self.user_rules.join("\n");
 
-        let block: Vec<(i64, &str)> = [
-            (CUSTOM_LIST_ID, user_text.as_str()),
-            (ETC_HOSTS_LIST_ID, self.hosts_rules.as_str()),
+        // The lists are handed over by `Arc`, so the engine's rules point at
+        // the bytes already loaded here rather than at a second copy. The two
+        // synthesised sources are small and are copied once.
+        let block: Vec<(i64, Arc<str>)> = [
+            (CUSTOM_LIST_ID, Arc::from(user_text)),
+            (ETC_HOSTS_LIST_ID, Arc::from(self.hosts_rules.as_str())),
         ]
         .into_iter()
         .chain(
             self.blocklists
                 .iter()
                 .filter(|l| l.enabled)
-                .map(|l| (l.id, l.text.as_str())),
+                .map(|l| (l.id, Arc::clone(&l.text))),
         )
         .collect();
 
-        let allow: Vec<(i64, &str)> = self
+        let allow: Vec<(i64, Arc<str>)> = self
             .allowlists
             .iter()
             .filter(|l| l.enabled)
-            .map(|l| (l.id, l.text.as_str()))
+            .map(|l| (l.id, Arc::clone(&l.text)))
             .collect();
 
         Engine::build(block, allow)
@@ -250,7 +258,7 @@ impl Manager {
         let count = count_rules(&text);
 
         let list = self.find_mut(id).ok_or(RefreshError::NotFound(id))?;
-        list.text = text;
+        list.text = Arc::from(text);
         list.rules_count = count;
         list.last_updated = Some(Timestamp::now());
         list.save(paths)

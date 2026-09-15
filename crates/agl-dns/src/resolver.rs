@@ -1096,7 +1096,7 @@ mod tests {
     /// fails loudly.
     fn resolver(block_rules: &str, rewrites: Table, settings: Settings) -> Resolver {
         Resolver::new(
-            Engine::build([(1i64, block_rules)], []),
+            Engine::build([(1i64, block_rules)], agl_filter::engine::NO_LISTS),
             rewrites,
             Cache::new(CacheConfig::default()),
             SharedPool::new(Pool::new(
@@ -1327,7 +1327,10 @@ mod tests {
         // The blocked-services rules carry the reserved list identifier, and
         // the UI labels the query by the reason that implies.
         let r = resolver("", Table::default(), Settings::default());
-        r.set_services(Some(Engine::build([(-2i64, "||youtube.com^")], [])));
+        r.set_services(Some(Engine::build(
+            [(-2i64, "||youtube.com^")],
+            agl_filter::engine::NO_LISTS,
+        )));
 
         let out = resolve(&r, "www.youtube.com.", RecordType::A, Proto::Udp).await;
         assert_eq!(out.reason, Reason::FilteredBlockedService);
@@ -1336,7 +1339,10 @@ mod tests {
     #[tokio::test]
     async fn a_hosts_file_entry_is_reported_as_a_rewrite() {
         let r = resolver("", Table::default(), Settings::default());
-        r.set_engine(Engine::build([(-1i64, "192.168.1.7 printer.lan")], []));
+        r.set_engine(Engine::build(
+            [(-1i64, "192.168.1.7 printer.lan")],
+            agl_filter::engine::NO_LISTS,
+        ));
 
         let out = resolve(&r, "printer.lan.", RecordType::A, Proto::Udp).await;
         assert_eq!(out.reason, Reason::RewrittenAutoHosts);
@@ -1359,7 +1365,10 @@ mod tests {
                 ..Default::default()
             },
         );
-        r.set_services(Some(Engine::build([(-2i64, "||youtube.com^")], [])));
+        r.set_services(Some(Engine::build(
+            [(-2i64, "||youtube.com^")],
+            agl_filter::engine::NO_LISTS,
+        )));
 
         let out = resolve(&r, "www.youtube.com.", RecordType::A, Proto::Udp).await;
         assert_ne!(out.reason, Reason::FilteredBlockedService);
@@ -1378,7 +1387,10 @@ mod tests {
     async fn a_blocked_service_records_its_name() {
         let r = resolver("", Table::default(), Settings::default());
         let rules = agl_filter::services::rules_for(&["youtube".to_string()]);
-        r.set_services(Some(Engine::build([(-2i64, rules.as_str())], [])));
+        r.set_services(Some(Engine::build(
+            [(-2i64, rules.as_str())],
+            agl_filter::engine::NO_LISTS,
+        )));
 
         let out = resolve(&r, "www.youtube.com.", RecordType::A, Proto::Udp).await;
         assert_eq!(out.reason, Reason::FilteredBlockedService);

@@ -393,7 +393,7 @@ mod tests {
 
     fn test_server(rules: &str, per_second: u32) -> Arc<Server> {
         let resolver = Resolver::new(
-            Engine::build([(1i64, rules)], []),
+            Engine::build([(1i64, rules)], agl_filter::engine::NO_LISTS),
             Table::default(),
             Cache::new(CacheConfig::default()),
             SharedPool::new(Pool::new(

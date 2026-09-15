@@ -88,7 +88,7 @@ async fn resolver(server: SocketAddr, settings: Settings) -> Resolver {
         .expect("connecting");
 
     Resolver::new(
-        Engine::build([(1i64, "")], []),
+        Engine::build([(1i64, "")], agl_filter::engine::NO_LISTS),
         Table::default(),
         Cache::new(CacheConfig {
             size_bytes: 0,

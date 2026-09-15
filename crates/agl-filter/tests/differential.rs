@@ -44,7 +44,7 @@ fn go_truth() -> Vec<(String, String, String)> {
 #[test]
 fn matches_the_go_engine_on_the_real_adguard_dns_filter() {
     let list = filter_list();
-    let engine = Engine::build([(1i64, list.as_str())], []);
+    let engine = Engine::build([(1i64, list.as_str())], agl_filter::engine::NO_LISTS);
 
     assert!(
         engine.block.len() > 150_000,
@@ -131,7 +131,7 @@ fn matches_the_go_engine_on_the_real_adguard_dns_filter() {
 fn loads_the_real_list_quickly_enough_to_be_practical() {
     let list = filter_list();
     let start = std::time::Instant::now();
-    let engine = Engine::build([(1i64, list.as_str())], []);
+    let engine = Engine::build([(1i64, list.as_str())], agl_filter::engine::NO_LISTS);
     let elapsed = start.elapsed();
 
     // Generous bound: this is a correctness guard against an accidental
@@ -139,6 +139,34 @@ fn loads_the_real_list_quickly_enough_to_be_practical() {
     assert!(
         elapsed.as_secs() < 30,
         "building the index took {elapsed:?} for {} rules",
+        engine.block.len()
+    );
+}
+
+#[test]
+fn rules_needing_an_expression_load_as_cheaply_as_plain_ones() {
+    // The real list is almost entirely `||domain^`, which never needed an
+    // expression, so it never showed what those cost. A deployment with 37
+    // lists had 156,557 rules that did, and compiling them at load was
+    // ~22 seconds of a ~55 second startup.
+    //
+    // Wildcards force the expression path. The bound is deliberately loose --
+    // eagerly compiling this many took about seven seconds, lazily it is
+    // hundredths -- so this fails on the regression and not on a slow machine.
+    let list: String = (0..60_000)
+        .map(|i| format!("||ads{i}.example.com^*track\n"))
+        .collect::<String>()
+        .replace("\\n", "\n");
+
+    let start = std::time::Instant::now();
+    let engine = Engine::build([(1i64, list.as_str())], agl_filter::engine::NO_LISTS);
+    let elapsed = start.elapsed();
+
+    assert_eq!(engine.block.len(), 60_000, "every rule should have loaded");
+    assert!(
+        elapsed.as_secs() < 3,
+        "building {} expression rules took {elapsed:?}; they are being \
+         compiled at load rather than on first use",
         engine.block.len()
     );
 }

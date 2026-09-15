@@ -1,5 +1,6 @@
 //! The DNS filtering engine.
 
+pub mod domidx;
 pub mod engine;
 pub mod lists;
 pub mod pattern;

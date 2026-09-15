@@ -29,7 +29,10 @@ fn state(user: Option<(&str, &str)>) -> Shared {
         .collect();
 
     let resolver = Arc::new(agl_dns::resolver::Resolver::new(
-        agl_filter::engine::Engine::build([], []),
+        agl_filter::engine::Engine::build(
+            agl_filter::engine::NO_LISTS,
+            agl_filter::engine::NO_LISTS,
+        ),
         agl_dns::rewrite::Table::default(),
         agl_dns::cache::Cache::new(agl_dns::cache::Config::default()),
         agl_dns::pool::SharedPool::new(agl_dns::pool::Pool::new(

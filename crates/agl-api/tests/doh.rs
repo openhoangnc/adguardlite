@@ -29,7 +29,10 @@ fn state(insecure: bool) -> Shared {
     }];
 
     let resolver = Arc::new(agl_dns::resolver::Resolver::new(
-        agl_filter::engine::Engine::build([(1i64, "||ads.example.com^")], []),
+        agl_filter::engine::Engine::build(
+            [(1i64, "||ads.example.com^")],
+            agl_filter::engine::NO_LISTS,
+        ),
         agl_dns::rewrite::Table::default(),
         agl_dns::cache::Cache::new(agl_dns::cache::Config::default()),
         agl_dns::pool::SharedPool::new(agl_dns::pool::Pool::new(
