@@ -909,3 +909,32 @@ Not bugs; recorded so nobody "fixes" them.
 Nothing outstanding. The features listed under **Deliberate exclusions** above
 are decisions rather than gaps, and each refuses clearly at the point a user
 would notice.
+
+### Weighed while keeping connections, and left alone
+
+Designed, costed, and not built, because each buys less than it risks once the
+handshakes are gone. Recorded so the next person does not re-derive them.
+
+- **A circuit breaker on `pool::Member`.** A dead upstream still costs the full
+  `upstream_timeout` on the query that discovers it, every time, because
+  `failures` decays only on success and a member demoted by `score()` is never
+  chosen again to earn one. Time-decayed failures plus an open/half-open state
+  would turn that into one slow query per backoff window. The reason to wait is
+  that it has to fail *open* when every member is broken, or a transient blip
+  becomes a total outage, and that is worth measuring rather than reasoning
+  about. Note `record_success` is a load-then-store, not a CAS, so concurrent
+  successes lose updates; fix that with it.
+- **Hedging the second-best upstream** once the chosen one passes its own p90.
+  Worth roughly 6× on the upstream p99 for ~10% more upstream queries, which
+  is a real trade to make deliberately and not a free win.
+- **A pool of UDP source sockets.** `udp_exchange` binds and closes a socket
+  per query: ~8-10 µs of syscalls on a path that then waits 50 ms for the
+  network, so it is a throughput item and not a latency one. It also trades
+  away source-port entropy, which is a defence against off-path spoofing.
+  Not worth paying that for a win that does not show up in p50, p90 or p99.
+- **`loadgen` is closed-loop**, so its tail figures understate stalls: when the
+  server stops answering the generator stops offering load. Anything measured
+  with it should be read as a floor, the numbers above included.
+- **The HTTP/1.1 DoH fallback has no test.** It is reviewed by reading only;
+  every reachable DoH server negotiates h2, so exercising it needs an h1-only
+  local server that nothing else in the tree wants.
