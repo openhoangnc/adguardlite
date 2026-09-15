@@ -8,8 +8,9 @@
 
 use std::io;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant};
 
 use hickory_proto::op::{Message, ResponseCode};
 use hickory_proto::rr::{RData, RecordType};
@@ -21,6 +22,15 @@ use crate::addr::{Transport, Upstream};
 
 /// The largest DNS message this client will accept.
 const MAX_MSG: usize = 64 * 1024;
+
+/// The longest one address is given while others remain untried.
+///
+/// `upstream_timeout` defaults to ten seconds, and every client below this
+/// server — dig at five, glibc at five twice over — has given up long before
+/// that.  Spending the whole budget on the first of several addresses means
+/// the rest are never reached at all, so each attempt but the last is capped
+/// and the remainder of the budget is carried forward.
+const ATTEMPT_CAP: Duration = Duration::from_secs(2);
 
 /// The EDNS payload size advertised for UDP queries.
 pub const UDP_PAYLOAD: usize = 4096;
@@ -62,44 +72,63 @@ pub enum Error {
     Unsupported(String),
 }
 
-/// Builds the shared rustls client configuration, trusting the webpki roots.
+/// The trust anchors and the TLS session cache every upstream draws on.
+///
+/// Both are expensive and both must be shared.  Parsing the webpki roots is
+/// ~150 certificates' worth of work, and the `Resumption` store rustls builds
+/// alongside them is what turns a reconnect into a one-round-trip resumed
+/// handshake.  These used to be rebuilt inside each exchange, so no session
+/// ticket ever outlived the query that obtained it and resumption was
+/// impossible by construction.
+static BASE: LazyLock<rustls::ClientConfig> = LazyLock::new(|| {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth()
+});
+
+/// Clones the shared base, offering one set of application protocols.
+///
+/// A clone carries the same `Arc`s for the verifier, the roots and the
+/// resumption store, so all four profiles share one session cache — rustls
+/// only honours a shared store between configurations whose verifiers are
+/// pointer-identical, which cloning guarantees and rebuilding does not.
+fn with_alpn(alpn: &[&[u8]]) -> Arc<rustls::ClientConfig> {
+    let mut cfg = BASE.clone();
+    cfg.alpn_protocols = alpn.iter().map(|p| p.to_vec()).collect();
+
+    Arc::new(cfg)
+}
+
+/// The profile for DNS-over-TLS.
+static DOT: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| with_alpn(&[]));
+/// The profile for DNS-over-HTTPS over TCP.
+static HTTPS: LazyLock<Arc<rustls::ClientConfig>> =
+    LazyLock::new(|| with_alpn(&[b"h2", b"http/1.1"]));
+/// The profile for DNS-over-QUIC.
+static DOQ: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| with_alpn(&[b"doq"]));
+/// The profile for DNS-over-HTTPS carried by HTTP/3.
+static H3: LazyLock<Arc<rustls::ClientConfig>> = LazyLock::new(|| with_alpn(&[b"h3"]));
+
+/// The shared rustls client configuration, trusting the webpki roots.
 pub fn tls_config() -> Arc<rustls::ClientConfig> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-    let mut cfg = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    // DoT speaks plain DNS over the TLS stream; DoH negotiates HTTP.
-    cfg.alpn_protocols = Vec::new();
-
-    Arc::new(cfg)
+    DOT.clone()
 }
 
-/// Builds a rustls configuration that offers HTTP ALPN, for DoH.
+/// The rustls configuration that offers HTTP ALPN, for DoH.
 fn https_tls_config() -> Arc<rustls::ClientConfig> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-    let mut cfg = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    cfg.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
-
-    Arc::new(cfg)
+    HTTPS.clone()
 }
 
-/// Builds a rustls configuration offering one application protocol.
+/// The rustls configuration offering one application protocol.
 fn alpn_tls_config(alpn: &[u8]) -> Arc<rustls::ClientConfig> {
-    let mut roots = rustls::RootCertStore::empty();
-    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-    let mut cfg = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    cfg.alpn_protocols = vec![alpn.to_vec()];
-
-    Arc::new(cfg)
+    match alpn {
+        b"doq" => DOQ.clone(),
+        b"h3" => H3.clone(),
+        other => with_alpn(&[other]),
+    }
 }
 
 /// Resolves the addresses an upstream should be contacted on.
@@ -198,6 +227,47 @@ async fn bootstrap_lookup(
         .collect())
 }
 
+/// Rejects a reply that does not answer the question that was asked.
+///
+/// dnsproxy checks this on every exchange — `upstream.validateResponse` —
+/// and it matters more here than the name suggests: a reply is written
+/// straight into the cache under the key of the question that *was* asked, so
+/// an upstream answering something else poisons that name.  Names compare
+/// case-insensitively, which is what `Name`'s own equality already does and
+/// what dnsproxy's `strings.EqualFold` does.
+fn check_reply(req: &Message, resp: &Message) -> Result<(), Error> {
+    let Some(asked) = req.queries.first() else {
+        return Ok(());
+    };
+
+    let [got] = resp.queries.as_slice() else {
+        return Err(Error::Decode(format!(
+            "reply carried {} questions, expected one",
+            resp.queries.len()
+        )));
+    };
+
+    if got.query_type() != asked.query_type() || got.query_class() != asked.query_class() {
+        return Err(Error::Decode(format!(
+            "reply answers {} {}, not {} {}",
+            got.query_class(),
+            got.query_type(),
+            asked.query_class(),
+            asked.query_type()
+        )));
+    }
+
+    if got.name() != asked.name() {
+        return Err(Error::Decode(format!(
+            "reply answers {}, not {}",
+            got.name(),
+            asked.name()
+        )));
+    }
+
+    Ok(())
+}
+
 /// Sends a query over UDP and reads the reply.
 pub async fn udp_exchange(
     req: &Message,
@@ -223,8 +293,13 @@ pub async fn udp_exchange(
             .map_err(|_| Error::Timeout(timeout))??;
 
         let resp = Message::from_bytes(&buf[..n]).map_err(|e| Error::Decode(e.to_string()))?;
-        // Ignore replies that do not belong to this query.
+        // Ignore replies that do not belong to this query.  A datagram
+        // carrying the right identifier but the wrong question is not a
+        // stray, it is an attempt at the cache, so it fails the exchange
+        // rather than being waited past.
         if resp.metadata.id == req.metadata.id {
+            check_reply(req, &resp)?;
+
             return Ok(resp);
         }
     }
@@ -270,6 +345,22 @@ where
     .map_err(|_| Error::Timeout(timeout))?
     .map_err(Error::Io)
     .and_then(|buf| Message::from_bytes(&buf).map_err(|e| Error::Decode(e.to_string())))
+    .and_then(|resp| {
+        // Nothing checked the reply here before, which was survivable only
+        // because the connection was thrown away afterwards.  A pooled
+        // connection that has just produced a frame belonging to some other
+        // query must not be reused, so this is a prerequisite for keeping
+        // one, not only a hardening step.
+        if resp.metadata.id != req.metadata.id {
+            return Err(Error::Decode(format!(
+                "reply carried id {:#06x}, expected {:#06x}",
+                resp.metadata.id, req.metadata.id
+            )));
+        }
+        check_reply(req, &resp)?;
+
+        Ok(resp)
+    })
 }
 
 /// Sends a query over TCP.
@@ -608,6 +699,12 @@ pub struct Client {
     tls: Arc<rustls::ClientConfig>,
     /// Whether DNS-over-HTTPS should be tried over HTTP/3 first.
     prefer_http3: bool,
+    /// The index into `addrs` that answered last.
+    ///
+    /// Addresses are resolved once and never reordered, so without this a
+    /// dead first address is paid for on every query for the life of the
+    /// process rather than once.
+    preferred: AtomicUsize,
 }
 
 impl Client {
@@ -630,6 +727,7 @@ impl Client {
             addrs,
             tls,
             prefer_http3: false,
+            preferred: AtomicUsize::new(0),
         })
     }
 
@@ -654,6 +752,7 @@ impl Client {
             addrs: Vec::new(),
             tls: tls_config(),
             prefer_http3: false,
+            preferred: AtomicUsize::new(0),
         }
     }
 
@@ -661,22 +760,52 @@ impl Client {
     ///
     /// A truncated UDP answer is retried over TCP, as a resolver must.
     pub async fn exchange(&self, req: &Message, timeout: Duration) -> Result<Message, Error> {
+        if matches!(self.upstream.transport, Transport::Stamp) {
+            return Err(Error::Unsupported(self.upstream.original.clone()));
+        }
+
+        let n = self.addrs.len();
+        if n == 0 {
+            return Err(Error::Bootstrap {
+                host: self.upstream.host.clone(),
+                reason: "no addresses to try".into(),
+            });
+        }
+
+        let deadline = Instant::now() + timeout;
+        let first = self.preferred.load(Ordering::Relaxed) % n;
         let mut last: Option<Error> = None;
 
-        for &addr in &self.addrs {
+        for step in 0..n {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                break;
+            }
+
+            // Whatever is left goes to the final attempt; the others are
+            // capped so one blackholed address cannot consume the lot.
+            let budget = if step + 1 == n {
+                left
+            } else {
+                left.min(ATTEMPT_CAP)
+            };
+
+            let i = (first + step) % n;
+            let addr = self.addrs[i];
+
             let r = match self.upstream.transport {
-                Transport::Udp => match udp_exchange(req, addr, timeout).await {
-                    Ok(resp) if resp.metadata.truncation => tcp_exchange(req, addr, timeout).await,
+                Transport::Udp => match udp_exchange(req, addr, budget).await {
+                    Ok(resp) if resp.metadata.truncation => tcp_exchange(req, addr, budget).await,
                     other => other,
                 },
-                Transport::Tcp => tcp_exchange(req, addr, timeout).await,
+                Transport::Tcp => tcp_exchange(req, addr, budget).await,
                 Transport::Tls => {
-                    tls_exchange(req, addr, &self.upstream.host, self.tls.clone(), timeout).await
+                    tls_exchange(req, addr, &self.upstream.host, self.tls.clone(), budget).await
                 }
                 Transport::Https if self.prefer_http3 => {
                     let host = &self.upstream.host;
                     let path = &self.upstream.path;
-                    match https3_exchange(req, addr, host, path, timeout).await {
+                    match https3_exchange(req, addr, host, path, budget).await {
                         Ok(resp) => Ok(resp),
                         Err(e) => {
                             tracing::debug!(
@@ -685,30 +814,31 @@ impl Client {
                                 "http/3 failed; falling back to http/2"
                             );
 
-                            https_exchange(req, addr, host, path, timeout).await
+                            https_exchange(req, addr, host, path, budget).await
                         }
                     }
                 }
                 Transport::Https => {
-                    https_exchange(req, addr, &self.upstream.host, &self.upstream.path, timeout)
+                    https_exchange(req, addr, &self.upstream.host, &self.upstream.path, budget)
                         .await
                 }
-                Transport::Quic => quic_exchange(req, addr, &self.upstream.host, timeout).await,
-                Transport::Stamp => {
-                    return Err(Error::Unsupported(self.upstream.original.clone()));
-                }
+                Transport::Quic => quic_exchange(req, addr, &self.upstream.host, budget).await,
+                Transport::Stamp => unreachable!("rejected above"),
             };
 
             match r {
-                Ok(resp) => return Ok(resp),
+                Ok(resp) => {
+                    if i != first {
+                        self.preferred.store(i, Ordering::Relaxed);
+                    }
+
+                    return Ok(resp);
+                }
                 Err(e) => last = Some(e),
             }
         }
 
-        Err(last.unwrap_or_else(|| Error::Bootstrap {
-            host: self.upstream.host.clone(),
-            reason: "no addresses to try".into(),
-        }))
+        Err(last.unwrap_or(Error::Timeout(timeout)))
     }
 
     /// The addresses this client will contact.
@@ -888,13 +1018,19 @@ mod tests {
             addrs: vec![dead, live],
             tls: tls_config(),
             prefer_http3: false,
+            preferred: AtomicUsize::new(0),
         };
 
         let started = std::time::Instant::now();
-        let got = c.exchange(&query("example.com."), Duration::from_secs(10)).await;
+        let got = c
+            .exchange(&query("example.com."), Duration::from_secs(10))
+            .await;
         let took = started.elapsed();
 
-        assert!(got.is_ok(), "the live address should have answered: {got:?}");
+        assert!(
+            got.is_ok(),
+            "the live address should have answered: {got:?}"
+        );
         assert!(
             took < Duration::from_secs(3),
             "a dead first address cost {took:?} of a ten-second budget"
@@ -928,7 +1064,9 @@ mod tests {
             resp.metadata.id = req.metadata.id;
 
             let wire = resp.to_bytes().unwrap();
-            s.write_all(&(wire.len() as u16).to_be_bytes()).await.unwrap();
+            s.write_all(&(wire.len() as u16).to_be_bytes())
+                .await
+                .unwrap();
             s.write_all(&wire).await.unwrap();
             s.flush().await.unwrap();
         });
