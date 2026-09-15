@@ -98,6 +98,9 @@ pub struct AppState {
     pub stats: Arc<Stats>,
     /// Web sessions.
     pub sessions: crate::auth::Sessions,
+    /// Throttles password guessing, against the login form and against the
+    /// Basic credentials every other endpoint accepts.
+    pub login_limiter: crate::auth::LoginLimiter,
     /// When the server started.
     pub started: Timestamp,
     /// Downloads filter lists.

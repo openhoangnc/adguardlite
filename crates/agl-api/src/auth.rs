@@ -287,15 +287,43 @@ pub fn hash_password(password: &str) -> Result<String, bcrypt::BcryptError> {
     bcrypt::hash(password, 10)
 }
 
+/// How long a failed attempt is remembered before the count lapses.
+///
+/// Upstream's `failedAuthTTL`.  The window runs from the *first* failure, not
+/// the last, so a slow trickle of guesses never accumulates into a block.
+const FAILED_AUTH_TTL: Duration = Duration::from_secs(60);
+
+/// One client's failed attempts.
+#[derive(Clone, Copy)]
+struct Failed {
+    /// How many there have been.
+    count: u32,
+    /// When the record lapses -- and, once the count is spent, when the block
+    /// lifts.  The two share a field because upstream's do.
+    until: SystemTime,
+}
+
 /// Tracks failed login attempts per client, to slow down guessing.
+///
+/// Upstream's `authRateLimiter`, including the part that reads like a bug and
+/// is not: until the count reaches the threshold, every failure keeps the
+/// *first* one's deadline, so the attempts have to arrive within a minute of
+/// each other to add up.  Reaching the threshold replaces that deadline with
+/// the full block.
 pub struct LoginLimiter {
-    attempts: Mutex<AHashMap<String, (u32, SystemTime)>>,
+    /// The clients that have failed recently, by address.
+    attempts: Mutex<AHashMap<String, Failed>>,
+    /// Failures allowed before the block starts.
     max: u32,
+    /// How long the block lasts.
     block: Duration,
 }
 
 impl LoginLimiter {
     /// Creates a limiter allowing `max` failures before a `block`-long pause.
+    ///
+    /// A zero in either switches it off, as upstream's `emptyRateLimiter`
+    /// does when `auth_attempts` or `block_auth_min` is zero.
     pub fn new(max: u32, block: Duration) -> Self {
         Self {
             attempts: Mutex::new(AHashMap::new()),
@@ -304,36 +332,82 @@ impl LoginLimiter {
         }
     }
 
-    /// Reports whether the client is currently blocked.
-    pub fn is_blocked(&self, client: &str) -> bool {
-        let mut m = self.attempts.lock();
-        let Some((count, until)) = m.get(client).copied() else {
-            return false;
-        };
+    /// Builds the limiter the configuration asks for.
+    pub fn from_config(cfg: &agl_config::Config) -> Self {
+        Self::new(
+            cfg.auth_attempts,
+            Duration::from_secs(u64::from(cfg.block_auth_min) * 60),
+        )
+    }
 
-        if until <= SystemTime::now() {
-            m.remove(client);
+    /// Reports whether this limiter throttles anything at all.
+    pub fn is_enabled(&self) -> bool {
+        self.max > 0 && !self.block.is_zero()
+    }
 
-            return false;
+    /// How long the client must wait before trying again.
+    ///
+    /// Zero means it may try now, which covers every client that has not yet
+    /// spent its attempts.
+    pub fn blocked_for(&self, client: &str) -> Duration {
+        if !self.is_enabled() {
+            return Duration::ZERO;
         }
 
-        count >= self.max
+        let now = SystemTime::now();
+        let mut m = self.attempts.lock();
+        m.retain(|_, f| f.until > now);
+
+        let Some(f) = m.get(client) else {
+            return Duration::ZERO;
+        };
+        if f.count < self.max {
+            return Duration::ZERO;
+        }
+
+        f.until.duration_since(now).unwrap_or(Duration::ZERO)
     }
 
     /// Records a failed attempt.
     pub fn record_failure(&self, client: &str) {
+        if !self.is_enabled() {
+            return;
+        }
+
+        let now = SystemTime::now();
         let mut m = self.attempts.lock();
-        let e = m
-            .entry(client.to_string())
-            .or_insert((0, SystemTime::now() + self.block));
-        e.0 += 1;
-        e.1 = SystemTime::now() + self.block;
+        let f = m.entry(client.to_string()).or_insert(Failed {
+            count: 0,
+            until: now + FAILED_AUTH_TTL,
+        });
+        f.count += 1;
+
+        // Spending the last attempt is what starts the block; the failures
+        // before it only set how long they have to arrive within.
+        if f.count >= self.max {
+            f.until = now + self.block;
+        }
     }
 
     /// Clears a client's failures after a successful login.
     pub fn record_success(&self, client: &str) {
         self.attempts.lock().remove(client);
     }
+}
+
+/// The refusal a client that has spent its attempts gets.
+///
+/// `Retry-After` is whole seconds, and `left` is truncated to them rather
+/// than rounded, which is what upstream's `int(left.Seconds())` does too.
+pub fn too_many_attempts(left: Duration) -> axum::response::Response {
+    use axum::response::IntoResponse as _;
+
+    (
+        axum::http::StatusCode::TOO_MANY_REQUESTS,
+        [(axum::http::header::RETRY_AFTER, left.as_secs().to_string())],
+        "too many login attempts",
+    )
+        .into_response()
 }
 
 #[cfg(test)]
@@ -508,18 +582,92 @@ mod tests {
 
     #[test]
     fn the_login_limiter_blocks_after_repeated_failures() {
-        let l = LoginLimiter::new(3, Duration::from_secs(60));
-        assert!(!l.is_blocked("1.2.3.4"));
+        let l = LoginLimiter::new(3, Duration::from_secs(900));
+        assert!(l.blocked_for("1.2.3.4").is_zero());
 
-        for _ in 0..3 {
+        // The attempts themselves are allowed; spending the last one is what
+        // starts the block.
+        for _ in 0..2 {
             l.record_failure("1.2.3.4");
+            assert!(l.blocked_for("1.2.3.4").is_zero());
         }
-        assert!(l.is_blocked("1.2.3.4"));
+        l.record_failure("1.2.3.4");
+
+        let left = l.blocked_for("1.2.3.4");
+        assert!(
+            left > Duration::from_secs(890) && left <= Duration::from_secs(900),
+            "the block should run for about the configured time, not {left:?}"
+        );
 
         // A different client is unaffected.
-        assert!(!l.is_blocked("5.6.7.8"));
+        assert!(l.blocked_for("5.6.7.8").is_zero());
 
         l.record_success("1.2.3.4");
-        assert!(!l.is_blocked("1.2.3.4"));
+        assert!(l.blocked_for("1.2.3.4").is_zero());
+    }
+
+    #[test]
+    fn failures_short_of_the_threshold_lapse_on_their_own() {
+        // Upstream keeps the *first* failure's one-minute deadline until the
+        // count is spent, so a trickle of guesses never adds up. Reaching
+        // back past that deadline is what a slow attacker does, and the
+        // record has to be gone by then.
+        let l = LoginLimiter::new(3, Duration::from_secs(900));
+        l.record_failure("1.2.3.4");
+
+        let lapsed = SystemTime::now() - Duration::from_secs(1);
+        l.attempts.lock().get_mut("1.2.3.4").unwrap().until = lapsed;
+
+        assert!(l.blocked_for("1.2.3.4").is_zero());
+        assert!(
+            l.attempts.lock().is_empty(),
+            "a lapsed record should be swept, not counted towards a block"
+        );
+    }
+
+    #[test]
+    fn a_zero_in_either_bound_switches_the_limiter_off() {
+        // Upstream's `emptyRateLimiter`, which it installs when
+        // `auth_attempts` or `block_auth_min` is zero.
+        for l in [
+            LoginLimiter::new(0, Duration::from_secs(900)),
+            LoginLimiter::new(3, Duration::ZERO),
+        ] {
+            assert!(!l.is_enabled());
+            for _ in 0..10 {
+                l.record_failure("1.2.3.4");
+            }
+            assert!(l.blocked_for("1.2.3.4").is_zero());
+        }
+    }
+
+    #[test]
+    fn the_limiter_takes_its_bounds_from_the_configuration() {
+        let mut cfg = agl_config::Config::default();
+        assert_eq!(cfg.auth_attempts, 5, "upstream's default");
+        assert_eq!(cfg.block_auth_min, 15, "upstream's default, in minutes");
+
+        let l = LoginLimiter::from_config(&cfg);
+        assert!(l.is_enabled());
+        for _ in 0..5 {
+            l.record_failure("1.2.3.4");
+        }
+        assert!(l.blocked_for("1.2.3.4") > Duration::from_secs(890));
+
+        cfg.auth_attempts = 0;
+        assert!(!LoginLimiter::from_config(&cfg).is_enabled());
+    }
+
+    #[test]
+    fn the_refusal_carries_the_seconds_left() {
+        let r = too_many_attempts(Duration::from_millis(899_900));
+        assert_eq!(r.status(), axum::http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            r.headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            // Truncated, as upstream's `int(left.Seconds())` truncates.
+            Some("899")
+        );
     }
 }

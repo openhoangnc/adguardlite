@@ -1,6 +1,7 @@
 //! The DNS server: wire handling, caching, upstream resolution.
 
 pub mod addr;
+pub mod blocked;
 pub mod cache;
 pub mod client;
 pub mod clients;

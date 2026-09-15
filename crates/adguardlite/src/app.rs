@@ -134,10 +134,8 @@ impl App {
 
         let server = Arc::new(Server::new(resolver.clone(), limiter, observer));
         server.set_max_concurrent(config.dns.max_goroutines);
-        *server.access.write() = Access {
-            allowed: parse_ips(&config.dns.allowed_clients),
-            disallowed: parse_ips(&config.dns.disallowed_clients),
-        };
+        *server.access.write() =
+            Access::new(&config.dns.allowed_clients, &config.dns.disallowed_clients);
 
         Ok(Self {
             paths,
@@ -376,7 +374,7 @@ pub fn settings(c: &Config) -> Settings {
             },
             ttl: c.filtering.blocked_response_ttl,
         },
-        blocked_hosts: c.dns.blocked_hosts.clone(),
+        blocked_hosts: agl_dns::blocked::BlockedHosts::shared(&c.dns.blocked_hosts),
         aaaa_disabled: c.dns.aaaa_disabled,
         refuse_any: c.dns.refuse_any,
         cache_ttl_min: c.dns.cache_ttl_min,
@@ -619,10 +617,6 @@ fn bootstrap_addrs(specs: &[String]) -> Vec<SocketAddr> {
 
 /// Parses the address entries of the access lists, ignoring CIDRs and
 /// ClientIDs, which are matched elsewhere.
-fn parse_ips(v: &[String]) -> Vec<std::net::IpAddr> {
-    v.iter().filter_map(|s| s.parse().ok()).collect()
-}
-
 /// Loads the configuration, writing a default one on a fresh installation.
 ///
 /// An older schema is migrated and the upgraded file written back, as upstream

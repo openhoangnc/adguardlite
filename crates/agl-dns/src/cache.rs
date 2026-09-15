@@ -118,7 +118,7 @@ const SHARDS: usize = 16;
 /// A sharded, size-bounded DNS cache.
 pub struct Cache {
     shards: Vec<Mutex<Shard>>,
-    cfg: Config,
+    cfg: parking_lot::RwLock<Config>,
 }
 
 /// One shard's state.
@@ -159,12 +159,37 @@ impl Cache {
             })
             .collect();
 
-        Self { shards, cfg }
+        Self {
+            shards,
+            cfg: parking_lot::RwLock::new(cfg),
+        }
+    }
+
+    /// Replaces the configuration on a running cache.
+    ///
+    /// Each shard's budget is resized and trimmed to fit, so shrinking the
+    /// cache -- or switching it off, which is a size of zero -- takes effect
+    /// at once rather than at the next restart.  Upstream's `Reconfigure`
+    /// rebuilds the cache outright; keeping the entries that still fit is the
+    /// kinder version of the same thing.
+    pub fn set_config(&self, cfg: Config) {
+        let per_shard = (cfg.size_bytes / SHARDS).max(1);
+        *self.cfg.write() = cfg;
+
+        for shard in &self.shards {
+            let mut s = shard.lock();
+            s.budget = per_shard;
+            s.evict_to_fit();
+        }
+
+        if self.is_disabled() {
+            self.clear();
+        }
     }
 
     /// Reports whether caching is switched off.
     pub fn is_disabled(&self) -> bool {
-        self.cfg.size_bytes == 0
+        self.cfg.read().size_bytes == 0
     }
 
     /// Picks the shard for a key.
@@ -194,7 +219,12 @@ impl Cache {
 
         // An expired entry is dropped unless optimistic serving is on and it
         // is still inside the stale window.
-        if expired && (!self.cfg.optimistic || age > self.cfg.optimistic_max_age) {
+        let (optimistic, optimistic_max_age) = {
+            let cfg = self.cfg.read();
+
+            (cfg.optimistic, cfg.optimistic_max_age)
+        };
+        if expired && (!optimistic || age > optimistic_max_age) {
             let weight = e.weight;
             sh.map.remove(k);
             sh.bytes = sh.bytes.saturating_sub(weight);
@@ -268,11 +298,16 @@ impl Cache {
         let base = crate::msg::min_ttl(msg)?;
 
         let mut ttl = base;
-        if self.cfg.ttl_min > 0 {
-            ttl = ttl.max(self.cfg.ttl_min);
+        let (ttl_min, ttl_max) = {
+            let cfg = self.cfg.read();
+
+            (cfg.ttl_min, cfg.ttl_max)
+        };
+        if ttl_min > 0 {
+            ttl = ttl.max(ttl_min);
         }
-        if self.cfg.ttl_max > 0 {
-            ttl = ttl.min(self.cfg.ttl_max);
+        if ttl_max > 0 {
+            ttl = ttl.min(ttl_max);
         }
 
         if ttl == 0 {
@@ -371,6 +406,52 @@ mod tests {
         )];
 
         m
+    }
+
+    #[test]
+    fn the_cache_can_be_reconfigured_while_running() {
+        // Saving a new cache size used to change nothing until a restart.
+        let c = Cache::new(Config::default());
+        let k = Key::from_request(&req("example.com.")).unwrap();
+        assert!(c.put(k.clone(), &resp("example.com.", 300)));
+        assert_eq!(c.len(), 1);
+
+        // Switching caching off empties it and stops it storing anything.
+        c.set_config(Config {
+            size_bytes: 0,
+            ..Default::default()
+        });
+        assert!(c.is_disabled());
+        assert_eq!(c.len(), 0, "entries must not survive the cache being off");
+        assert!(!c.put(k.clone(), &resp("example.com.", 300)));
+        assert!(c.get(&k).is_none());
+
+        // And switching it back on works without a restart.
+        c.set_config(Config::default());
+        assert!(!c.is_disabled());
+        assert!(c.put(k.clone(), &resp("example.com.", 300)));
+        assert!(c.get(&k).is_some());
+    }
+
+    #[test]
+    fn new_ttl_bounds_apply_without_a_restart() {
+        // The bounds decide how long an entry is held, not what TTL the
+        // answer carries, so check the lifetime the cache would choose.
+        let c = Cache::new(Config::default());
+        let r = resp("example.com.", 300);
+        assert_eq!(c.cache_ttl_for(&r), Some(Duration::from_secs(300)));
+
+        c.set_config(Config {
+            ttl_max: 5,
+            ..Default::default()
+        });
+        assert_eq!(c.cache_ttl_for(&r), Some(Duration::from_secs(5)));
+
+        c.set_config(Config {
+            ttl_min: 600,
+            ..Default::default()
+        });
+        assert_eq!(c.cache_ttl_for(&r), Some(Duration::from_secs(600)));
     }
 
     #[test]

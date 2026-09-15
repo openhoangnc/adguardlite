@@ -99,7 +99,7 @@ pub struct Settings {
     /// How blocked queries are answered.
     pub blocking: BlockingConfig,
     /// Hosts refused before any other processing.
-    pub blocked_hosts: Vec<String>,
+    pub blocked_hosts: Arc<crate::blocked::BlockedHosts>,
     /// Whether `AAAA` queries are answered with nothing.
     pub aaaa_disabled: bool,
     /// Whether `ANY` queries are refused.
@@ -139,11 +139,11 @@ impl Default for Settings {
             safebrowsing_enabled: false,
             parental_enabled: false,
             blocking: BlockingConfig::default(),
-            blocked_hosts: vec![
+            blocked_hosts: crate::blocked::BlockedHosts::shared(&[
                 "version.bind".into(),
                 "id.server".into(),
                 "hostname.bind".into(),
-            ],
+            ]),
             aaaa_disabled: false,
             refuse_any: true,
             cache_ttl_min: 0,
@@ -507,7 +507,7 @@ impl Resolver {
 
         // 3. Access-blocked hosts.  On UDP the request is dropped rather than
         //    answered, so a spoofed source address gains nothing.
-        if is_blocked_host(&settings.blocked_hosts, &host) {
+        if settings.blocked_hosts.blocks(&host, u16::from(qtype)) {
             let action = if proto.is_datagram() {
                 Action::Drop
             } else {
@@ -1049,16 +1049,6 @@ fn reason_for_list(reason: Reason, rules: &[MatchedRule]) -> Reason {
         ETC_HOSTS_LIST_ID => Reason::RewrittenAutoHosts,
         _ => reason,
     }
-}
-
-/// Reports whether `host` is in the access blocklist.
-///
-/// Entries match the host itself and any subdomain, as upstream's rule engine
-/// does for bare domain rules.
-fn is_blocked_host(blocked: &[String], host: &str) -> bool {
-    blocked
-        .iter()
-        .any(|b| agl_core::name::is_subdomain_of(host, &b.to_ascii_lowercase()))
 }
 
 /// Extracts the addresses from a response, for statistics and DNS64.
@@ -1603,12 +1593,33 @@ mod tests {
         assert!(!is_bogus_nxdomain(&other, &m));
     }
 
-    #[test]
-    fn blocked_host_matching_covers_subdomains() {
-        let b = vec!["version.bind".to_string()];
-        assert!(is_blocked_host(&b, "version.bind"));
-        assert!(is_blocked_host(&b, "sub.version.bind"));
-        assert!(!is_blocked_host(&b, "notversion.bind"));
+    #[tokio::test]
+    async fn a_blocked_host_entry_reaches_the_resolver_with_the_query_type() {
+        // The step feeds the question's type to the matcher, because the
+        // entries are rules and a rule may carry `$dnstype`.  Measured on the
+        // Go build: `||typed.example.org^$dnstype=AAAA` refuses AAAA and
+        // answers A.  `crate::blocked` holds the matching rules themselves.
+        let s = Settings {
+            blocked_hosts: crate::blocked::BlockedHosts::shared(&[
+                "||typed.example.org^$dnstype=AAAA".into(),
+            ]),
+            ..Settings::default()
+        };
+        let r = resolver("", Table::default(), s);
+
+        let out = resolve(&r, "typed.example.org.", RecordType::AAAA, Proto::Tcp).await;
+        assert_eq!(
+            out.response().unwrap().metadata.response_code,
+            ResponseCode::Refused,
+            "AAAA is the type the rule names"
+        );
+
+        let out = resolve(&r, "typed.example.org.", RecordType::A, Proto::Tcp).await;
+        assert_ne!(
+            out.response().unwrap().metadata.response_code,
+            ResponseCode::Refused,
+            "A is not"
+        );
     }
 
     #[test]

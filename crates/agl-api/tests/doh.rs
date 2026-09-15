@@ -20,9 +20,9 @@ fn state(insecure: bool) -> Shared {
     config.dns.upstream_dns = vec![];
     config.dns.bootstrap_dns = vec![];
     config.filters = vec![];
-    // A configured user, so `/` serves the interface rather than redirecting
-    // to the setup wizard. DoH itself sits outside `/control` and is not
-    // gated either way; this only decides what the UI fallback returns.
+    // A configured user, so the UI fallback is past the setup wizard. DoH
+    // itself sits outside `/control` and is not gated either way; this only
+    // decides what the UI fallback returns.
     config.users = vec![agl_config::model::WebUser {
         name: "admin".to_string(),
         password: agl_api::auth::hash_password("unused by these tests").expect("hashing"),
@@ -61,6 +61,10 @@ fn state(insecure: bool) -> Shared {
     let paths = agl_config::Paths::new(base.join("work"), base.join("conf/AdGuardHome.yaml"));
     paths.ensure().expect("preparing the working directory");
 
+    // Built before the config moves into the state, and from the same
+    // config, so the tests run against the bounds a real install uses.
+    let login_limiter = agl_api::auth::LoginLimiter::from_config(&config);
+
     Arc::new(AppState {
         paths: paths.clone(),
         config: parking_lot::RwLock::new(config),
@@ -79,6 +83,7 @@ fn state(insecure: bool) -> Shared {
             agl_stats::stats::Config::default(),
         )),
         sessions: agl_api::auth::Sessions::new(),
+        login_limiter,
         started: jiff::Timestamp::now(),
         fetcher: Arc::new(NoFetcher),
         reloader: Arc::new(NoReloader),
@@ -281,8 +286,14 @@ async fn a_malformed_query_is_refused_rather_than_answered() {
 async fn the_web_interface_still_serves_alongside_dns() {
     // Both share the router, so one must not shadow the other.
     let addr = serve(true).await;
-    let (status, body) = request("GET", &format!("http://{addr}/"), None, None).await;
 
+    // These requests carry no session, and a user is configured, so `/` is
+    // the gate's redirect to the login form -- which is the UI fallback
+    // answering rather than a DoH route swallowing the path.
+    let (status, _) = request("GET", &format!("http://{addr}/"), None, None).await;
+    assert_eq!(status, 302);
+
+    let (status, body) = request("GET", &format!("http://{addr}/login.html"), None, None).await;
     assert_eq!(status, 200);
     assert!(!body.is_empty());
 }

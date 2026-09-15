@@ -5,7 +5,7 @@ Work status for the Rust backend, against AdGuard Home **v0.107.79**.
 Legend: **[x]** done and verified · **[~]** partial, see the note · **[ ]** not started
 
 Verification claims below are reproducible with `scripts/verify.sh` and
-`cargo test --workspace` (585 tests).
+`cargo test --workspace` (621 tests).
 
 ---
 
@@ -180,7 +180,14 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 
 ### HTTP API and interface
 - [x] All 81 upstream paths routed
-- [x] Sessions: `agh_session` cookie, HTTP Basic, login rate limiting
+- [x] Sessions: `agh_session` cookie, HTTP Basic
+- [x] Login rate limiting, on the form *and* on the Basic credentials
+      every endpoint accepts: `auth_attempts` failures from an address
+      within a minute start a `block_auth_min` block, answered 429 with
+      `Retry-After`
+- [x] The gate covers the pages as well as `/control`, so a signed-out
+      browser is redirected to `/login.html` rather than handed a
+      dashboard it cannot load
 - [x] Setup wizard reachable before a user exists
 - [x] **Verified**: response shapes match Go for all 25 endpoints the UI loads
 - [x] Web interface embedded, gzip-compressed, served with content negotiation
@@ -499,6 +506,220 @@ gate, a long hostname cost 838 ns against 364 with it.
 it did under Aho-Corasick; the shortcut phase dominates it and neither
 structure fixed that. It is the obvious place for the next person to look.
 
+## Found signing in from a second hostname, and fixed
+
+An instance reachable both at `http://<ip>:3180` and at an HTTPS hostname
+signed in fine on the first and answered the second with the *browser's* own
+Basic sign-in dialog, every time. The hostname was not the cause — a different
+origin is simply a different cookie jar, so it was the only one ever seen
+signed out. Two defects met there.
+
+- **The gate solicited Basic credentials.** `require_auth` answered 401 with
+  `WWW-Authenticate: Basic realm="AdGuard Home"`. Upstream's
+  `authMiddlewareDefault` writes a bare 401 and no such header, and the reason
+  is the browser: presented with it, Chrome answers the interface's own
+  background `fetch` with a native dialog of its own, which becomes the only
+  prompt the user ever sees. `/login.html` never renders, and cancelling the
+  dialog leaves nothing. Basic credentials are still *accepted* — that is what
+  the scripted API users send — they are no longer *asked for*.
+
+- **The web interface was not behind the gate at all.** The middleware was
+  layered on the `/control` router only, so `GET /` served the dashboard shell
+  to anyone. That is survivable in upstream's design and not in this one:
+  upstream wraps its whole mux and redirects `/` and `/index.html` to
+  `login.html` for a signed-out visitor, which is *the* route to the login
+  form. The shipped interface sends itself there only when an API call answers
+  **403** (`client/src/api/Api.ts`), and the gate answers 401 — so a dashboard
+  handed to a signed-out browser is a dashboard that can never load. `serve_ui`
+  now applies upstream's `handlePublicAccess`: `/assets/*`, `/login.*` and
+  `/forgot_password.*` are served, `/` and `/index.html` redirect to the form,
+  anything else is 401, and a visitor who *is* signed in is bounced off
+  `/login.html` back to `/`.
+
+**Verified** against a running build: signed out, `/` is `302 login.html`,
+`/control/status` is a 401 carrying no `www-authenticate`, and the form and the
+`login.<hash>.js`, `login.<hash>.css` and `/assets/*` it is built from all
+serve; signed in, `/` is 200 and `/login.html` is `302 /`; Basic credentials
+still open `/control/status`. A browser pointed at the root renders AdGuard's
+login form with no native dialog and no console errors. Three tests in
+`agl-api/tests/gate.rs` cover it, including the absence of the header.
+
+## Found reading the code after that, and fixed
+
+Two defects in the sign-in path, neither of which any test covered.
+
+- **The login throttle was dead code.** `LoginLimiter` was written, exported
+  and unit-tested, and nothing ever constructed it — so the admin password
+  could be guessed at line rate, over the form or over the Basic credentials
+  every other endpoint accepts. It lives on `AppState` now and both paths
+  consult it, which matters: throttling only `/control/login` would have left
+  an attacker free to guess against `GET /control/status` instead, where a 200
+  says the same thing a 302 does. The cookie path is deliberately *not*
+  throttled, as upstream's is not — a session token is sixteen random bytes,
+  so nobody is guessing one, and throttling it would let a stale cookie lock
+  an address out.
+
+  The limiter's arithmetic is upstream's `authRateLimiter`, including the part
+  that reads like a bug: until the count is spent every failure keeps the
+  *first* one's one-minute deadline, so a trickle of guesses lapses instead of
+  accumulating, and only the failure that reaches the threshold installs the
+  full block. It keys on the connection's own peer address with the port
+  dropped — never a forwarded-for header, which anyone could set to spend
+  someone else's attempts or dodge their own block
+  ([upstream #2799](https://github.com/AdguardTeam/AdGuardHome/issues/2799)) —
+  and `auth_attempts: 0` or `block_auth_min: 0` switches it off with a warning
+  at startup, as upstream's `emptyRateLimiter` does.
+
+- **A failed login answered 401 where upstream answers 403.** Upstream's
+  `handleLogin` hands `newCookie`'s error to `writeErrorWithIP` with
+  `StatusForbidden`. Nothing in the interface reads the difference — the login
+  page does not redirect itself from either — but it is a status on the
+  drop-in surface, and it was wrong.
+
+**Verified** against a running build: five wrong passwords answer 403 and the
+sixth answers `429` with `Retry-After: 899` (900 seconds truncated, as Go's
+`int(left.Seconds())` truncates); the block then refuses the *correct*
+password and correct Basic credentials from that address; five wrong Basic
+credentials block the login form for the same address; a request carrying no
+credentials is not an attempt, so `/`, `/login.html` and an unauthenticated
+`/control/status` behave normally throughout; and `auth_attempts: 0` logs
+`login rate limiting is disabled` and never blocks. Four tests in
+`agl-api/tests/gate.rs` and five in `agl-api/src/auth.rs` cover it; the two
+throttle tests were confirmed to fail against an unlimited build, and the
+clearing test against a build that never calls `record_success`.
+
+## Found auditing the DNS settings page, and fixed
+
+A report that **Access settings → Allowed clients** did nothing turned out to
+be two defects, and looking for others on the same page turned up a third that
+was larger than either.
+
+- **The access lists understood only bare addresses.** `allowed_clients` and
+  `disallowed_clients` were parsed with `filter_map(|s| s.parse::<IpAddr>())`,
+  so every CIDR and every ClientID was silently dropped — and the reported
+  allowlist was `mi12t`, `hoangnc-chrome`, `172.17.0.0/16`, `192.168.99.2/31`,
+  which is *entirely* CIDRs and ClientIDs. It parsed to nothing, and an empty
+  allowlist admits everybody: the operator had asked for a closed server and
+  had an open one. The interface says the field takes "CIDRs, IP addresses, or
+  ClientIDs" and upstream's `processAccessClients` accepts all three.
+
+  `Access` now keeps the three apart, as upstream's `accessManager` does,
+  because the two modes combine them differently and the asymmetry is
+  load-bearing: in **allowlist** mode a client is refused only when *both* the
+  address check and the ClientID check refuse it, so a listed ClientID gets in
+  from an unlisted address and a listed address gets in over plain UDP with no
+  ClientID at all; in **blocklist** mode either one refusing is enough. That is
+  `IsBlockedClient`, and the check now reaches `Server::handle_as`, where the
+  ClientID a DoH path segment or a DoT server name carries already sat unused.
+
+- **`/control/access/set` stored what it could not parse.** Upstream refuses an
+  entry that is not an address, a network or a ClientID, and refuses duplicates
+  within a list and any entry appearing in both lists. This accepted anything,
+  wrote it to the config file, and dropped it when the lists were built — the
+  silent no-op the page above warns about. It also refused a request that set
+  *both* lists, which upstream allows (the disallowed list is ignored while the
+  allowed one is non-empty, exactly as the interface tells the user), and it
+  mutated the in-memory config *before* validating, so a rejected request left
+  the running server holding settings that were never saved.
+
+- **Most of the page needed a restart.** `Reloader::reload` covered the
+  resolver settings, rewrites, clients, safe search and the certificate, and
+  nothing else — so a saved change to the upstream servers, the upstream mode,
+  the fallback or bootstrap servers, the upstream timeout, the private reverse
+  resolvers, the rate limit, either rate-limiting subnet prefix, the
+  rate-limiting allowlist, the cache size or optimistic caching was written to
+  the file and ignored until the process restarted. Upstream applies all of it
+  live, through `dnsforward.Server.Reconfigure`. Measured before the fix:
+  pointing every upstream at `127.0.0.1:1` and clearing the cache still
+  resolved through the old resolver, and `ratelimit: 0` still answered only 20
+  of a 100-query burst.
+
+  `Limiter` and `Cache` hold their configuration behind a lock now and take a
+  `set_config`; the pools are rebuilt through `SharedPool::store`. Rebuilding a
+  pool resolves each upstream's host through the bootstrap resolvers, so it
+  cannot run inside the synchronous `reload` — it is spawned, and queries keep
+  going to the old upstreams until the new ones are ready rather than failing
+  in between. Two guards come with that: a generation counter, so two saves in
+  quick succession cannot leave the slower rebuild's pool installed, and a
+  fingerprint of everything the pools are built from, so toggling protection
+  does not reconnect every upstream. `upstream_dns_file` is fingerprinted by
+  its *contents*, because it exists for a script to change the upstreams
+  without touching `AdGuardHome.yaml`.
+
+**Verified** against a running build, for each: an allowlist of the reported
+shape drops a query from an unlisted address on UDP and answers `REFUSED` on
+TCP, while an address inside a listed CIDR resolves; with the allowlist holding
+one ClientID and no address at all, `/dns-query/mi12t` answers and both
+`/dns-query` and `/dns-query/someone-else` are refused; a bad entry, a
+duplicate and an intersecting entry each answer 400 with upstream's message,
+and both lists together answer 200. Live, with no restart: the upstreams swap
+to a dead address (SERVFAIL) and back (NOERROR); the rate limit answers 20, 100
+and 5 of a 100-query burst at limits of 20, off and 5; switching the cache off
+stops a repeated name being served from cache, and switching it back on
+resumes; and a protection toggle plus a filter-rule save log no upstream
+reload at all, where an upstream change logs one.
+
+**"Disallowed domains" was a list of rules pretending to be a list of names.**
+The same card's other field matched an entry against the host and its
+subdomains, and ignored the wildcard (`*.example.org`) and rule
+(`||example.org^`) forms the interface documents. Upstream's `newAccessCtx`
+lowercases every entry, hands the whole list to `urlfilter.NewDNSEngine`, and
+asks it whether anything matched — so all three forms are just rule syntaxes,
+and the query *type* takes part in the match.
+
+The fix is to do the same: `agl_dns::blocked::BlockedHosts` compiles the list
+with `agl_filter`'s engine, the one the filter lists already use, so
+`$dnstype`, hosts-file syntax and the rest come along rather than being
+special-cased. One conversion is needed first, and it is the whole reason the
+old behaviour looked defensible: upstream's parser tries `rules.NewHostRule`
+before anything else, so a line holding a bare host name becomes a *host* rule
+and is matched by **equality**. Entries that are bare names are emitted as
+`0.0.0.0 <name>` for that reason; everything else is passed through as written.
+
+What a Go build actually does, measured rather than inferred — and the old
+matcher was wrong in both directions:
+
+| entry | matches | does **not** match |
+|---|---|---|
+| `exact.example.org` | `exact.example.org`, any query type | `sub.exact.example.org`, `notexact.example.org`, `exact.example.org.evil.net` |
+| `*.wild.example.org` | `a.wild.example.org`, `b.a.wild.example.org`, `a.wild.example.org.evil.net` | `wild.example.org`, `notwild.example.org` |
+| `||rule.example.org^` | `rule.example.org`, `x.sub.rule.example.org` | `arule.example.org`, `rule.example.org.evil.net` |
+
+Three findings there are worth keeping, because none is guessable:
+
+- **A plain entry does not cover subdomains.** The old comment said it did,
+  "as upstream's rule engine does for bare domain rules". It does not, and the
+  shipped defaults are plain names, so `sub.version.bind` was being refused
+  where the Go build answers it.
+- **A wildcard is an unanchored pattern, not a suffix.** `*.wild.example.org`
+  is the substring `.wild.example.org` appearing anywhere, which is why it
+  covers `a.wild.example.org.evil.net` and does *not* cover
+  `wild.example.org` itself.
+- **An `@@` exception in this field blocks rather than permits.**
+  `isBlockedHost` throws the match away and keeps only the "something matched"
+  flag (`_, ok = ...MatchRequest(...)`), so `@@||allow.example.org^` listed
+  here refuses `allow.example.org`. Confirmed on the Go build.
+
+Plus two smaller ones: an underscore makes an entry a *pattern* rather than a
+name, because upstream's host parser rejects it — so `_test.example.org`
+listed plainly also refuses `sub._test.example.org` — and
+`||typed.example.org^$dnstype=AAAA` refuses AAAA while answering A and TXT,
+which is why the matcher takes a query type at all.
+
+**Verified** by building `upstream/` v0.107.79 with Go 1.27 and running it
+beside this one on high ports with an identical config, then comparing the
+verdict for **70 cases** — every row of the table above plus the underscore,
+hosts-file, exception and `$dnstype` forms, each over A and AAAA, plus TXT,
+HTTPS and NS for a plain entry, and uppercase questions throughout. A blocked
+host answers REFUSED on a connected transport, so every query went over TCP
+where the verdict is visible. **0 mismatches.** Re-running the same comparison
+before the fix showed 12 on the first sixteen cases alone. The list also
+applies without a restart: a `||live.example.org^` added through
+`/control/access/set` refuses the name and its subdomains on the next query,
+and a name dropped from the list is answered again. Twelve tests in
+`agl-dns/src/blocked.rs` carry the measured cases, each noted with what the Go
+build did.
+
 ## Deliberate deviations
 
 **A first launch as a non-root user is allowed.** The Go build refuses one —
@@ -542,6 +763,7 @@ Not bugs; recorded so nobody "fixes" them.
   not resolved; the container this ships in has a plain passwd file.
 - **A changed listener *port* still needs a restart.** The certificate is
   live-reloadable; which ports are bound is decided when the listeners start.
+  Everything else on the DNS settings page now applies without one.
 
 ---
 
