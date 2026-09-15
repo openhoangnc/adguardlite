@@ -195,7 +195,17 @@ impl Pool {
     }
 
     /// Resolves a query against the appropriate upstreams.
-    pub async fn exchange(&self, req: &Message, host: &str) -> Result<Message, Error> {
+    ///
+    /// Reports the upstream that actually answered alongside the answer.  The
+    /// caller cannot work it out for itself: every mode but a single-member
+    /// `load_balance` may answer from any of them, and it is this upstream —
+    /// not the first one configured — that the query log and the per-upstream
+    /// statistics are meant to name, as `proxy.exchangeUpstreams` does.
+    pub async fn exchange(
+        &self,
+        req: &Message,
+        host: &str,
+    ) -> Result<(Message, Arc<Member>), Error> {
         let members = self.select(host);
         if members.is_empty() {
             return Err(Error::Unsupported("no upstreams configured".into()));
@@ -211,7 +221,7 @@ impl Pool {
             Ok(resp) => Ok(resp),
             Err(e) if !self.fallbacks.is_empty() => {
                 match self.exchange_parallel(req, &self.fallbacks).await {
-                    Ok(resp) => Ok(resp),
+                    Ok(won) => Ok(won),
                     Err(_) => Err(e),
                 }
             }
@@ -224,7 +234,7 @@ impl Pool {
         &self,
         req: &Message,
         members: &[Arc<Member>],
-    ) -> Result<Message, Error> {
+    ) -> Result<(Message, Arc<Member>), Error> {
         let mut order: Vec<&Arc<Member>> = members.iter().collect();
         order.sort_by_key(|m| m.score());
 
@@ -235,7 +245,7 @@ impl Pool {
                 Ok(resp) if !is_failure(&resp) => {
                     m.record_success(started.elapsed());
 
-                    return Ok(resp);
+                    return Ok((resp, Arc::clone(m)));
                 }
                 Ok(resp) => {
                     // A SERVFAIL still proves the upstream is reachable, but
@@ -261,7 +271,7 @@ impl Pool {
         &self,
         req: &Message,
         members: &[Arc<Member>],
-    ) -> Result<Message, Error> {
+    ) -> Result<(Message, Arc<Member>), Error> {
         let mut set = tokio::task::JoinSet::new();
         for m in members {
             let m = m.clone();
@@ -275,19 +285,19 @@ impl Pool {
                     _ => m.record_failure(),
                 }
 
-                r
+                r.map(|resp| (resp, m))
             });
         }
 
         let mut last: Option<Error> = None;
         while let Some(joined) = set.join_next().await {
             match joined {
-                Ok(Ok(resp)) if !is_failure(&resp) => {
+                Ok(Ok((resp, m))) if !is_failure(&resp) => {
                     set.abort_all();
 
-                    return Ok(resp);
+                    return Ok((resp, m));
                 }
-                Ok(Ok(resp)) => {
+                Ok(Ok((resp, _))) => {
                     last = Some(Error::Http(format!(
                         "upstream returned {}",
                         resp.metadata.response_code
@@ -307,7 +317,7 @@ impl Pool {
         &self,
         req: &Message,
         members: &[Arc<Member>],
-    ) -> Result<Message, Error> {
+    ) -> Result<(Message, Arc<Member>), Error> {
         let mut set = tokio::task::JoinSet::new();
         for m in members {
             let m = m.clone();
@@ -321,16 +331,16 @@ impl Pool {
                     _ => m.record_failure(),
                 }
 
-                r
+                r.map(|resp| (resp, m))
             });
         }
 
-        let mut responses: Vec<Message> = Vec::new();
+        let mut responses: Vec<(Message, Arc<Member>)> = Vec::new();
         let mut last: Option<Error> = None;
         while let Some(joined) = set.join_next().await {
             match joined {
-                Ok(Ok(resp)) if !is_failure(&resp) => responses.push(resp),
-                Ok(Ok(resp)) => {
+                Ok(Ok(won)) if !is_failure(&won.0) => responses.push(won),
+                Ok(Ok((resp, _))) => {
                     last = Some(Error::Http(format!(
                         "upstream returned {}",
                         resp.metadata.response_code
@@ -341,13 +351,13 @@ impl Pool {
             }
         }
 
-        let Some(first) = responses.first().cloned() else {
+        let Some((first, won)) = responses.first().cloned() else {
             return Err(last.unwrap_or_else(|| Error::Unsupported("no upstreams tried".into())));
         };
 
         // Gather every address the upstreams offered.
         let mut addrs: Vec<IpAddr> = Vec::new();
-        for r in &responses {
+        for (r, _) in &responses {
             for rec in &r.answers {
                 match &rec.data {
                     RData::A(a) => addrs.push(IpAddr::V4(a.0)),
@@ -360,16 +370,16 @@ impl Pool {
         addrs.dedup();
 
         if addrs.len() < 2 {
-            return Ok(first);
+            return Ok((first, won));
         }
 
         match fastest_of(&addrs, self.fastest_timeout).await {
             Some(best) => {
                 let ttl = crate::msg::min_ttl(&first).unwrap_or(300);
 
-                Ok(crate::msg::with_addrs(req, &[best], ttl))
+                Ok((crate::msg::with_addrs(req, &[best], ttl), won))
             }
-            None => Ok(first),
+            None => Ok((first, won)),
         }
     }
 }

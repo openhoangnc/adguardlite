@@ -532,12 +532,11 @@ impl Connections {
         i: usize,
         req: &Message,
         host: &str,
-        path: &str,
+        uri: &str,
         timeout: Duration,
     ) -> Result<Message, Error> {
         let a = &self.per[i];
         let wire = Bytes::from(req.to_bytes().map_err(|e| Error::Decode(e.to_string()))?);
-        let uri = format!("https://{host}{path}");
         let deadline = Instant::now() + timeout;
 
         // Two passes at most.  The first may run on a connection that was
@@ -554,7 +553,7 @@ impl Connections {
 
             match self.http_conn(a, host, retried, left).await? {
                 Http::Two(stamp, mut sender) => {
-                    match h2_send(&mut sender, &uri, wire.clone(), left).await {
+                    match h2_send(&mut sender, uri, wire.clone(), left).await {
                         Sent::Body(body) => return decode(req, &body),
                         Sent::Unsent(e) if !retried => {
                             a.https.slot.h2.forget(stamp);
@@ -580,7 +579,7 @@ impl Connections {
                 Http::One(mut idle) => {
                     let budget = idle.budget(left);
                     let started = Instant::now();
-                    match h1_send(&mut idle.conn, &uri, wire.clone(), budget).await {
+                    match h1_send(&mut idle.conn, uri, wire.clone(), budget).await {
                         Ok(body) => {
                             let out = decode(req, &body);
                             if out.is_ok() {
@@ -658,12 +657,11 @@ impl Connections {
         i: usize,
         req: &Message,
         host: &str,
-        path: &str,
+        uri: &str,
         timeout: Duration,
     ) -> Result<Message, Error> {
         let a = &self.per[i];
         let wire = Bytes::from(req.to_bytes().map_err(|e| Error::Decode(e.to_string()))?);
-        let uri = format!("https://{host}{path}");
         let deadline = Instant::now() + timeout;
 
         let mut retried = false;
@@ -690,7 +688,7 @@ impl Connections {
             )
             .await?;
 
-            match h3_send(&h3, &uri, wire.clone(), left).await {
+            match h3_send(&h3, uri, wire.clone(), left).await {
                 Ok(body) => return decode(req, &body),
                 Err(e) => {
                     // A connection that has been retired is worth one more

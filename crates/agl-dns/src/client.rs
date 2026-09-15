@@ -222,6 +222,19 @@ async fn bootstrap_lookup(
         .collect())
 }
 
+/// The absolute URI a DNS-over-HTTPS query is posted to.
+///
+/// The port belongs in the authority whenever it is not the default, or a
+/// server hosting several names on one address is asked for the wrong one.
+/// `Upstream::authority` already brackets an IPv6 literal.
+fn doh_uri(up: &Upstream) -> String {
+    if up.port == 443 {
+        format!("https://{}{}", up.host, up.path)
+    } else {
+        format!("https://{}{}", up.authority(), up.path)
+    }
+}
+
 /// Rejects a reply that does not answer the question that was asked.
 ///
 /// dnsproxy checks this on every exchange — `upstream.validateResponse` —
@@ -400,6 +413,13 @@ pub struct Client {
     /// Indexed by position in `addrs`, which is resolved once and never
     /// reordered, so the two stay aligned for the life of the client.
     conns: Connections,
+    /// The absolute URI a DNS-over-HTTPS query is posted to.
+    ///
+    /// Built once, because it never varies for a client, and because the
+    /// authority has to carry the port whenever it is not the default: an
+    /// upstream reached on a custom port was otherwise asked for the wrong
+    /// virtual host.
+    doh_uri: String,
     /// Whether DNS-over-HTTPS should be tried over HTTP/3 first.
     prefer_http3: bool,
     /// The index into `addrs` that answered last.
@@ -427,6 +447,7 @@ impl Client {
         let conns = Connections::new(&addrs, &tls);
 
         Ok(Self {
+            doh_uri: doh_uri(&upstream),
             upstream,
             addrs,
             conns,
@@ -452,6 +473,7 @@ impl Client {
     /// but the test never lets it reach the network.
     pub fn offline(upstream: Upstream) -> Self {
         Self {
+            doh_uri: doh_uri(&upstream),
             upstream,
             addrs: Vec::new(),
             conns: Connections::new(&[], &tls_config()),
@@ -508,7 +530,7 @@ impl Client {
             let addr = self.addrs[i];
 
             let host = &self.upstream.host;
-            let path = &self.upstream.path;
+            let uri = self.doh_uri.as_str();
 
             let r = match self.upstream.transport {
                 Transport::Udp => match udp_exchange(req, addr, budget).await {
@@ -518,7 +540,7 @@ impl Client {
                 Transport::Tcp => self.conns.tcp(i, req, budget).await,
                 Transport::Tls => self.conns.tls(i, req, host, budget).await,
                 Transport::Https if self.prefer_http3 => {
-                    match self.conns.https3(i, req, host, path, budget).await {
+                    match self.conns.https3(i, req, host, uri, budget).await {
                         Ok(resp) => Ok(resp),
                         Err(e) => {
                             tracing::debug!(
@@ -527,11 +549,11 @@ impl Client {
                                 "http/3 failed; falling back to http/2"
                             );
 
-                            self.conns.https(i, req, host, path, budget).await
+                            self.conns.https(i, req, host, uri, budget).await
                         }
                     }
                 }
-                Transport::Https => self.conns.https(i, req, host, path, budget).await,
+                Transport::Https => self.conns.https(i, req, host, uri, budget).await,
                 Transport::Quic => self.conns.quic(i, req, host, budget).await,
                 Transport::Stamp => unreachable!("rejected above"),
             };
@@ -731,8 +753,10 @@ mod tests {
         // refused: the shape a genuinely dead upstream address has.
         let dead: SocketAddr = "192.0.2.1:53".parse().unwrap();
         let addrs = vec![dead, live];
+        let up = addr::parse("192.0.2.1").unwrap().upstream.unwrap();
         let c = Client {
-            upstream: addr::parse("192.0.2.1").unwrap().upstream.unwrap(),
+            doh_uri: doh_uri(&up),
+            upstream: up,
             conns: Connections::new(&addrs, &tls_config()),
             addrs,
             prefer_http3: false,
@@ -826,6 +850,30 @@ mod tests {
         assert!(
             got.is_err(),
             "a reply for a different question must be rejected, got {got:?}"
+        );
+    }
+
+    /// A DoH upstream on a port other than 443.
+    ///
+    /// The port has to reach the authority, or a server hosting several names
+    /// on one address answers for the wrong one.
+    #[test]
+    fn a_custom_port_reaches_the_doh_authority() {
+        let up = |s: &str| addr::parse(s).unwrap().upstream.unwrap();
+
+        assert_eq!(
+            doh_uri(&up("https://dns.example/dns-query")),
+            "https://dns.example/dns-query",
+            "the default port stays out of the authority"
+        );
+        assert_eq!(
+            doh_uri(&up("https://dns.example:8443/dns-query")),
+            "https://dns.example:8443/dns-query"
+        );
+        assert_eq!(
+            doh_uri(&up("https://[2001:db8::1]:8443/dns-query")),
+            "https://[2001:db8::1]:8443/dns-query",
+            "an IPv6 literal stays bracketed"
         );
     }
 

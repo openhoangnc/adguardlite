@@ -689,17 +689,14 @@ impl Resolver {
                     let loaded = pool.load();
 
                     return finish(match loaded.exchange(req, &host).await {
-                        Ok(mut resp) => {
+                        Ok((mut resp, won)) => {
                             resp.metadata.id = req.metadata.id;
 
                             Outcome {
                                 action: Action::Respond(Box::new(resp)),
                                 reason,
                                 rules,
-                                upstream: loaded
-                                    .select(&host)
-                                    .first()
-                                    .map(|m| m.client.upstream.label()),
+                                upstream: Some(won.client.upstream.label()),
                                 ..base()
                             }
                         }
@@ -851,8 +848,11 @@ impl Resolver {
         settings: &Settings,
     ) -> Option<(Message, Option<String>)> {
         let pool = self.pool.load();
-        let mut resp = pool.exchange(out, host).await.ok()?;
-        let upstream = pool.select(host).first().map(|m| m.client.upstream.label());
+        // The upstream that answered, not the first one configured: under
+        // every mode but a one-member `load_balance` they differ, and this is
+        // the one the query log and the per-upstream statistics name.
+        let (mut resp, won) = pool.exchange(out, host).await.ok()?;
+        let upstream = Some(won.client.upstream.label());
 
         // A "bogus" address is what some ISPs hand back instead of NXDOMAIN
         // for a name that does not exist; the answer is worse than none.
@@ -869,7 +869,7 @@ impl Resolver {
             }
             a_req.metadata.id = rand::random::<u16>();
 
-            if let Ok(a_resp) = pool.exchange(&a_req, host).await {
+            if let Ok((a_resp, _)) = pool.exchange(&a_req, host).await {
                 dns64::synthesize(&settings.dns64, out, &mut resp, &a_resp);
             }
         }
