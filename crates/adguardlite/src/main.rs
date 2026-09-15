@@ -246,6 +246,7 @@ async fn run(args: Args, paths: Paths, mut config: agl_config::Config) -> anyhow
             resolver: application.resolver.clone(),
             server: application.server.clone(),
             certificate: certificate.clone(),
+            upstreams: parking_lot::Mutex::new(None),
         }),
         dns_addresses: parking_lot::RwLock::new(dns_addrs),
         version: Arc::new(wiring::ReleaseChecker {

@@ -275,6 +275,57 @@ impl agl_api::state::VersionChecker for ReleaseChecker {
     }
 }
 
+/// Everything a reload of the upstream pools depends on.
+///
+/// Rebuilding the pools resolves every upstream hostname through the
+/// bootstrap resolvers and throws away whatever connections the running pool
+/// had warm, so it is worth doing when one of these actually changed rather
+/// than on every save of an unrelated setting.
+#[derive(Clone, PartialEq, Eq, Debug)]
+struct Upstreams {
+    /// The upstream specifications.
+    dns: Vec<String>,
+    /// The file more of them are read from.
+    file: String,
+    /// The resolvers upstream hostnames are looked up through.
+    bootstrap: Vec<String>,
+    /// The resolvers tried when the selected ones all fail.
+    fallback: Vec<String>,
+    /// How upstreams are chosen.
+    mode: agl_config::model::UpstreamMode,
+    /// How long an upstream is given to answer.
+    timeout: std::time::Duration,
+    /// How long addresses are probed for in `fastest_addr` mode.
+    fastest: std::time::Duration,
+    /// Whether bootstrap resolution prefers IPv6.
+    prefer_ipv6: bool,
+    /// Whether DoH is tried over HTTP/3 first.
+    http3: bool,
+    /// Whether private reverse lookups go to local resolvers.
+    private: bool,
+    /// The resolvers those lookups go to.
+    private_upstreams: Vec<String>,
+}
+
+impl Upstreams {
+    /// Takes the fingerprint of a configuration.
+    fn of(c: &Config) -> Self {
+        Self {
+            dns: c.dns.upstream_dns.clone(),
+            file: c.dns.upstream_dns_file.clone(),
+            bootstrap: c.dns.bootstrap_dns.clone(),
+            fallback: c.dns.fallback_dns.clone(),
+            mode: c.dns.upstream_mode,
+            timeout: c.dns.upstream_timeout.to_std(),
+            fastest: c.dns.fastest_timeout.to_std(),
+            prefer_ipv6: c.dns.bootstrap_prefer_ipv6,
+            http3: c.dns.use_http3_upstreams,
+            private: c.dns.use_private_ptr_resolvers,
+            private_upstreams: c.dns.local_ptr_upstreams.clone(),
+        }
+    }
+}
+
 /// Pushes configuration changes into the running server.
 pub struct LiveReloader {
     /// The resolver to reconfigure.
@@ -283,7 +334,12 @@ pub struct LiveReloader {
     pub server: Arc<agl_dns::server::Server>,
     /// The certificate the encrypted listeners serve.
     pub certificate: Arc<agl_dns::tls::Reloadable>,
+    /// What the running pools were built from.
+    pub upstreams: parking_lot::Mutex<Option<UpstreamPrint>>,
 }
+
+/// An opaque record of the upstream settings a pool was built from.
+pub struct UpstreamPrint(Upstreams);
 
 impl Reloader for LiveReloader {
     fn reload(&self, cfg: &Config) {
@@ -309,6 +365,7 @@ impl Reloader for LiveReloader {
                 hosts: cfg.clients.runtime_sources.hosts,
             });
         self.server.set_max_concurrent(cfg.dns.max_goroutines);
+        self.reload_upstreams(cfg);
         self.reload_certificate(cfg);
         *self.server.access.write() = agl_dns::server::Access {
             allowed: cfg
@@ -333,6 +390,48 @@ impl Reloader for LiveReloader {
 }
 
 impl LiveReloader {
+    /// Rebuilds the upstream pools when the settings behind them changed.
+    ///
+    /// Without this the pools were built once at startup and never again, so
+    /// changing an upstream through the web interface wrote the file and left
+    /// the running server asking the old resolvers until it was restarted.
+    /// Upstream discards and rebuilds its own upstream configuration on every
+    /// reconfigure, connections and all.
+    ///
+    /// The work is spawned because resolving the new upstreams' hostnames
+    /// goes to the network, and the caller is an HTTP handler that should not
+    /// wait for it.  Until it finishes, queries keep using the old pool —
+    /// which is the right answer, since the alternative is no pool at all.
+    fn reload_upstreams(&self, cfg: &Config) {
+        let want = Upstreams::of(cfg);
+
+        // A file is re-read rather than fingerprinted: its contents can change
+        // without the configuration changing at all, and upstream documents
+        // it as read afresh on each reload.
+        let rebuild = !cfg.dns.upstream_dns_file.is_empty() || {
+            let held = self.upstreams.lock();
+            held.as_ref().is_none_or(|p| p.0 != want)
+        };
+        if !rebuild {
+            return;
+        }
+        *self.upstreams.lock() = Some(UpstreamPrint(want));
+
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            tracing::warn!("upstreams changed but no runtime is running to rebuild them");
+
+            return;
+        };
+
+        let resolver = self.resolver.clone();
+        let cfg = cfg.clone();
+        handle.spawn(async move {
+            resolver.pool.store(crate::app::build_pool(&cfg).await);
+            resolver.set_private_pool(crate::app::build_private_pool(&cfg).await);
+            tracing::info!("upstreams reloaded");
+        });
+    }
+
     /// Installs the configured certificate into the running listeners.
     ///
     /// Only the certificate is live-reloadable: which ports are bound is
@@ -360,6 +459,69 @@ impl LiveReloader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_changed_upstream_is_noticed_and_an_unrelated_change_is_not() {
+        let base = Config::default();
+        let print = Upstreams::of(&base);
+
+        // Something the pools are not built from must not rebuild them:
+        // resolving every upstream again costs a bootstrap round trip and
+        // throws away whatever connections were warm.
+        let mut other = base.clone();
+        other.dns.max_goroutines = 42;
+        other.filtering.protection_enabled = !base.filtering.protection_enabled;
+        assert_eq!(print, Upstreams::of(&other));
+
+        for changed in [
+            {
+                let mut c = base.clone();
+                c.dns.upstream_dns = vec!["1.1.1.1".into()];
+                c
+            },
+            {
+                let mut c = base.clone();
+                c.dns.bootstrap_dns = vec!["9.9.9.9".into()];
+                c
+            },
+            {
+                let mut c = base.clone();
+                c.dns.fallback_dns = vec!["8.8.8.8".into()];
+                c
+            },
+            {
+                let mut c = base.clone();
+                c.dns.upstream_mode = agl_config::model::UpstreamMode::Parallel;
+                c
+            },
+            {
+                let mut c = base.clone();
+                c.dns.upstream_timeout = agl_core::duration::GoDuration::from_secs(3);
+                c
+            },
+            {
+                let mut c = base.clone();
+                c.dns.use_http3_upstreams = !base.dns.use_http3_upstreams;
+                c
+            },
+            {
+                let mut c = base.clone();
+                c.dns.bootstrap_prefer_ipv6 = !base.dns.bootstrap_prefer_ipv6;
+                c
+            },
+            {
+                let mut c = base.clone();
+                c.dns.local_ptr_upstreams = vec!["192.168.1.1".into()];
+                c
+            },
+        ] {
+            assert_ne!(
+                print,
+                Upstreams::of(&changed),
+                "a changed upstream setting must rebuild the pools"
+            );
+        }
+    }
 
     #[test]
     fn anonymisation_masks_the_host_part() {
