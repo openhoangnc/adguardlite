@@ -857,6 +857,89 @@ mod tests {
         assert_eq!(resp.answers.len(), 1);
     }
 
+    /// A live upstream sitting behind a blackholed one.
+    ///
+    /// `Client::exchange` walks `addrs` in order, and every attempt used to
+    /// get the whole budget, so one unroutable address cost the full
+    /// `upstream_timeout` — ten seconds by default — on every single query.
+    #[tokio::test]
+    async fn a_dead_first_address_does_not_cost_the_full_timeout() {
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let live = sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            loop {
+                let Ok((n, peer)) = sock.recv_from(&mut buf).await else {
+                    return;
+                };
+                let Ok(req) = Message::from_bytes(&buf[..n]) else {
+                    continue;
+                };
+                let resp = crate::msg::with_addrs(&req, &["1.2.3.4".parse().unwrap()], 60);
+                let _ = sock.send_to(&resp.to_bytes().unwrap(), peer).await;
+            }
+        });
+
+        // TEST-NET-1 is routed nowhere, so it times out rather than being
+        // refused: the shape a genuinely dead upstream address has.
+        let dead: SocketAddr = "192.0.2.1:53".parse().unwrap();
+        let c = Client {
+            upstream: addr::parse("192.0.2.1").unwrap().upstream.unwrap(),
+            addrs: vec![dead, live],
+            tls: tls_config(),
+            prefer_http3: false,
+        };
+
+        let started = std::time::Instant::now();
+        let got = c.exchange(&query("example.com."), Duration::from_secs(10)).await;
+        let took = started.elapsed();
+
+        assert!(got.is_ok(), "the live address should have answered: {got:?}");
+        assert!(
+            took < Duration::from_secs(3),
+            "a dead first address cost {took:?} of a ten-second budget"
+        );
+    }
+
+    /// An upstream answering a question that was never asked.
+    ///
+    /// dnsproxy checks the question section on every reply
+    /// (`upstream.validateResponse`); the stream path here checked nothing, so
+    /// the answer was returned to the caller and cached under the *requested*
+    /// name.
+    #[tokio::test]
+    async fn a_stream_response_for_another_question_is_rejected() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut lenbuf = [0u8; 2];
+            s.read_exact(&mut lenbuf).await.unwrap();
+            let n = usize::from(u16::from_be_bytes(lenbuf));
+            let mut buf = vec![0u8; n];
+            s.read_exact(&mut buf).await.unwrap();
+            let req = Message::from_bytes(&buf).unwrap();
+
+            let mut resp = crate::msg::with_addrs(
+                &query("attacker.example."),
+                &["6.6.6.6".parse().unwrap()],
+                60,
+            );
+            resp.metadata.id = req.metadata.id;
+
+            let wire = resp.to_bytes().unwrap();
+            s.write_all(&(wire.len() as u16).to_be_bytes()).await.unwrap();
+            s.write_all(&wire).await.unwrap();
+            s.flush().await.unwrap();
+        });
+
+        let got = tcp_exchange(&query("example.com."), addr, Duration::from_secs(2)).await;
+        assert!(
+            got.is_err(),
+            "a reply for a different question must be rejected, got {got:?}"
+        );
+    }
+
     #[test]
     fn failure_classification() {
         let mut m = Message::query();
