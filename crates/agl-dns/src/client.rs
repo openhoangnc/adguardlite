@@ -252,7 +252,7 @@ pub(crate) fn check_reply(req: &Message, resp: &Message) -> Result<(), Error> {
         )));
     }
 
-    if got.name() != asked.name() {
+    if !same_name(got.name(), asked.name()) {
         return Err(Error::Decode(format!(
             "reply answers {}, not {}",
             got.name(),
@@ -261,6 +261,22 @@ pub(crate) fn check_reply(req: &Message, resp: &Message) -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+/// Compares two names label by label, case-insensitively.
+///
+/// `Name`'s own equality also compares whether each name is fully qualified,
+/// and those disagree here for a reason that is easy to miss: a name read off
+/// the wire is always fully qualified, while one built from a configured
+/// hostname — `bootstrap_lookup` doing `Name::from_utf8("dns.quad9.net")` —
+/// is not.  Comparing with `==` therefore rejects every bootstrap reply and
+/// takes every hostname upstream down with it.  What matters is the labels,
+/// which is also what dnsproxy compares.
+fn same_name(a: &hickory_proto::rr::Name, b: &hickory_proto::rr::Name) -> bool {
+    a.num_labels() == b.num_labels()
+        && a.iter()
+            .zip(b.iter())
+            .all(|(x, y)| x.eq_ignore_ascii_case(y))
 }
 
 /// Sends a query over UDP and reads the reply.
@@ -737,6 +753,39 @@ mod tests {
             took < Duration::from_secs(3),
             "a dead first address cost {took:?} of a ten-second budget"
         );
+    }
+
+    /// The shape bootstrap uses: a question built from a configured hostname,
+    /// which carries no trailing dot, answered by a name read off the wire,
+    /// which always does.
+    ///
+    /// `Name`'s own equality compares that flag too, so validating with `==`
+    /// rejected every bootstrap reply and took every hostname upstream down
+    /// with it.  The tests above did not catch it because they spell their
+    /// names with the dot.
+    #[tokio::test]
+    async fn a_reply_matches_a_question_built_without_a_trailing_dot() {
+        let sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let addr = sock.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 4096];
+            let (n, peer) = sock.recv_from(&mut buf).await.unwrap();
+            let req = Message::from_bytes(&buf[..n]).unwrap();
+            let resp = crate::msg::with_addrs(&req, &["9.9.9.9".parse().unwrap()], 300);
+            sock.send_to(&resp.to_bytes().unwrap(), peer).await.unwrap();
+        });
+
+        let mut req = Message::query();
+        req.metadata.id = 0x4242;
+        req.metadata.recursion_desired = true;
+        req.add_query(Query::query(
+            Name::from_utf8("dns.quad9.net").unwrap(),
+            RecordType::A,
+        ));
+        assert!(!req.queries[0].name().is_fqdn(), "the premise of this test");
+
+        let got = udp_exchange(&req, addr, Duration::from_secs(2)).await;
+        assert!(got.is_ok(), "a bootstrap reply must be accepted: {got:?}");
     }
 
     /// An upstream answering a question that was never asked.
