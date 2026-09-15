@@ -556,6 +556,46 @@ async fn quic_connect(
     quic_connect_alpn(server, server_name, timeout, b"doq").await
 }
 
+/// The QUIC endpoints, one per address family.
+///
+/// `quinn::Endpoint::client` binds a UDP socket and spawns a driver task, and
+/// both were being built and thrown away for every DoQ and HTTP/3 query.  One
+/// endpoint carries any number of connections, so it is built once and cloned.
+///
+/// A `Mutex<Option<_>>` rather than a `OnceLock` for two reasons: a bind that
+/// failed once should not poison QUIC for the life of the process, and the
+/// driver task belongs to the runtime that spawned it, so an endpoint cached
+/// under one runtime is inert under the next.  Tests are where that second
+/// case shows up — each `#[tokio::test]` builds its own runtime — so the
+/// runtime is recorded alongside the endpoint and a mismatch rebuilds.
+static QUIC_V4: parking_lot::Mutex<Option<(tokio::runtime::Id, quinn::Endpoint)>> =
+    parking_lot::Mutex::new(None);
+/// The IPv6 endpoint; see [`QUIC_V4`].
+static QUIC_V6: parking_lot::Mutex<Option<(tokio::runtime::Id, quinn::Endpoint)>> =
+    parking_lot::Mutex::new(None);
+
+/// The endpoint to reach `server` from, building it on first use.
+fn quic_endpoint(server: SocketAddr) -> Result<quinn::Endpoint, Error> {
+    let (slot, bind) = if server.is_ipv4() {
+        (&QUIC_V4, "0.0.0.0:0")
+    } else {
+        (&QUIC_V6, "[::]:0")
+    };
+
+    let here = tokio::runtime::Handle::current().id();
+    let mut held = slot.lock();
+    if let Some((born, ep)) = held.as_ref()
+        && *born == here
+    {
+        return Ok(ep.clone());
+    }
+
+    let ep = quinn::Endpoint::client(bind.parse().expect("static addr")).map_err(Error::Io)?;
+    *held = Some((here, ep.clone()));
+
+    Ok(ep)
+}
+
 /// Opens a QUIC connection offering one application protocol.
 async fn quic_connect_alpn(
     server: SocketAddr,
@@ -567,16 +607,11 @@ async fn quic_connect_alpn(
         .map_err(|e| Error::Tls(e.to_string()))?;
     let cfg = quinn::ClientConfig::new(Arc::new(crypto));
 
-    let bind: SocketAddr = if server.is_ipv4() {
-        "0.0.0.0:0".parse().expect("static addr")
-    } else {
-        "[::]:0".parse().expect("static addr")
-    };
-    let mut endpoint = quinn::Endpoint::client(bind).map_err(Error::Io)?;
-    endpoint.set_default_client_config(cfg);
-
-    let connecting = endpoint
-        .connect(server, server_name)
+    // Not `set_default_client_config`: DoQ and HTTP/3 share the endpoint but
+    // need different application protocols, so the configuration travels with
+    // the connection rather than the endpoint.
+    let connecting = quic_endpoint(server)?
+        .connect_with(cfg, server, server_name)
         .map_err(|e| Error::Tls(e.to_string()))?;
 
     tokio::time::timeout(timeout, connecting)
