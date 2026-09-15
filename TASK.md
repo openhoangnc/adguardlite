@@ -81,16 +81,32 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 - [x] Truncation handling, both directions
 - [x] Upstreams: plain UDP, TCP, DNS-over-TLS, DNS-over-HTTPS, DNS-over-QUIC,
       and DNS-over-HTTPS carried by HTTP/3 (`use_http3_upstreams`, falling
-      back to HTTP/2 when a server does not speak it)
+      back to HTTP/2 when a server does not speak it, and remembering that it
+      had to)
+- [x] **Upstream connections are kept**, not built per query: one multiplexed
+      HTTP/2 connection per DoH address, one QUIC connection per DoQ and
+      HTTP/3 address with a 20 s keep-alive under a 30 s idle timeout, and a
+      checkout pool for DoT and TCP. Every reply is checked against the
+      question that was asked before its connection is reused, as dnsproxy's
+      `validateResponse` does. Measured against Quad9 and AdGuard, p50 per
+      query: DoT 157.6 → 47.8 ms, DoH 162.7 → 54.2 ms, DoQ 160.9 → 55.3 ms,
+      HTTP/3 162.9 → 53.9 ms, TCP 102.0 → 51.9 ms, with plain UDP flat at
+      ~53 ms throughout as the control
 - [x] `upstream_dns_file`, read afresh on each reload
+- [x] The upstream pools are rebuilt when the settings behind them change, so
+      an upstream edited through the interface takes effect without a restart
 - [x] Bootstrap resolution for encrypted upstreams' hostnames
 - [x] Upstream specification syntax including `[/domain/]` groups and the `#`
       deferral form
 - [x] Upstream modes: load balance (latency-ranked), parallel, fastest address
 - [x] Fallback resolvers
-- [x] Response cache: sized in bytes, sharded, TTL bounds, optimistic serving,
-      keyed on the EDNS `DO` bit so a validating client is never served a
-      stripped answer
+- [x] Response cache: sized in bytes, sharded, TTL bounds, keyed on the EDNS
+      `DO` bit so a validating client is never served a stripped answer
+- [ ] **Optimistic serving is not honoured.** `cache_optimistic` is parsed,
+      reaches the cache, and `Cache::get` duly reports `Freshness::Stale` —
+      and `resolver.rs` then drops the entry and goes upstream anyway, so the
+      setting costs memory and buys nothing. `cache_optimistic_answer_ttl` has
+      no readers at all. This line previously claimed it worked
 - [x] Blocking modes: default, custom IP, NXDOMAIN, null IP, REFUSED —
       including the negative-caching SOA's exact field values
 - [x] Rate limiting per client subnet, with an exemption list
@@ -500,6 +516,39 @@ it did under Aho-Corasick; the shortcut phase dominates it and neither
 structure fixed that. It is the obvious place for the next person to look.
 
 ## Deliberate deviations
+
+- **Upstream connections outlive the query.** dnsproxy pools DoT
+  (`upstream/dot.go`), caches one `http.Client` for DoH and keeps a single
+  QUIC connection for DoQ, so keeping connections is parity, not invention.
+  Where this build goes further: **plain TCP is pooled too**, which dnsproxy
+  dials per query, and the HTTP/2-versus-HTTP/3 choice is **remembered per
+  upstream** with a timed retry rather than re-raced on every query. An
+  operator watching outbound sockets will see a few long-lived connections
+  per upstream where there were many short ones.
+- **Every reply is checked against the question asked**, on every transport.
+  This is dnsproxy's `validateResponse`, which this build did not have: an
+  upstream answering a question nobody asked had its answer returned and
+  cached under the name that *was* asked. A tolerant, misbehaving upstream
+  that appeared to work will now fail over. Names compare by their labels,
+  case-insensitively — not with `Name`'s own equality, which also compares
+  whether a name is fully qualified and so rejects every bootstrap reply.
+- **Each upstream address gets a bounded share of the timeout.**
+  `upstream_timeout` defaults to ten seconds and addresses were tried in
+  order, each with the whole budget, so one unroutable address cost the full
+  ten seconds on every query and the remaining addresses were never reached
+  before the client below had given up. Attempts are now capped at two
+  seconds with the remainder carried to the last, and the address that
+  answered is preferred next time. The upstream gets the same total budget;
+  only its division changed.
+- **The upstream pools are rebuilt on reload.** Upstream discards and rebuilds
+  its whole upstream configuration on every reconfigure. This build built the
+  pools once at startup and never again, so an upstream changed through the
+  interface did nothing until a restart, silently. Rebuilding happens when one
+  of the settings behind a pool actually changed, since it costs a bootstrap
+  round trip per upstream and discards the warm connections; a configured
+  `upstream_dns_file` is re-read every time, because its contents can change
+  without the configuration changing.
+
 
 **A first launch as a non-root user is allowed.** The Go build refuses one —
 *"this is the first launch of adguard home; you must run it as
