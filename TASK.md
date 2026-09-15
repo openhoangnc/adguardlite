@@ -515,7 +515,27 @@ gate, a long hostname cost 838 ns against 364 with it.
 it did under Aho-Corasick; the shortcut phase dominates it and neither
 structure fixed that. It is the obvious place for the next person to look.
 
+## Found by running the live tests, and fixed
+
+- **Safe browsing and parental control could never start.** The family
+  resolver's own name is bootstrapped over plain DNS, and `hashprefix` asked
+  for it on **port 443** — where those hosts serve DoH, and where a plain
+  query is answered by nothing. Every lookup timed out, `Checker::connect`
+  failed, and both features stayed off with an error in the log while the
+  interface reported them on. Port 53, and the unit test that asserted 443
+  now asserts 53 and says why. Found because `cargo test -p agl-dns --test
+  live -- --ignored` was run; nothing offline could have caught it, since the
+  port only matters against a real resolver.
+- **A live test asserted AdGuard's data rather than this build's behaviour.**
+  `testsafebrowsing.adguard.com` was asserted to be reported unsafe; it is no
+  longer in the set and no longer resolves at all. Which hosts are listed is
+  not ours to pin, so the test now asserts what does break in practice — that
+  the family resolver can be reached — and the matching itself stays pinned
+  offline by `a_matching_hash_in_the_cache_blocks` and
+  `hashing_matches_the_reference_vectors`.
+
 ## Deliberate deviations
+
 
 - **Upstream connections outlive the query.** dnsproxy pools DoT
   (`upstream/dot.go`), caches one `http.Client` for DoH and keeps a single

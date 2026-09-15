@@ -101,20 +101,28 @@ async fn dns_over_quic_upstream_resolves() {
     assert!(!ips.is_empty(), "expected an answer");
 }
 
+/// That the family resolver can be reached at all.
+///
+/// This is the part that breaks in practice: reaching it means bootstrapping
+/// `family.adguard-dns.com` over plain DNS and then talking DoH to it, and a
+/// failure anywhere in that chain leaves safe browsing quietly switched off
+/// while the interface reports it on.
+///
+/// What this cannot assert is that some particular host is listed.  Which
+/// hosts are in the set is AdGuard's data and it changes —
+/// `testsafebrowsing.adguard.com` was asserted here and is no longer in the
+/// set, nor does it resolve any more.  The matching itself is pinned offline
+/// instead, by `a_matching_hash_in_the_cache_blocks` and
+/// `hashing_matches_the_reference_vectors` in `hashprefix.rs`.
 #[tokio::test]
 #[ignore = "needs network"]
-async fn safe_browsing_recognises_a_known_bad_host() {
+async fn safe_browsing_reaches_the_family_resolver() {
     use agl_dns::hashprefix::{Checker, SAFE_BROWSING_SUFFIX};
 
     let c = Checker::connect(SAFE_BROWSING_SUFFIX, Duration::from_secs(60), 1024)
         .await
         .expect("the family resolver should be reachable");
 
-    // AdGuard publish this name specifically for testing the lookup.
-    assert!(
-        c.check("testsafebrowsing.adguard.com").await,
-        "the test host should be reported as unsafe"
-    );
     assert!(
         !c.check("example.com").await,
         "an ordinary host must not be reported"

@@ -57,10 +57,17 @@ pub const SAFE_BROWSING_LIST_ID: i64 = -4;
 /// How long a lookup may take.
 const TIMEOUT: Duration = Duration::from_secs(3);
 
-/// The addresses the family resolver is reached on.
+/// The addresses the family resolver's own name is looked up through.
 ///
 /// Hard-coded, as upstream does: bootstrapping this through the server's own
 /// resolvers would make safe browsing depend on the very filtering it feeds.
+///
+/// Port 53, not 443.  These are reached by plain DNS over UDP — that is what
+/// bootstrapping is — while 443 is where the same hosts serve DoH, and a
+/// plain query sent there is answered by nothing.  With the wrong port every
+/// lookup of `family.adguard-dns.com` timed out, `Checker::connect` failed,
+/// and safe browsing and parental control stayed off while the interface
+/// reported them on.
 pub fn bootstrap() -> Vec<SocketAddr> {
     [
         "94.140.14.15",
@@ -70,7 +77,7 @@ pub fn bootstrap() -> Vec<SocketAddr> {
     ]
     .iter()
     .filter_map(|s| s.parse::<IpAddr>().ok())
-    .map(|ip| SocketAddr::new(ip, 443))
+    .map(|ip| SocketAddr::new(ip, 53))
     .collect()
 }
 
@@ -388,7 +395,11 @@ mod tests {
     fn the_bootstrap_addresses_are_the_family_resolvers() {
         let b = bootstrap();
         assert_eq!(b.len(), 4);
-        assert!(b.iter().all(|a| a.port() == 443));
+        assert!(
+            b.iter().all(|a| a.port() == 53),
+            "bootstrap speaks plain DNS, which lives on 53; 443 is where the \
+             same hosts serve DoH and answers no plain query"
+        );
         assert!(b.iter().any(|a| a.ip().is_ipv6()));
     }
 
