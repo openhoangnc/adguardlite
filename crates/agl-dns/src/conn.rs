@@ -479,6 +479,10 @@ pub struct Connections {
 
 impl Connections {
     /// Builds an empty slot for each of `addrs`.
+    ///
+    /// Every exchange below names an address by its position in that list,
+    /// which is how the caller already holds it, and panics if given a
+    /// position that does not exist.
     pub fn new(addrs: &[SocketAddr], tls: &Arc<rustls::ClientConfig>) -> Self {
         Self {
             per: addrs.iter().copied().map(Address::new).collect(),
@@ -560,6 +564,12 @@ impl Connections {
                             );
                             retried = true;
                         }
+                        // A request that was already on the wire is not sent
+                        // twice: the upstream may well have answered it, and
+                        // a second copy is a second query against whatever
+                        // quota it keeps.  The connection still goes, because
+                        // the commonest way to reach here is one that has
+                        // stopped carrying anything without saying so.
                         Sent::Unsent(e) | Sent::Spent(e) => {
                             a.https.slot.h2.forget(stamp);
 
@@ -667,9 +677,15 @@ impl Connections {
                 &a.h3,
                 |c: &H3Conn| c.conn.close_reason().is_none(),
                 || async {
+                    let until = Instant::now() + left;
                     let conn = quic_connect(&self.profiles.h3, a.addr, host, left).await?;
 
-                    h3_start(conn).await
+                    // Bounded like the others: starting HTTP/3 is an exchange
+                    // of settings, and it runs with the gate held.
+                    let rest = until.saturating_duration_since(Instant::now());
+                    tokio::time::timeout(rest, h3_start(conn))
+                        .await
+                        .map_err(|_| Error::Timeout(left))?
                 },
             )
             .await?;
@@ -677,11 +693,15 @@ impl Connections {
             match h3_send(&h3, &uri, wire.clone(), left).await {
                 Ok(body) => return decode(req, &body),
                 Err(e) => {
-                    let rebuild = worth_rebuilding(&h3.conn);
-                    if rebuild {
+                    // A connection that has been retired is worth one more
+                    // attempt on a fresh one; a connection that is still open
+                    // failed for some reason of its own, and one that was only
+                    // just dialled would fail the same way twice.
+                    let retired = worth_rebuilding(&h3.conn);
+                    if retired {
                         a.h3.slot.forget(stamp);
                     }
-                    if !(reused && rebuild && !retried) {
+                    if retried || !reused || !retired {
                         return Err(e);
                     }
 
@@ -735,11 +755,15 @@ impl Connections {
                     return Ok(resp);
                 }
                 Err(e) => {
-                    let rebuild = worth_rebuilding(&conn);
-                    if rebuild {
+                    // A connection that has been retired is worth one more
+                    // attempt on a fresh one; a connection that is still open
+                    // failed for some reason of its own, and one that was only
+                    // just dialled would fail the same way twice.
+                    let retired = worth_rebuilding(&conn);
+                    if retired {
                         a.doq.slot.forget(stamp);
                     }
-                    if !(reused && rebuild && !retried) {
+                    if retried || !reused || !retired {
                         return Err(e);
                     }
 
@@ -920,18 +944,24 @@ async fn tcp_connect(addr: SocketAddr, timeout: Duration) -> Result<TcpStream, E
 }
 
 /// Opens a TLS connection, presenting `host` as the server name.
+///
+/// The budget covers the whole thing.  Giving the connect and the handshake
+/// one each would let a server that answers TCP and then says nothing hold a
+/// dial — and, behind a dial, the gate — for twice as long as the query it is
+/// serving was ever given.
 async fn tls_connect(
     addr: SocketAddr,
     host: &str,
     cfg: Arc<rustls::ClientConfig>,
     timeout: Duration,
 ) -> Result<DotStream, Error> {
+    let deadline = Instant::now() + timeout;
     let name = rustls_pki_types::ServerName::try_from(host.to_string())
         .map_err(|e| Error::Tls(format!("invalid server name {host:?}: {e}")))?;
     let tcp = tcp_connect(addr, timeout).await?;
 
     tokio::time::timeout(
-        timeout,
+        deadline.saturating_duration_since(Instant::now()),
         tokio_rustls::TlsConnector::from(cfg).connect(name, tcp),
     )
     .await
@@ -946,12 +976,19 @@ async fn dial_https(
     cfg: Arc<rustls::ClientConfig>,
     timeout: Duration,
 ) -> Result<Dialed, Error> {
+    let deadline = Instant::now() + timeout;
     let tls = tls_connect(addr, host, cfg, timeout).await?;
     let is_h2 = tls.get_ref().1.alpn_protocol() == Some(b"h2");
     let io = hyper_util::rt::TokioIo::new(tls);
 
+    // The HTTP handshake is an exchange in its own right — SETTINGS, over
+    // HTTP/2 — and it is bounded for the same reason the TLS one is: it runs
+    // with the gate held, so a server that goes quiet here would stop every
+    // query queued behind it rather than only its own.
+    let left = deadline.saturating_duration_since(Instant::now());
+
     if is_h2 {
-        let (sender, conn) =
+        let handshake =
             hyper::client::conn::http2::Builder::new(hyper_util::rt::TokioExecutor::new())
                 // Setting an interval without a timer panics inside hyper the first
                 // time it wants to schedule a ping, which is thirty seconds after the
@@ -959,9 +996,11 @@ async fn dial_https(
                 .timer(hyper_util::rt::TokioTimer::new())
                 .keep_alive_interval(H2_KEEPALIVE)
                 .keep_alive_while_idle(true)
-                .handshake(io)
-                .await
-                .map_err(|e| Error::Http(e.to_string()))?;
+                .handshake(io);
+        let (sender, conn) = tokio::time::timeout(left, handshake)
+            .await
+            .map_err(|_| Error::Timeout(timeout))?
+            .map_err(|e| Error::Http(e.to_string()))?;
 
         // Never aborted: the driver is what carries every request and every
         // response on this connection, and it ends by itself once the last
@@ -975,8 +1014,9 @@ async fn dial_https(
         return Ok(Dialed::Two(sender));
     }
 
-    let (sender, conn) = hyper::client::conn::http1::handshake(io)
+    let (sender, conn) = tokio::time::timeout(left, hyper::client::conn::http1::handshake(io))
         .await
+        .map_err(|_| Error::Timeout(timeout))?
         .map_err(|e| Error::Http(e.to_string()))?;
     tokio::spawn(async move {
         let _ = conn.await;

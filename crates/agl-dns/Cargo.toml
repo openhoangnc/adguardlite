@@ -38,5 +38,8 @@ webpki-roots = "1.0.9"
 x509-parser = "0.18.1"
 
 [dev-dependencies]
+# The `server` feature is only ever wanted by the tests, which run a local
+# DNS-over-HTTPS server to count what a client actually opens.
+hyper = { version = "1.11.1", features = ["server"] }
 rcgen = "0.14.10"
 rustls-pemfile = "2.2.0"
