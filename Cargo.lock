@@ -159,7 +159,6 @@ dependencies = [
  "agl-config",
  "agl-core",
  "ahash",
- "aho-corasick",
  "flate2",
  "jiff",
  "memchr",

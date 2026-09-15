@@ -49,18 +49,38 @@ machine with the same data:
 
 | | Go v0.107.79 | adguardlite | |
 |---|---:|---:|---|
-| Time to answer DNS from a cold start | 4 s | 6 s | 1.5× slower |
-| Memory, after loading the lists | 363 MB | 532 MB | 1.5× more |
+| Time to answer DNS from a cold start | 4 s | **2 s** | 2× quicker |
+| Memory, after loading the lists | 346 MB | **267 MB** | 1.3× less |
 
-So the memory advantage in the first table does not hold as lists are added —
-it inverts. The startup gap is the honest number to plan around: both are
-seconds, not minutes, but Go is still quicker off the mark.
+It took work to get there, and the starting point is worth recording: the same
+deployment once took **55 seconds and 4.2 GB** — fourteen times Go's startup
+and twelve times its memory. Three things were wrong, each found by measuring
+rather than reading:
 
-This is worth stating plainly because it was worse. Every rule that is not
-`||domain^` needs a regular expression, and those used to be compiled at load
-rather than on first use: the same deployment took **55 seconds and 4.2 GB**
-before that changed. `rules_needing_an_expression_load_as_cheaply_as_plain_ones`
-in `crates/agl-filter/tests/differential.rs` fails if it comes back.
+- **Every rule that is not `||domain^` compiled a regular expression at load.**
+  156,557 of them here. They are built on first use now, which was 22 of those
+  55 seconds.
+- **The match path allocated per candidate rule and per query** — a formatted
+  `String` to test an empty `$badfilter` set, a `format!` for the URL, a hash
+  set for deduplication.
+- **The indexes were far larger than the data they held**: a domain index of
+  boxed key strings costing 148 MB for 1.1M domains, and rule text copied into
+  the engine when the list manager already held every byte of it.
+
+The shortcut index is the piece worth reading: `crates/agl-filter/src/
+shortcut.rs` replaced an Aho-Corasick automaton, which is the textbook answer
+and was the wrong one here. Its 37.6 MB is walked one state-transition per
+byte, each dependent on the last, so a hostname's length buys a chain of cache
+misses. The haystack is tiny and the patterns are long, so each pattern is
+filed instead under whichever eight-byte window of itself is *rarest* across
+the whole set, and a query hashes its own windows independently — 7.4 MB, and
+the probes overlap in the memory system instead of chaining.
+
+Guards: `rules_needing_an_expression_load_as_cheaply_as_plain_ones` in
+`crates/agl-filter/tests/differential.rs` fails if expressions go back to
+being built at load. `cargo run --release -p agl-filter --example loadprofile
+<dir of lists>` prints the phase timings, a footprint breakdown and per-query
+costs, which is how all of the above was measured.
 
 ## The published image
 
@@ -219,7 +239,7 @@ cargo run --release -- --no-check-update -c ./AdGuardHome.yaml -w ./work
 
 ## Verifying
 
-`cargo test --workspace` runs 568 unit and integration tests, including the
+`cargo test --workspace` runs 585 unit and integration tests, including the
 differential against the real filter list and the query-log and gob golden
 files — none of which need a network or a running Go build.
 
@@ -253,7 +273,7 @@ multi-architecture tag to GHCR, and then prunes the package back to the newest
 three releases. Documentation-only commits are skipped, and a newer push
 cancels an in-flight build.
 
-`.github/workflows/ci.yml` — formatting, lints, the 568-test suite, and the
+`.github/workflows/ci.yml` — formatting, lints, the 585-test suite, and the
 differential against a freshly cloned AdGuard Home — is `workflow_dispatch`
 only. It costs nothing until it is started from the Actions tab, because all of
 it also runs locally: `cargo test --workspace` and `scripts/verify.sh`.

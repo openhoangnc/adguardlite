@@ -2,7 +2,7 @@ name: CI
 
 # Deliberately manual. The only workflow that runs on its own is docker.yml,
 # which builds and publishes the image; everything here — formatting, lints,
-# the 568-test suite and the differential against a freshly cloned AdGuard
+# the 585-test suite and the differential against a freshly cloned AdGuard
 # Home — runs locally with `cargo test --workspace` and `scripts/verify.sh`,
 # and needs no Actions minutes to be trusted.
 #

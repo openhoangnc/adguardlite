@@ -7,3 +7,4 @@ pub mod pattern;
 pub mod rule;
 pub mod safesearch;
 pub mod services;
+pub mod shortcut;

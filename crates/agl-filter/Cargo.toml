@@ -12,7 +12,6 @@ workspace = true
 agl-config = { version = "0.107.79", path = "../agl-config" }
 agl-core = { version = "0.107.79", path = "../agl-core" }
 ahash = "0.8.12"
-aho-corasick = "1.1.5"
 flate2 = "1.1.10"
 jiff = { version = "0.2.37", features = ["serde"] }
 memchr = "2.8.3"
@@ -23,3 +22,4 @@ thiserror = "2.0.20"
 
 [dev-dependencies]
 flate2 = "1.1.10"
+

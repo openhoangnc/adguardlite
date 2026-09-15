@@ -5,8 +5,9 @@
 //!   1. **Domain index** — `||domain^` rules, by far the bulk of DNS
 //!      blocklists, live in a hash map keyed by domain.  A query walks its own
 //!      parent domains, so matching costs one hash lookup per label.
-//!   2. **Shortcut index** — other literal patterns are prefiltered with an
-//!      Aho–Corasick automaton over their longest literal substring.
+//!   2. **Shortcut index** — other literal patterns are prefiltered by their
+//!      longest literal substring, looked up by hashed windows of the
+//!      hostname.
 //!   3. **Scan list** — regexes and patterns too short to index are checked
 //!      one by one.  This list is kept small.
 
@@ -17,13 +18,13 @@ use std::borrow::Cow;
 use std::sync::Arc;
 
 use ahash::{AHashMap, AHashSet};
-use aho_corasick::{AhoCorasick, AhoCorasickBuilder, MatchKind};
 
 use crate::domidx::DomainIndex;
 use crate::pattern::Target;
 use crate::rule::{
     DnsRewrite, HostRule, MIN_SHORTCUT_LEN, NetworkRule, Options, Pattern, Rule, parse,
 };
+use crate::shortcut::ShortcutIndex;
 
 /// An empty set of lists, for a build with no allowlist.
 ///
@@ -139,8 +140,7 @@ pub struct RuleSet {
     hosts: Vec<HostRule>,
     domain_index: DomainIndex,
     host_index: AHashMap<Box<str>, Refs>,
-    ac: Option<AhoCorasick>,
-    ac_rules: Vec<Vec<u32>>,
+    shortcuts: ShortcutIndex,
     scan: Vec<u32>,
     badfilter: AHashSet<Box<str>>,
     rules_count: usize,
@@ -206,13 +206,7 @@ impl RuleSet {
         let (dk, ds, dt) = (0usize, 0usize, self.domain_index.footprint());
         let (hk, hs, ht) = idx(&self.host_index);
 
-        let ac = self.ac.as_ref().map_or(0, |a| a.memory_usage());
-        let ac_rules: usize = self
-            .ac_rules
-            .iter()
-            .map(|v| v.capacity() * 4 + 32)
-            .sum::<usize>()
-            + self.ac_rules.capacity() * size_of::<Vec<u32>>();
+        let shortcuts = self.shortcuts.footprint();
         let scan = self.scan.capacity() * 4;
         let badfilter: usize = self.badfilter.iter().map(|k| k.len() + 32).sum();
 
@@ -227,8 +221,7 @@ impl RuleSet {
             + hk
             + hs
             + ht
-            + ac
-            + ac_rules
+            + shortcuts
             + scan
             + badfilter;
         let mb = |b: usize| b as f64 / 1e6;
@@ -266,8 +259,11 @@ impl RuleSet {
             ),
             ("host index spill", hs, String::new()),
             ("host index table", ht, String::new()),
-            ("aho-corasick", ac, String::new()),
-            ("aho-corasick rule map", ac_rules, String::new()),
+            (
+                "shortcut index",
+                shortcuts,
+                format!("{} patterns", self.shortcuts.len()),
+            ),
             ("full-scan list", scan, String::new()),
             ("badfilter set", badfilter, String::new()),
             ("TOTAL", total, String::new()),
@@ -327,24 +323,16 @@ impl RuleSet {
             }
         }
 
-        // 2. Shortcut index.  The only phase that can hand back a rule twice,
-        //    because one pattern can match at several positions — so dedupe
-        //    the *patterns*, of which there are far fewer than rules.  The
-        //    vector stays empty, and therefore unallocated, for the common
-        //    case of a hostname that matches no shortcut at all.
-        if let Some(ac) = &self.ac {
-            let mut hit: Vec<u32> = Vec::new();
-            for m in ac.find_overlapping_iter(url) {
-                let p = m.pattern().as_u32();
-                if hit.contains(&p) {
-                    continue;
-                }
-                hit.push(p);
-
-                for &i in &self.ac_rules[p as usize] {
-                    self.consider(i, req, url, &mut best, &mut rewrites);
-                }
-            }
+        // 2. Shortcut index, over the hostname alone: a shortcut has no `:`
+        //    or `/`, so one that occurs in `http://<host>` occurs in the
+        //    host or in `http`, and the index answers for `http` by itself.
+        //    The index reports each rule once however many times its
+        //    shortcut occurs, so this phase cannot repeat one either.
+        if !self.shortcuts.is_empty() {
+            let host = &url.as_bytes()[SCHEME.len()..];
+            self.shortcuts.find(host, |i| {
+                self.consider(i, req, url, &mut best, &mut rewrites);
+            });
         }
 
         // 3. Everything that could not be indexed.
@@ -547,26 +535,34 @@ fn anchored_domain_is(text: &str, domain: &str) -> bool {
     t[..end].eq_ignore_ascii_case(domain)
 }
 
-/// Room for `http://` plus the longest legal hostname.
-const URL_BUF: usize = 7 + 253;
+/// The scheme the patterns are written against.
+const SCHEME: &str = "http://";
+
+/// Room for the scheme plus the longest legal hostname.
+const URL_BUF: usize = SCHEME.len() + 253;
 
 /// Renders the `http://<host>` form the patterns are written against.
 ///
 /// Upstream matches rules against a URL, so a hostname query is given one.
 /// Borrowing a stack buffer keeps it off the heap; a hostname longer than DNS
 /// permits falls back to allocating rather than being truncated.
+///
+/// The copy is lowercased on the way. Every caller already lowercases, but
+/// the shortcut index compares bytes exactly where the automaton it replaced
+/// folded case, and doing it here costs nothing in a loop that copies anyway.
 fn url_for<'a>(buf: &'a mut [u8; URL_BUF], hostname: &str) -> Cow<'a, str> {
-    const SCHEME: &[u8] = b"http://";
-
     if hostname.len() > URL_BUF - SCHEME.len() {
-        return Cow::Owned(format!("http://{hostname}"));
+        return Cow::Owned(format!("{SCHEME}{}", hostname.to_ascii_lowercase()));
     }
 
-    buf[..SCHEME.len()].copy_from_slice(SCHEME);
-    buf[SCHEME.len()..SCHEME.len() + hostname.len()].copy_from_slice(hostname.as_bytes());
+    buf[..SCHEME.len()].copy_from_slice(SCHEME.as_bytes());
+    for (dst, src) in buf[SCHEME.len()..].iter_mut().zip(hostname.bytes()) {
+        *dst = src.to_ascii_lowercase();
+    }
 
     let n = SCHEME.len() + hostname.len();
-    // Valid UTF-8: an ASCII scheme followed by the caller's `&str`.
+    // Valid UTF-8: an ASCII scheme followed by the caller's `&str`, whose
+    // non-ASCII bytes lowercasing left alone.
     Cow::Borrowed(std::str::from_utf8(&buf[..n]).unwrap_or(""))
 }
 
@@ -687,17 +683,6 @@ impl Builder {
             rules_count,
         } = self;
 
-        let (patterns, ac_rules): (Vec<String>, Vec<Vec<u32>>) = shortcuts.into_iter().unzip();
-        let ac = if patterns.is_empty() {
-            None
-        } else {
-            AhoCorasickBuilder::new()
-                .match_kind(MatchKind::Standard)
-                .ascii_case_insensitive(true)
-                .build(&patterns)
-                .ok()
-        };
-
         RuleSet {
             net,
             sources,
@@ -705,8 +690,7 @@ impl Builder {
             hosts,
             domain_index: DomainIndex::build(domain_pairs),
             host_index,
-            ac,
-            ac_rules,
+            shortcuts: ShortcutIndex::build(shortcuts.into_iter().collect()),
             scan,
             badfilter,
             rules_count,

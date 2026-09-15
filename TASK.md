@@ -5,7 +5,7 @@ Work status for the Rust backend, against AdGuard Home **v0.107.79**.
 Legend: **[x]** done and verified · **[~]** partial, see the note · **[ ]** not started
 
 Verification claims below are reproducible with `scripts/verify.sh` and
-`cargo test --workspace` (568 tests).
+`cargo test --workspace` (585 tests).
 
 ---
 
@@ -447,6 +447,57 @@ list count they were measured at.
 `loading filter lists` is also logged before the work starts, not only after:
 several seconds of silence between "starting" and "serving" is what made this
 look like a hang in the first place.
+
+## The filtering engine's shape, and why
+
+At two million rules the engine's structure is the whole story, so the choices
+are recorded here rather than rediscovered. All of it was measured on a real
+37-list installation — 2,272,040 rules — with
+`cargo run --release -p agl-filter --example loadprofile <dir>`.
+
+**Expressions are built on first use.** Every rule that is not `||domain^`
+needs one; 156,557 did. Building them all at load cost 22 seconds and most of
+a gigabyte, for expressions a query only reaches once an index has already
+named that rule a candidate. The `/regex/` form is still compiled at load,
+because a user writes that by hand and a typo should be refused there.
+
+**Rule text lives in the list, not the rule.** Nothing that decides whether a
+rule matches reads the text — only a rule that has matched does. So it is off
+the struct the hot loop walks, and it is not copied at all: the manager holds
+every list to rebuild from, and rules point into those bytes through an
+`Arc<str>`. `TextRef` is eight bytes, carrying its own source index, because a
+range table plus `partition_point` cost 100 ns on every blocked query.
+
+**The domain index keeps no keys** (`domidx.rs`). As a
+`HashMap<Box<str>, Refs>` it was 148 MB for 1,122,077 domains. It is two
+parallel arrays now — a 64-bit hash and a 32-bit value, 12 bytes a slot, 31 MB
+— and a probe is confirmed by recovering the key from the matched rule's own
+text. That verification costs ~85 ns on a blocked query and is not negotiable:
+a hash collision would block a domain the user never blocked, and nobody could
+diagnose it. Size it from the domains, not the pairs — 1,984,815 pairs name
+1,122,077 domains, and sizing for the pairs left the table a third full at
+twice the memory.
+
+**The shortcut index is not an Aho-Corasick automaton** (`shortcut.rs`), which
+is the textbook answer and was the wrong one. The automaton was 37.6 MB plus
+an 11.2 MB map, walked one state transition per byte with each dependent on
+the last, so a hostname's length bought a chain of cache misses through a
+structure far larger than any cache. What makes it the wrong tool is that this
+haystack is tiny and the patterns are long: 156,070 distinct shortcuts of mean
+length 19.5, only 375 shorter than eight bytes. Each is filed under whichever
+eight-byte window of itself is rarest across the set — a domain-like string's
+rare windows are the ones real names rarely contain — and a query hashes its
+own windows, which are independent and so overlap in the memory system. 7.4 MB.
+
+**Both shortcut tables are gated by a bitset**, and this is not optional. The
+tables are megabytes, so every probe is a miss; the gates are 8 KB and 256 KB
+and stay in cache. Without the short gate, 375 patterns cost 437 ns of a 531 ns
+clean lookup — the work is per position, not per pattern. Without the long
+gate, a long hostname cost 838 ns against 364 with it.
+
+**What did not improve.** A short clean hostname still costs ~530 ns, much as
+it did under Aho-Corasick; the shortcut phase dominates it and neither
+structure fixed that. It is the obvious place for the next person to look.
 
 ## Deliberate deviations
 
