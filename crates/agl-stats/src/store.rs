@@ -6,6 +6,7 @@
 //! `internal/stats` writes, so an existing database carries over and a
 //! database this writes can be read back by the Go implementation.
 
+use std::borrow::Borrow;
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -61,11 +62,14 @@ pub fn load(path: &Path) -> Result<Vec<(u32, UnitDb)>, Error> {
 }
 
 /// Writes every unit to a database file, replacing what was there.
-pub fn save(path: &Path, units: &[(u32, UnitDb)]) -> Result<(), Error> {
+///
+/// Generic over how the caller holds its units so a collector that keeps its
+/// finished hours behind an `Arc` can hand them over without copying them.
+pub fn save<U: Borrow<UnitDb>>(path: &Path, units: &[(u32, U)]) -> Result<(), Error> {
     let mut buckets: BTreeMap<Vec<u8>, BTreeMap<Vec<u8>, Vec<u8>>> = BTreeMap::new();
 
     for (hour, u) in units {
-        let blob = agl_gob::encode_unit(&to_gob(u));
+        let blob = agl_gob::encode_unit(&to_gob(u.borrow()));
         buckets.insert(name_from_hour(*hour), BTreeMap::from([(vec![0u8], blob)]));
     }
 
@@ -206,7 +210,7 @@ mod tests {
     fn an_empty_set_writes_a_valid_file() {
         let d = tmpdir("empty");
         let p = d.join("stats.db");
-        save(&p, &[]).unwrap();
+        save::<UnitDb>(&p, &[]).unwrap();
         assert!(p.exists());
         assert!(load(&p).unwrap().is_empty());
 

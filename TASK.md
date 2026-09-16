@@ -187,6 +187,8 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 - [x] Query log search by name, address, client name and ClientID, and the
       `older_than` cursor
 - [x] Statistics: hourly units, upstream's result categories and quirks
+- [x] One live hour held in full, finished hours held in the top-N form
+      they are stored in, as `internal/stats` holds them
 - [x] `agl-bolt`: bbolt reader and writer
 - [x] `agl-gob`: Go `gob` for the statistics unit
 - [x] **Session persistence** in `sessions.db`, in the layout the Go build
@@ -814,6 +816,77 @@ interface offers, the config file records, and nothing acts on.
   now, so a dead one is recognised and skipped, and a shard compacts its order
   once the dead slots outnumber the live entries — one pass, and it cannot run
   again until the shard has grown again.
+
+---
+
+## Found watching a container's memory, and fixed
+
+A deployment reported 269 MB at start and 371 MB eighteen hours later, dropping
+back to 269 MB on restart. All of it was statistics, and the restart is the
+clue: what a restart loads is the *capped* form of each hour, and that is all
+upstream ever holds.
+
+- **Every hour in the window kept every name it had seen.** `Stats::units` was
+  a `BTreeMap<u32, Unit>`, and a `Unit` holds `AHashMap<String, u64>` for
+  queried domains, blocked domains, clients and the two upstream counters, with
+  no cap. Only the way to `stats.db` capped anything: `to_db` takes the top 100
+  of each. So the process grew with the number of distinct names asked for
+  across the whole retention window — a day by default — while `stats.db` and
+  everything a restart read back held 100 per hour.
+
+  `internal/stats` keeps **one** live unit and reads the rest back from the
+  database; `loadUnits` serialises the current one for every request, so even
+  the live hour is reported capped. Finished hours are now compacted to the
+  form they are stored in, which is both what upstream reports and what a
+  restart here already produced.
+
+- **Every save and every `/control/stats` call copied the lot.** `data()`
+  cloned every unit — maps and all — before merging, and `snapshot()`, which
+  the maintenance tick calls every 60 seconds, ran `to_pairs` over every
+  unit, and `to_pairs` cloned every key in the map to sort them and then threw
+  all but 100 away. Both costs grew with uptime, and neither is memory the
+  process gets back: the allocator holds the high-water mark.
+
+  `data()` now merges the stored form, taking the finished hours by `Arc`
+  without copying them at all, and `to_pairs` copies only the names that
+  survive the cut, selecting them with `select_nth_unstable_by` rather than
+  sorting the hour.
+
+Measured on one machine, same binary either side, against the same load: 100k
+distinct names per round through a stub upstream, one list of 180,049 rules,
+`statistics.interval: 1d`.
+
+| | before | after |
+|---|---:|---:|
+| RSS, idle with the list loaded | 43 MB | 43 MB |
+| RSS after 500k distinct names in one hour | 170 MB | 127 MB |
+| RSS after three `/control/stats` calls on that | **266 MB** | **127 MB** |
+| One `/control/stats` call | 0.31 s | **0.04 s** |
+| RSS with statistics switched off, 500k names | 59 MB | 59 MB |
+
+That last row is the attribution: with `statistics.enabled: false` the same
+half-million distinct names leave RSS flat, so the cache, the query log, the
+client registry and the connection pools were not what grew.
+
+The hour boundary is what a short run cannot show, so the restart stands in for
+it: 600k distinct names live is 130 MB, and the same statistics after a restart
+— the same counts, the same top lists, read back from `stats.db` — is 45 MB.
+That compaction now happens every hour rather than only when the process dies.
+`a_finished_hour_holds_only_what_is_stored` guards it, and
+`an_hour_that_goes_quiet_is_compacted_by_the_sweep` covers the resolver that
+stops being asked before the hour turns.
+
+**What this changes in the response.** The top lists for a multi-hour window
+are now merged from each hour's top 100 rather than from complete maps, so a
+name that is 101st in every hour no longer sums its way into the list. That is
+what upstream reports, and what this build already reported for any hour it had
+restarted through; it is now the same before and after a restart.
+
+**Left alone.** The live hour still holds every name, because upstream's does
+and it is bounded by an hour of traffic — around 6 MB at the rate the reporting
+deployment grew. `store::save` still rewrites the whole database every 60
+seconds where upstream writes a unit when it rotates; that is I/O, not memory,
+and it is a durability choice worth keeping.
 
 ---
 

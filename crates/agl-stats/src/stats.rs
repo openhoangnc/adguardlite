@@ -1,6 +1,7 @@
 //! Statistics collection and the `/control/stats` response.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use ahash::{AHashMap, AHashSet};
 use parking_lot::Mutex;
@@ -110,8 +111,48 @@ impl StatsResp {
 /// The statistics collector.
 pub struct Stats {
     cfg: Mutex<Config>,
-    /// Units by hour identifier, oldest first.
-    units: Mutex<BTreeMap<u32, Unit>>,
+    /// What is held in memory, live hour and history alike.
+    inner: Mutex<Inner>,
+}
+
+/// The units, split by whether they are still being counted.
+///
+/// Only the hour in progress keeps every name it has seen.  A finished hour is
+/// compacted to the same top-N form that `stats.db` holds, which is what a
+/// restart would load and what upstream reports for it: `internal/stats` keeps
+/// one live unit and reads the rest back from the database.  Keeping every
+/// hour's full map instead grew the process by roughly 180 bytes for every
+/// distinct name asked for in the window -- a hundred megabytes over a day on
+/// a busy resolver -- and had every save and every `/control/stats` call copy
+/// the lot.
+#[derive(Default)]
+struct Inner {
+    /// The hour being counted now, with every name it has seen.
+    current: Option<Unit>,
+    /// Finished hours, in the form they are stored in.
+    past: BTreeMap<u32, Arc<UnitDb>>,
+}
+
+impl Inner {
+    /// Compacts the live unit once it is no longer the hour given.
+    fn roll(&mut self, hour: u32) {
+        let Some(done) = self.current.take_if(|u| u.id != hour) else {
+            return;
+        };
+
+        self.past.insert(done.id, Arc::new(done.to_db()));
+    }
+
+    /// The stored form of one hour, or `None` when nothing was counted in it.
+    ///
+    /// The live hour is compacted on the way out, as upstream's `loadUnits`
+    /// serialises its current unit for every request.
+    fn unit(&self, id: u32) -> Option<Arc<UnitDb>> {
+        match &self.current {
+            Some(u) if u.id == id => Some(Arc::new(u.to_db())),
+            _ => self.past.get(&id).cloned(),
+        }
+    }
 }
 
 impl Stats {
@@ -119,7 +160,7 @@ impl Stats {
     pub fn new(cfg: Config) -> Self {
         Self {
             cfg: Mutex::new(cfg),
-            units: Mutex::new(BTreeMap::new()),
+            inner: Mutex::new(Inner::default()),
         }
     }
 
@@ -138,35 +179,66 @@ impl Stats {
     ///
     /// Returns whether it was counted.
     pub fn add(&self, e: &Entry) -> bool {
+        self.add_at(e, current_hour())
+    }
+
+    /// Records one query into the given hour.
+    ///
+    /// Split out so the rollover can be tested without waiting for one.
+    fn add_at(&self, e: &Entry, hour: u32) -> bool {
         if !self.cfg.lock().enabled || !e.is_valid() {
             return false;
         }
 
-        let id = current_hour();
-        let mut units = self.units.lock();
-        units.entry(id).or_insert_with(|| Unit::new(id)).add(e);
+        let mut inner = self.inner.lock();
+        inner.roll(hour);
+        inner.current.get_or_insert_with(|| Unit::new(hour)).add(e);
 
         true
     }
 
     /// Loads previously stored units.
-    pub fn load(&self, stored: impl IntoIterator<Item = (u32, UnitDb)>) {
-        let mut units = self.units.lock();
-        for (id, db) in stored {
-            units.insert(id, Unit::from_db(id, &db));
+    ///
+    /// A unit for the hour in progress becomes the live one, so a restart
+    /// carries on counting the hour it died in rather than starting it again.
+    pub fn load<U: Into<Arc<UnitDb>>>(&self, stored: impl IntoIterator<Item = (u32, U)>) {
+        let hour = current_hour();
+
+        {
+            let mut inner = self.inner.lock();
+            for (id, db) in stored {
+                let db = db.into();
+                if id == hour {
+                    inner.current = Some(Unit::from_db(id, &db));
+                } else {
+                    inner.past.insert(id, db);
+                }
+            }
         }
-        drop(units);
 
         self.prune();
     }
 
     /// Returns every unit in serialisable form, for persistence.
-    pub fn snapshot(&self) -> Vec<(u32, UnitDb)> {
-        self.units
-            .lock()
+    ///
+    /// The finished hours are handed over by `Arc`: they are already in the
+    /// stored form and never change again, so saving does not copy them.
+    pub fn snapshot(&self) -> Vec<(u32, Arc<UnitDb>)> {
+        let hour = current_hour();
+        let mut inner = self.inner.lock();
+        inner.roll(hour);
+
+        let mut out: Vec<(u32, Arc<UnitDb>)> = inner
+            .past
             .iter()
-            .map(|(id, u)| (*id, u.to_db()))
-            .collect()
+            .map(|(id, u)| (*id, Arc::clone(u)))
+            .collect();
+
+        if let Some(u) = &inner.current {
+            out.push((u.id, Arc::new(u.to_db())));
+        }
+
+        out
     }
 
     /// Discards units older than the configured window.
@@ -174,17 +246,27 @@ impl Stats {
         let limit = self.cfg.lock().limit_hours;
         let cur = current_hour();
         let oldest = cur.saturating_sub(limit.saturating_sub(1));
-        self.units.lock().retain(|id, _| *id >= oldest);
+
+        let mut inner = self.inner.lock();
+        // Compacting here as well as in `add` is what bounds the live unit on
+        // a resolver that goes quiet: an hour nothing was asked in would
+        // otherwise keep its full map until the next query arrived.
+        inner.roll(cur);
+        inner.past.retain(|id, _| *id >= oldest);
     }
 
     /// Removes every unit.
     pub fn clear(&self) {
-        self.units.lock().clear();
+        let mut inner = self.inner.lock();
+        inner.current = None;
+        inner.past.clear();
     }
 
     /// The number of stored units.
     pub fn len(&self) -> usize {
-        self.units.lock().len()
+        let inner = self.inner.lock();
+
+        inner.past.len() + usize::from(inner.current.is_some())
     }
 
     /// Reports whether nothing has been recorded.
@@ -204,14 +286,18 @@ impl Stats {
 
         // A dense, oldest-first window of exactly `limit` units, filling gaps
         // with empty ones so the per-unit arrays line up with wall-clock time.
-        let stored = self.units.lock();
-        let units: Vec<Unit> = (0..limit)
-            .map(|i| {
-                let id = cur.saturating_sub((limit - 1 - i) as u32);
-                stored.get(&id).cloned().unwrap_or_else(|| Unit::new(id))
-            })
-            .collect();
-        drop(stored);
+        let units: Vec<Arc<UnitDb>> = {
+            let empty = Arc::new(UnitDb::default());
+            let inner = self.inner.lock();
+
+            (0..limit)
+                .map(|i| {
+                    let id = cur.saturating_sub((limit - 1 - i) as u32);
+
+                    inner.unit(id).unwrap_or_else(|| Arc::clone(&empty))
+                })
+                .collect()
+        };
 
         let ignored: AHashSet<String> = if cfg.ignored_enabled {
             cfg.ignored.iter().map(|s| s.to_ascii_lowercase()).collect()
@@ -239,12 +325,13 @@ impl Stats {
 
         for u in &units {
             n_total += u.n_total;
-            for (slot, v) in n_result.iter_mut().zip(&u.n_result) {
-                *slot += v;
+            for (i, slot) in n_result.iter_mut().enumerate() {
+                *slot += u.n_result.get(i).copied().unwrap_or(0);
             }
-            let avg = u.time_sum.checked_div(u.n_total).unwrap_or(0);
-            if avg != 0 {
-                time_avg_sum += avg;
+            // The stored form already holds the hour's mean, which is what
+            // `time_sum / n_total` recovered before.
+            if u.time_avg != 0 {
+                time_avg_sum += u64::from(u.time_avg);
                 time_units_counted += 1;
             }
         }
@@ -265,8 +352,13 @@ impl Stats {
     }
 }
 
+/// One unit's count for a result category.
+fn n_result_of(u: &UnitDb, r: Result) -> u64 {
+    u.n_result.get(r as usize).copied().unwrap_or(0)
+}
+
 /// Fills the per-time-unit arrays, collapsing to days past a week.
-fn fill_per_unit(resp: &mut StatsResp, units: &[Unit]) {
+fn fill_per_unit(resp: &mut StatsResp, units: &[Arc<UnitDb>]) {
     let days = units.len() / 24;
 
     if days > 7 {
@@ -283,9 +375,9 @@ fn fill_per_unit(resp: &mut StatsResp, units: &[Unit]) {
         for (i, u) in tail.iter().enumerate() {
             let d = i / 24;
             resp.dns_queries[d] += u.n_total;
-            resp.blocked_filtering[d] += u.n_result[Result::Filtered as usize];
-            resp.replaced_safebrowsing[d] += u.n_result[Result::SafeBrowsing as usize];
-            resp.replaced_parental[d] += u.n_result[Result::Parental as usize];
+            resp.blocked_filtering[d] += n_result_of(u, Result::Filtered);
+            resp.replaced_safebrowsing[d] += n_result_of(u, Result::SafeBrowsing);
+            resp.replaced_parental[d] += n_result_of(u, Result::Parental);
         }
 
         return;
@@ -295,32 +387,32 @@ fn fill_per_unit(resp: &mut StatsResp, units: &[Unit]) {
     resp.dns_queries = units.iter().map(|u| u.n_total).collect();
     resp.blocked_filtering = units
         .iter()
-        .map(|u| u.n_result[Result::Filtered as usize])
+        .map(|u| n_result_of(u, Result::Filtered))
         .collect();
     resp.replaced_safebrowsing = units
         .iter()
-        .map(|u| u.n_result[Result::SafeBrowsing as usize])
+        .map(|u| n_result_of(u, Result::SafeBrowsing))
         .collect();
     resp.replaced_parental = units
         .iter()
-        .map(|u| u.n_result[Result::Parental as usize])
+        .map(|u| n_result_of(u, Result::Parental))
         .collect();
 }
 
-/// Merges one counter map across units and returns the top `max` entries.
+/// Merges one counter across units and returns the top `max` entries.
 fn merge_top(
-    units: &[Unit],
+    units: &[Arc<UnitDb>],
     max: usize,
     ignored: &AHashSet<String>,
-    pick: impl Fn(&Unit) -> &AHashMap<String, u64>,
+    pick: impl Fn(&UnitDb) -> &[CountPair],
 ) -> Vec<TopAddrs> {
     let mut merged: AHashMap<String, u64> = AHashMap::new();
     for u in units {
-        for (name, count) in pick(u) {
-            if ignored.contains(&name.to_ascii_lowercase()) {
+        for p in pick(u) {
+            if !ignored.is_empty() && ignored.contains(&p.name.to_ascii_lowercase()) {
                 continue;
             }
-            *merged.entry(name.clone()).or_insert(0) += count;
+            *merged.entry(p.name.clone()).or_insert(0) += p.count;
         }
     }
 
@@ -328,16 +420,16 @@ fn merge_top(
 }
 
 /// Merges upstream counters and derives the mean response time per upstream.
-fn merge_upstreams(units: &[Unit]) -> (Vec<TopAddrs>, Vec<TopAddrsFloat>) {
+fn merge_upstreams(units: &[Arc<UnitDb>]) -> (Vec<TopAddrs>, Vec<TopAddrsFloat>) {
     let mut responses: AHashMap<String, u64> = AHashMap::new();
     let mut time_sum: AHashMap<String, u64> = AHashMap::new();
 
     for u in units {
-        for (a, c) in &u.upstreams_responses {
-            *responses.entry(a.clone()).or_insert(0) += c;
+        for p in &u.upstreams_responses {
+            *responses.entry(p.name.clone()).or_insert(0) += p.count;
         }
-        for (a, t) in &u.upstreams_time_sum {
-            *time_sum.entry(a.clone()).or_insert(0) += t;
+        for p in &u.upstreams_time_sum {
+            *time_sum.entry(p.name.clone()).or_insert(0) += p.count;
         }
     }
 
@@ -537,6 +629,76 @@ mod tests {
         let d = s2.data();
         assert_eq!(d.num_dns_queries, 2);
         assert_eq!(d.num_blocked_filtering, 1);
+    }
+
+    #[test]
+    fn a_finished_hour_holds_only_what_is_stored() {
+        // The hour being counted keeps every name it has seen; an hour that
+        // has rolled over keeps the top-N that `stats.db` holds and upstream
+        // reports.  Keeping the full map for every hour in the window grew the
+        // process by every distinct name the network asked for, all day.
+        let s = Stats::new(Config::default());
+        let hour = current_hour();
+        for i in 0..5_000 {
+            let e = entry(&format!("h{i}.example.net"), "c", Result::NotFiltered, 10);
+            s.add_at(&e, hour);
+        }
+        assert_eq!(
+            s.inner.lock().current.as_ref().unwrap().domains.len(),
+            5_000,
+            "the live hour keeps every name"
+        );
+
+        s.add_at(
+            &entry("next.example.net", "c", Result::NotFiltered, 10),
+            hour + 1,
+        );
+
+        let inner = s.inner.lock();
+        let done = inner.past.get(&hour).expect("the finished hour is kept");
+        assert_eq!(
+            done.domains.len(),
+            MAX_DOMAINS,
+            "compacted to what is stored"
+        );
+        assert_eq!(done.n_total, 5_000, "the totals are not capped");
+    }
+
+    #[test]
+    fn a_rolled_hour_still_counts_towards_the_window() {
+        let s = Stats::new(Config::default());
+        let hour = current_hour();
+        s.add_at(&entry("a.com", "c", Result::NotFiltered, 10), hour - 1);
+        s.add_at(&entry("b.com", "c", Result::Filtered, 20), hour);
+
+        let d = s.data();
+        assert_eq!(d.num_dns_queries, 2);
+        assert_eq!(d.num_blocked_filtering, 1);
+        assert_eq!(d.top_queried_domains[0].get("a.com"), Some(&1));
+        assert_eq!(d.top_blocked_domains[0].get("b.com"), Some(&1));
+        assert!(
+            d.avg_processing_time > 0.0,
+            "the hourly means still average"
+        );
+    }
+
+    #[test]
+    fn an_hour_that_goes_quiet_is_compacted_by_the_sweep() {
+        // Rolling only on the next query would leave the last busy hour's
+        // full map resident on a resolver that has gone idle.
+        let s = Stats::new(Config::default());
+        s.add_at(
+            &entry("a.com", "c", Result::NotFiltered, 10),
+            current_hour() - 1,
+        );
+        assert!(s.inner.lock().current.is_some());
+
+        s.prune();
+        assert!(
+            s.inner.lock().current.is_none(),
+            "a unit for a past hour must not stay live"
+        );
+        assert_eq!(s.data().num_dns_queries, 1, "and it is still counted");
     }
 
     #[test]

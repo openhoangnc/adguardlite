@@ -227,20 +227,31 @@ pub struct UnitDb {
 }
 
 /// Converts a counter map into the top `max` pairs, highest count first.
+///
+/// Only the names that survive the cut are copied.  A live unit's map holds
+/// every distinct name the network asked for in that hour, and cloning all of
+/// them -- to sort them and then discard all but a hundred -- was the largest
+/// allocation the process made, repeated on every save and every
+/// `/control/stats` call.
 pub fn to_pairs(m: &AHashMap<String, u64>, max: usize) -> Vec<CountPair> {
-    let mut v: Vec<CountPair> = m
-        .iter()
-        .map(|(k, c)| CountPair {
-            name: k.clone(),
-            count: *c,
+    // Highest count first, then by name so the output is deterministic.
+    let order = |a: &(&str, u64), b: &(&str, u64)| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0));
+
+    let mut v: Vec<(&str, u64)> = m.iter().map(|(k, c)| (k.as_str(), *c)).collect();
+    if v.len() > max {
+        // Partition around the cut first, so only the survivors are ordered
+        // rather than every name in the hour.
+        v.select_nth_unstable_by(max, order);
+        v.truncate(max);
+    }
+    v.sort_unstable_by(order);
+
+    v.into_iter()
+        .map(|(name, count)| CountPair {
+            name: name.to_owned(),
+            count,
         })
-        .collect();
-
-    // Sort by count descending, then by name so the output is deterministic.
-    v.sort_by(|a, b| b.count.cmp(&a.count).then_with(|| a.name.cmp(&b.name)));
-    v.truncate(max);
-
-    v
+        .collect()
 }
 
 /// Rebuilds a counter map from pairs.
@@ -380,6 +391,20 @@ mod tests {
         assert_eq!(back.time_sum, 4000);
         assert_eq!(back.n_total, 4);
         assert_eq!(back.domains.get("a.com"), Some(&4));
+    }
+
+    #[test]
+    fn pairs_with_equal_counts_are_ordered_by_name() {
+        // The cut is made with an unstable partition, so the order has to come
+        // out of the comparison rather than out of the map's iteration order.
+        let mut m = AHashMap::new();
+        for n in ["b", "a", "d", "c"] {
+            m.insert(n.to_string(), 7u64);
+        }
+
+        let pairs = to_pairs(&m, 2);
+        let names: Vec<&str> = pairs.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["a", "b"]);
     }
 
     #[test]
