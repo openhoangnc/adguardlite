@@ -181,8 +181,10 @@ Verification claims below are reproducible with `scripts/verify.sh` and
       client's settings
 
 ### Storage
-- [x] `querylog.json`: exact JSON shape, rotation, in-memory buffer, reverse
-      chunked reads for the API
+- [x] `querylog.json`: exact JSON shape, in-memory buffer, reverse chunked
+      reads for the API
+- [x] Query log rotation on `querylog.interval`, decided from the first
+      record in the file as upstream's `checkAndRotate` does
 - [x] **Verified**: 43 real log lines re-encode byte for byte
 - [x] Query log search by name, address, client name and ClientID, and the
       `older_than` cursor
@@ -887,6 +889,84 @@ and it is bounded by an hour of traffic — around 6 MB at the rate the reportin
 deployment grew. `store::save` still rewrites the whole database every 60
 seconds where upstream writes a unit when it rotates; that is I/O, not memory,
 and it is a durability choice worth keeping.
+
+---
+
+## Found counting writes against the Go build, and fixed
+
+A deployment on flash storage asked what this writes and why. The way to
+answer it was to run `adguard/adguardhome:v0.107.79` and this build under the
+same load — 20 queries a second for six minutes through a stub upstream, the
+same config either side — and record every time a file in `data/` changed.
+
+| in six minutes, 7,200 queries | Go v0.107.79 | this build, before | after |
+|---|---:|---:|---:|
+| `stats.db` writes | **0** | 6 | **0** |
+| `querylog.json` writes | 7 | 13 | **7** |
+| bytes per query-log write | 268 KB | 268 KB and 50 KB alternating | 263 KB |
+
+The Go build wrote `stats.db` exactly once in an hour of watching, at
+`13:00:00` — `internal/stats` writes a unit when it rotates and when it shuts
+down, and at no other time. It never flushed the query log on a timer: the
+writes landed 50.2 s apart, which at 20 q/s is the 1,000-entry `size_memory`
+buffer filling, and a four-minute run at 2 q/s — not enough to fill it —
+produced no write at all.
+
+- **`stats.db` was rewritten every 60 seconds, whole.** The maintenance tick
+  called `save` unconditionally, and `agl-bolt` writes a database by writing
+  all of it. At the default day-long window that is 1,440 rewrites of a
+  311 KB file — **448 MB a day** — and the file grows with the window: 2.1 MB
+  at seven days, 8.9 MB at thirty, 26.6 MB at ninety, where the same tick
+  comes to **38 GB a day**. `Stats::claim_save` now reports the changes the
+  file does not hold — an hour rotating, units falling out of the window, a
+  reset — and the tick writes only for those. What it costs is upstream's
+  cost: an unclean kill loses the hour in progress. A signal does not, because
+  the shutdown path saves; that was checked by stopping the server and reading
+  the counts back.
+
+- **The query log was flushed on the same tick.** Its buffer already flushes
+  when it fills, which is what upstream does and all upstream does, so the
+  tick only added a second, partial write between the full ones — the 50 KB
+  entries in the table above. Removed.
+
+- **Every refresh rewrote every list, unchanged or not.** `apply_fetched`
+  wrote the file and reported success whatever came back, so the caller
+  counted it as an update, wrote the configuration and **rebuilt the whole
+  engine**. On the 37-list installation that is a daily rewrite of every list
+  and a rebuild of 2,272,040 rules for nothing. Upstream downloads to a
+  temporary file, compares a checksum with the one it holds, and on a match
+  discards the download and calls `os.Chtimes` on the real file instead
+  (`update` in `internal/filtering/filter.go`); `refreshFiltersIntl` returns
+  early without `EnableFilters` when no list changed. `apply_fetched` now
+  returns `Fetched::Unchanged` and touches the file's timestamps, and both
+  callers rebuild and save only when something actually differed.
+
+## Found while counting those writes: the query log never rotated
+
+`QueryLog::rotate` was implemented and tested and **called by nothing**, so
+`querylog.interval` — 90 days by default — was carried from the config file,
+reported by the API and acted on by no one. `querylog.json` grew for as long
+as the server ran.
+
+Upstream's `checkAndRotate` decides from the **first record in the file**: it
+reads the first 512 bytes, takes the `T` field out of them, and renames the
+file over `querylog.json.1` once that moment plus the interval has passed. It
+checks when it starts and then hourly, whatever the interval is. That detail
+is the whole of it — a file being appended to was modified moments ago, so a
+build that rotated on the modification time would never rotate at all, which
+is what the first attempt to observe this did.
+
+`rotate_if_due` reads the first record the same way, and `maintenance` calls it
+at startup and every hour after. Verified end to end: an interval of a minute
+and a first entry three hours old rotated on startup, the API kept reading the
+entries out of `querylog.json.1`, and a recent first entry left it alone.
+
+**Left alone, deliberately.** `agl-bolt` writes a whole database where bbolt
+writes the pages that changed, so an hour's rotation costs 311 KB against
+upstream's ~13 KB. At 24 writes a day that is 7.5 MB against 312 KB, and an
+incremental bbolt writer is a great deal of machinery for the difference.
+Sessions are already written only when one is created, removed or swept, and
+the configuration only when something changes it.
 
 ---
 

@@ -90,6 +90,25 @@ impl List {
         self.text = Arc::from(text);
     }
 
+    /// Moves the file's timestamps on without rewriting it.
+    ///
+    /// What upstream does when a download matches what it already had: its
+    /// `update` calls `os.Chtimes` rather than replacing the file, so a list
+    /// that has not changed is not written again and is still not due until
+    /// the next interval.  On a stack of large lists that is the difference
+    /// between a few kilobytes of metadata and rewriting every one of them.
+    pub fn touch(&self, paths: &Paths) -> std::io::Result<()> {
+        let now = std::time::SystemTime::now();
+        let times = std::fs::FileTimes::new()
+            .set_accessed(now)
+            .set_modified(now);
+
+        std::fs::File::options()
+            .write(true)
+            .open(paths.filter_file(self.id))?
+            .set_times(times)
+    }
+
     /// Writes the list's contents to disk, with upstream's modes.
     pub fn save(&self, paths: &Paths) -> std::io::Result<()> {
         let p = paths.filter_file(self.id);
@@ -113,6 +132,26 @@ pub fn count_rules(text: &str) -> usize {
             !t.is_empty() && !t.starts_with('!') && !t.starts_with('#')
         })
         .count()
+}
+
+/// What storing a freshly fetched list did.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Fetched {
+    /// The contents differed from what was stored, and were written.
+    Written {
+        /// How many rules the new contents hold.
+        rules: usize,
+    },
+    /// The contents matched what was already there, so nothing was rewritten.
+    Unchanged,
+}
+
+impl Fetched {
+    /// Whether anything changed, which is what decides if the engine has to
+    /// be rebuilt and the configuration written.
+    pub fn changed(self) -> bool {
+        matches!(self, Fetched::Written { .. })
+    }
 }
 
 /// Holds every list and builds the filtering engine from them.
@@ -254,17 +293,31 @@ impl Manager {
         paths: &Paths,
         id: i64,
         text: String,
-    ) -> Result<usize, RefreshError> {
+    ) -> Result<Fetched, RefreshError> {
         let count = count_rules(&text);
 
         let list = self.find_mut(id).ok_or(RefreshError::NotFound(id))?;
+        list.last_updated = Some(Timestamp::now());
+
+        // A list that came back the same is not written again.  Upstream
+        // compares a checksum of the download with the one it holds and
+        // discards the temporary file when they match; the bytes are already
+        // here, so compare those.
+        if *list.text == *text {
+            match list.touch(paths) {
+                Ok(()) => return Ok(Fetched::Unchanged),
+                // Nothing on disk to touch yet: write it after all.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(RefreshError::Io(e.to_string())),
+            }
+        }
+
         list.text = Arc::from(text);
         list.rules_count = count;
-        list.last_updated = Some(Timestamp::now());
         list.save(paths)
             .map_err(|e| RefreshError::Io(e.to_string()))?;
 
-        Ok(count)
+        Ok(Fetched::Written { rules: count })
     }
 
     /// The URL a list is fetched from.
@@ -400,6 +453,73 @@ mod tests {
         let m = Manager::load(&p, &[cfg(1, true)], &[], &[]);
         assert_eq!(m.blocklists[0].rules_count, 1);
         assert!(m.blocklists[0].last_updated.is_some());
+
+        std::fs::remove_dir_all(p.work.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_list_that_came_back_the_same_is_not_written_again() {
+        // Rewriting every list on every refresh cycle is megabytes of writes
+        // for nothing, and it made the caller rebuild the whole engine.
+        let p = tmpdir("unchanged");
+        let text = "||ads.example.com^\n";
+        std::fs::write(p.filter_file(1), text).unwrap();
+        let mut m = Manager::load(&p, &[cfg(1, true)], &[], &[]);
+
+        // A sentinel in the file that only a rewrite would remove.
+        std::fs::write(p.filter_file(1), "! sentinel\n").unwrap();
+        let before = m.blocklists[0].last_updated;
+
+        let got = m.apply_fetched(&p, 1, text.to_string()).unwrap();
+
+        assert_eq!(got, Fetched::Unchanged);
+        assert!(!got.changed());
+        assert_eq!(
+            std::fs::read_to_string(p.filter_file(1)).unwrap(),
+            "! sentinel\n",
+            "the file must not have been written"
+        );
+        assert!(
+            m.blocklists[0].last_updated > before,
+            "but it is no longer due"
+        );
+
+        std::fs::remove_dir_all(p.work.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_list_whose_contents_differ_is_written() {
+        let p = tmpdir("changed");
+        std::fs::write(p.filter_file(1), "||old.example.com^\n").unwrap();
+        let mut m = Manager::load(&p, &[cfg(1, true)], &[], &[]);
+
+        let got = m
+            .apply_fetched(&p, 1, "||new.example.com^\n! note\n".to_string())
+            .unwrap();
+
+        assert_eq!(got, Fetched::Written { rules: 1 });
+        assert!(got.changed());
+        assert_eq!(
+            std::fs::read_to_string(p.filter_file(1)).unwrap(),
+            "||new.example.com^\n! note\n"
+        );
+
+        std::fs::remove_dir_all(p.work.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_list_with_no_file_yet_is_written_even_if_it_matches() {
+        // The in-memory text of a list that has never been fetched is empty,
+        // and so is a download that failed to produce anything; there is
+        // nothing on disk to touch, so it has to be written.
+        let p = tmpdir("first-fetch");
+        let mut m = Manager::load(&p, &[cfg(1, true)], &[], &[]);
+        assert!(!p.filter_file(1).exists());
+
+        let got = m.apply_fetched(&p, 1, String::new()).unwrap();
+
+        assert_eq!(got, Fetched::Written { rules: 0 });
+        assert!(p.filter_file(1).exists());
 
         std::fs::remove_dir_all(p.work.parent().unwrap()).ok();
     }

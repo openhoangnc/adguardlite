@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ahash::{AHashMap, AHashSet};
 use parking_lot::Mutex;
@@ -113,6 +114,8 @@ pub struct Stats {
     cfg: Mutex<Config>,
     /// What is held in memory, live hour and history alike.
     inner: Mutex<Inner>,
+    /// Whether something has happened that `stats.db` does not hold.
+    unsaved: AtomicBool,
 }
 
 /// The units, split by whether they are still being counted.
@@ -135,12 +138,17 @@ struct Inner {
 
 impl Inner {
     /// Compacts the live unit once it is no longer the hour given.
-    fn roll(&mut self, hour: u32) {
+    ///
+    /// Reports whether it did, which is the moment `stats.db` falls behind
+    /// what is held: it is the only one that changes a finished hour.
+    fn roll(&mut self, hour: u32) -> bool {
         let Some(done) = self.current.take_if(|u| u.id != hour) else {
-            return;
+            return false;
         };
 
         self.past.insert(done.id, Arc::new(done.to_db()));
+
+        true
     }
 
     /// The stored form of one hour, or `None` when nothing was counted in it.
@@ -161,6 +169,7 @@ impl Stats {
         Self {
             cfg: Mutex::new(cfg),
             inner: Mutex::new(Inner::default()),
+            unsaved: AtomicBool::new(false),
         }
     }
 
@@ -191,7 +200,9 @@ impl Stats {
         }
 
         let mut inner = self.inner.lock();
-        inner.roll(hour);
+        if inner.roll(hour) {
+            self.unsaved.store(true, Ordering::Relaxed);
+        }
         inner.current.get_or_insert_with(|| Unit::new(hour)).add(e);
 
         true
@@ -226,7 +237,9 @@ impl Stats {
     pub fn snapshot(&self) -> Vec<(u32, Arc<UnitDb>)> {
         let hour = current_hour();
         let mut inner = self.inner.lock();
-        inner.roll(hour);
+        if inner.roll(hour) {
+            self.unsaved.store(true, Ordering::Relaxed);
+        }
 
         let mut out: Vec<(u32, Arc<UnitDb>)> = inner
             .past
@@ -251,8 +264,13 @@ impl Stats {
         // Compacting here as well as in `add` is what bounds the live unit on
         // a resolver that goes quiet: an hour nothing was asked in would
         // otherwise keep its full map until the next query arrived.
-        inner.roll(cur);
+        let rolled = inner.roll(cur);
+        let before = inner.past.len();
         inner.past.retain(|id, _| *id >= oldest);
+
+        if rolled || inner.past.len() != before {
+            self.unsaved.store(true, Ordering::Relaxed);
+        }
     }
 
     /// Removes every unit.
@@ -260,6 +278,31 @@ impl Stats {
         let mut inner = self.inner.lock();
         inner.current = None;
         inner.past.clear();
+        drop(inner);
+
+        // `/control/stats_reset` has to reach the file, or a restart brings
+        // back everything it just cleared.
+        self.unsaved.store(true, Ordering::Relaxed);
+    }
+
+    /// Claims the pending write to `stats.db`, if there is one.
+    ///
+    /// True once for each change the file does not already hold: an hour
+    /// rotating, units falling out of the window, or a reset.  Queries
+    /// counted into the live hour are deliberately not one of them.
+    ///
+    /// A running AdGuard Home writes `stats.db` when a unit rotates and when
+    /// it shuts down, and at no other time: watched under 20 queries a second
+    /// it wrote the file once, at the top of the hour.  Writing it every 60
+    /// seconds instead -- the whole file, since that is how bbolt is written
+    /// here -- was 1,440 rewrites a day, 448 MB of them at the default
+    /// day-long window and 38 GB at a 90-day one, for a file that is the same
+    /// bytes as an hour ago except for one unit.
+    ///
+    /// What it costs is upstream's cost: an unclean kill loses the hour in
+    /// progress.  A signal does not, because the shutdown path saves.
+    pub fn claim_save(&self) -> bool {
+        self.unsaved.swap(false, Ordering::Relaxed)
     }
 
     /// The number of stored units.

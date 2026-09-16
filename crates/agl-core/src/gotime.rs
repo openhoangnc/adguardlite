@@ -73,6 +73,14 @@ pub fn parse_rfc3339(s: &str) -> Option<Timestamp> {
         .or_else(|| s.parse::<Zoned>().ok().map(|z| z.timestamp()))
 }
 
+/// Parses an RFC 3339 timestamp into its Unix second.
+///
+/// For callers that only compare one moment with another and would otherwise
+/// have to take a dependency on the date library to do it.
+pub fn parse_rfc3339_secs(s: &str) -> Option<i64> {
+    parse_rfc3339(s).map(Timestamp::as_second)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

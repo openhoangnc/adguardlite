@@ -550,20 +550,41 @@ async fn maintenance(
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+    // Upstream's `periodicRotate` checks once when it starts and then every
+    // hour, however short the configured interval is.  The first tick of a
+    // fresh `interval` fires at once, so the loop covers the check at start.
+    const ROTATION_CHECK: Duration = Duration::from_secs(3600);
+    let mut next_rotation_check = tokio::time::Instant::now();
+
     loop {
         tokio::select! {
             _ = tick.tick() => {}
             _ = shutdown.changed() => return,
         }
 
-        if let Err(e) = state.querylog.flush() {
-            tracing::warn!(error = %e, "flushing the query log");
-        }
         state.stats.prune();
         state.sessions.sweep();
 
-        if let Err(e) = agl_stats::store::save(&stats_path, &state.stats.snapshot()) {
+        // Only when something happened that the file does not hold, which is
+        // an hour rotating or a reset rather than every query counted.  The
+        // query log is not flushed here at all: it is written when its
+        // in-memory buffer fills, which is when a running AdGuard Home writes
+        // it, and on the way out.  Both were measured against one.
+        if state.stats.claim_save()
+            && let Err(e) = agl_stats::store::save(&stats_path, &state.stats.snapshot())
+        {
             tracing::warn!(error = %e, "saving statistics");
+        }
+
+        if tokio::time::Instant::now() >= next_rotation_check {
+            next_rotation_check = tokio::time::Instant::now() + ROTATION_CHECK;
+
+            let ivl = state.config.read().querylog.interval.to_std();
+            match state.querylog.rotate_if_due(ivl) {
+                Ok(true) => tracing::info!("query log rotated"),
+                Ok(false) => {}
+                Err(e) => tracing::warn!(error = %e, "rotating the query log"),
+            }
         }
 
         // Refresh any list whose own interval has elapsed, checked every
@@ -592,7 +613,14 @@ async fn refresh_lists(state: &Shared, ids: Vec<i64>) {
         match state.fetcher.fetch(url.clone()).await {
             Ok(text) => {
                 let mut filters = state.filters.write();
-                if filters.apply_fetched(&state.paths, id, text).is_ok() {
+                // Only a list whose contents actually differ counts: the
+                // engine is rebuilt from all of them, and rebuilding it for a
+                // download that matched is seconds of work and a copy of every
+                // rule in memory for nothing.
+                if filters
+                    .apply_fetched(&state.paths, id, text)
+                    .is_ok_and(agl_filter::lists::Fetched::changed)
+                {
                     updated += 1;
                 }
             }

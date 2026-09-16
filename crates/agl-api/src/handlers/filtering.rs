@@ -286,13 +286,21 @@ pub async fn refresh(
         };
         if let Ok(text) = s.fetcher.fetch(url).await {
             let mut filters = s.filters.write();
-            if filters.apply_fetched(&s.paths, id, text).is_ok() {
+            if filters
+                .apply_fetched(&s.paths, id, text)
+                .is_ok_and(agl_filter::lists::Fetched::changed)
+            {
                 updated += 1;
             }
         }
     }
 
-    s.save_filters().map_err(ApiError::internal)?;
+    // Nothing to write and nothing to rebuild when every list came back the
+    // same, which is what upstream's `refreshFiltersIntl` decides on the same
+    // count before it calls `EnableFilters`.
+    if updated > 0 {
+        s.save_filters().map_err(ApiError::internal)?;
+    }
 
     Ok(Json(json!({ "updated": updated })))
 }

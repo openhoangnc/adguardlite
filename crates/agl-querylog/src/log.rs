@@ -173,6 +173,34 @@ impl QueryLog {
         Ok(written)
     }
 
+    /// Rotates the log when its oldest entry is older than `interval`.
+    ///
+    /// The decision comes from the **first record in the file**, not from the
+    /// file's own timestamps: upstream's `checkAndRotate` reads the first 512
+    /// bytes, takes the `T` field out of them, and rotates once that moment
+    /// plus the interval has passed.  A file that is being appended to was
+    /// modified moments ago, so a modification time would never fire.
+    ///
+    /// Returns whether it rotated.
+    pub fn rotate_if_due(&self, interval: std::time::Duration) -> std::io::Result<bool> {
+        let Some(oldest) = first_entry_secs(&self.path) else {
+            return Ok(false);
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+
+        if oldest.saturating_add(interval.as_secs() as i64) > now {
+            return Ok(false);
+        }
+
+        self.rotate()?;
+
+        Ok(true)
+    }
+
     /// Rotates the current file over the previous one.
     pub fn rotate(&self) -> std::io::Result<()> {
         self.flush()?;
@@ -234,6 +262,25 @@ impl QueryLog {
     pub fn buffered(&self) -> usize {
         self.pending.lock().len()
     }
+}
+
+/// The `T` field of a log's first record, as a Unix second.
+///
+/// Scans the first 512 bytes for it, as upstream's `readJSONValue` does,
+/// rather than parsing the line: the field is the first one every record
+/// carries, and a record can be much longer than the answer is worth.
+fn first_entry_secs(path: &Path) -> Option<i64> {
+    use std::io::Read;
+
+    const KEY: &str = "\"T\":\"";
+
+    let mut buf = [0u8; 512];
+    let n = std::fs::File::open(path).ok()?.read(&mut buf).ok()?;
+    let head = String::from_utf8_lossy(&buf[..n]);
+
+    let rest = &head[head.find(KEY)? + KEY.len()..];
+
+    agl_core::gotime::parse_rfc3339_secs(&rest[..rest.find('"')?])
 }
 
 /// Reads up to `limit` entries from the end of a file, newest first.
@@ -331,6 +378,7 @@ fn open_restricted(path: &std::path::Path) -> std::io::Result<std::fs::File> {
 mod tests {
     use super::*;
     use crate::entry::Result as EntryResult;
+    use std::time::Duration;
 
     fn tmpdir(tag: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!("agl-qlog-{tag}-{}", std::process::id()));
@@ -536,6 +584,68 @@ mod tests {
 
         assert!(!d.join("querylog.json").exists());
         assert!(d.join("querylog.json.1").exists());
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn rotation_is_due_once_the_oldest_entry_is_older_than_the_interval() {
+        // Nothing rotated the query log at all until this was wired up:
+        // `querylog.interval` was carried through the config and read by
+        // nobody, so the file grew for as long as the server ran.
+        let d = tmpdir("rotate-due");
+        let l = log(
+            &d,
+            Config {
+                size_memory: 1,
+                ..Default::default()
+            },
+        );
+
+        let mut old = entry("old.com");
+        old.time = "2020-01-01T00:00:00Z".into();
+        l.push(old);
+        assert!(d.join("querylog.json").exists());
+
+        assert!(l.rotate_if_due(Duration::from_secs(86_400)).unwrap());
+        assert!(!d.join("querylog.json").exists());
+        assert!(d.join("querylog.json.1").exists());
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_log_inside_its_interval_is_left_alone() {
+        // The decision is the first record's own timestamp, not the file's:
+        // a log being appended to was modified moments ago, so a modification
+        // time would never come due.
+        let d = tmpdir("rotate-early");
+        let l = log(
+            &d,
+            Config {
+                size_memory: 1,
+                ..Default::default()
+            },
+        );
+
+        let mut old = entry("old.com");
+        old.time = "2020-01-01T00:00:00Z".into();
+        l.push(old);
+
+        let century = Duration::from_secs(100 * 365 * 86_400);
+        assert!(!l.rotate_if_due(century).unwrap());
+        assert!(d.join("querylog.json").exists());
+        assert!(!d.join("querylog.json.1").exists());
+
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
+    fn a_log_that_does_not_exist_is_not_due() {
+        let d = tmpdir("rotate-missing");
+        let l = log(&d, Config::default());
+
+        assert!(!l.rotate_if_due(Duration::from_secs(1)).unwrap());
 
         std::fs::remove_dir_all(&d).ok();
     }
