@@ -185,6 +185,16 @@ jobs:
             exit 0
           fi
 
+          # An untagged manifest younger than this is very likely a build in
+          # flight, not a leftover.  Pushing a commit and its release tag
+          # starts two runs, and the first to finish used to delete the
+          # per-architecture manifests the second had already pushed but not
+          # yet assembled -- which failed that run with "not found" against a
+          # digest it had just created.  They cost nothing to leave; the next
+          # run collects them.
+          cutoff="$(date -u -d '2 hours ago' +%Y-%m-%dT%H:%M:%SZ)"
+          echo "keeping untagged manifests newer than $cutoff"
+
           # Newest first. Sorted here rather than trusted from the API, which
           # documents no order, and `--paginate` would only order within a page
           # anyway. ISO 8601 sorts lexically.
@@ -213,6 +223,10 @@ jobs:
           ids=""
           while IFS=$'\t' read -r created id digest tags; do
             case "$keep" in *" $digest "*) continue ;; esac
+            if [ -z "${tags:-}" ] && [[ "$created" > "$cutoff" ]]; then
+              echo "skip    $digest  $created  (untagged, but a build may still be assembling it)"
+              continue
+            fi
             echo "delete  $digest  $created  [${tags:-untagged}]"
             ids="$ids,$id"
           done <<< "$all"
