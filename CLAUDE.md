@@ -4,10 +4,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this project is
 
-A Rust backend for AdGuard Home, built as a **drop-in replacement** for the Go
-binary of release **v0.107.79**. It reads and writes the same config file, the
-same on-disk data, serves the same HTTP API and the same web interface, and
-ships in a Docker image with the same runtime contract.
+**Sift** is a Rust backend for AdGuard Home, built as a **drop-in
+replacement** for the Go binary of release **v0.107.79**. It reads and writes
+the same config file, the same on-disk data, serves the same HTTP API, and
+ships in a Docker image with the same runtime contract. The web interface is a
+**fork** of AdGuard Home's, under `web/client`, with the excluded features
+taken out of it and the branding changed.
+
+The binary reports its **own** version — `sift_core::VERSION`, from the
+workspace version, starting at v0.2.0. `sift_core::AGH_COMPAT_VERSION` records
+the AdGuard Home release the formats are matched against; that is what every
+compatibility claim in the tree means, not the reported version.
 
 The overriding constraint is **compatibility, not elegance**. Where a format or
 a behaviour looks odd, it is almost certainly odd because Go does it that way,
@@ -16,6 +23,9 @@ and changing it breaks a real user's installation. Read the comments before
 
 ## Where things are written down
 
+- **`docs/`** — the documentation the web interface links to: FAQ,
+  configuration, clients, encryption, privacy. A behaviour described there is a
+  promise; check it against the code before repeating it.
 - **`TASK.md`** — what is done, what is not, and the deliberate deviations.
   **Read it before starting work, and update it when work lands**: it is the
   handoff between sessions, and it is only worth anything if it stays true.
@@ -39,6 +49,7 @@ installation.
 | HTTP API | 81 paths under `/control/*`, all routed |
 | Sessions | `<work>/data/sessions.db`, bucket `sessions-2`, 16-byte token key |
 | Web interface | single-page app served from the embedded filesystem at `/` |
+| Version | **not** part of the contract: this build reports its own, not v0.107.79 |
 | Ports | 53 tcp/udp, 67–68 udp, 80, 443 tcp/udp, 853 tcp/udp, 3000, 5443, 6060 |
 
 ## Commands
@@ -46,29 +57,36 @@ installation.
 ```bash
 cargo build --release            # fast to build and to run
 cargo build --profile dist       # fat LTO, panic=abort, stripped: ~10.7 MB
-cargo test --workspace           # 633 tests, no network or Go build needed
+cargo test --workspace           # 696 tests, no network or Go build needed
 cargo clippy --workspace --all-targets
 ```
 
 Running one test or one crate:
 
 ```bash
-cargo test -p agl-filter                          # one crate
-cargo test -p agl-filter --lib engine             # one module's tests
-cargo test -p agl-filter --test differential      # one integration test file
-cargo test -p agl-config reproduces_the_reference -- --exact --nocapture
+cargo test -p sift-filter                          # one crate
+cargo test -p sift-filter --lib engine             # one module's tests
+cargo test -p sift-filter --test differential      # one integration test file
+cargo test -p sift-config reproduces_the_reference -- --exact --nocapture
 ```
 
 Tests that need outbound network are `#[ignore]`d:
 
 ```bash
-cargo test -p agl-dns --test live -- --ignored     # real DoT/DoH upstreams
+cargo test -p sift-dns --test live -- --ignored     # real DoT/DoH upstreams
 ```
 
 Running the server:
 
 ```bash
 cargo run --release -- --no-check-update -c ./AdGuardHome.yaml -w ./work
+```
+
+Rebuilding the web interface — needs Node:
+
+```bash
+scripts/build-frontend.sh         # web/client -> web/build, brotli-compressed
+scripts/sync-frontend.sh v0.1.2   # merge a newer upstream client into the fork
 ```
 
 Cross-implementation verification — needs `upstream/` and a Go toolchain:
@@ -118,7 +136,7 @@ The comparison harnesses live in `tests/compat/`:
 
   ```bash
   tests/compat/dropin.sh                          # the published image
-  tests/compat/dropin.sh adguardlite:local        # one you just built
+  tests/compat/dropin.sh sift:local        # one you just built
   ```
 
   What it checks is that **nothing on the volume has to change**: the config
@@ -136,38 +154,38 @@ filter with the verdict Go gave for 4,190 domains.
 Ten crates, layered so nothing depends upwards:
 
 ```
-agl-core                        Go-compatible primitives: durations, byte sizes,
+sift-core                        Go-compatible primitives: durations, byte sizes,
                                 filtering reasons, Go's JSON time format, the
                                 weekly schedule
-agl-config    -> core           AdGuardHome.yaml, schema 34, a YAML emitter that
+sift-config    -> core           AdGuardHome.yaml, schema 34, a YAML emitter that
                                 reproduces Go yaml.v3's output, and the
                                 migrations from every older schema
-agl-filter    -> core, config   rule parser and matcher, list storage,
+sift-filter    -> core, config   rule parser and matcher, list storage,
                                 blocked-services catalogue, safe-search rules
-agl-dns       -> core, filter   wire codec, cache, upstreams, listeners, EDNS,
+sift-dns       -> core, filter   wire codec, cache, upstreams, listeners, EDNS,
                                 DNS64, DDR, client registry, the hash-prefix
                                 checker, and the resolver that orders every step
-agl-querylog  -> core           querylog.json
-agl-bolt                        a minimal bbolt reader and writer
-agl-gob                         Go `gob` for the statistics unit
-agl-stats     -> core, bolt,    collection, aggregation, persistence
+sift-querylog  -> core           querylog.json
+sift-bolt                        a minimal bbolt reader and writer
+sift-gob                         Go `gob` for the statistics unit
+sift-stats     -> core, bolt,    collection, aggregation, persistence
                  gob
-agl-api       -> all, bolt      the control API, the embedded web interface, the
+sift-api       -> all, bolt      the control API, the embedded web interface, the
                                 HTTP/3 listener, session storage
-adguardlite   -> all            the binary: CLI, wiring, supervision, client
+sift   -> all            the binary: CLI, wiring, supervision, client
                                 discovery, ipset, logging, OS settings, service
                                 control
 ```
 
-`agl-api` and `agl-filter` deliberately hold no HTTP client. Downloading filter
+`sift-api` and `sift-filter` deliberately hold no HTTP client. Downloading filter
 lists is injected by the binary through the `ListFetcher` trait in
-`agl-api/src/state.rs`, and pushing config changes into the running server goes
-through `Reloader` in the same file. That is why `agl-filter::lists::Manager`
+`sift-api/src/state.rs`, and pushing config changes into the running server goes
+through `Reloader` in the same file. That is why `sift-filter::lists::Manager`
 exposes `apply_fetched` rather than a `refresh` that downloads.
 
 ### The request path
 
-`agl-dns/src/resolver.rs` is the file to read first. The **order** of its steps
+`sift-dns/src/resolver.rs` is the file to read first. The **order** of its steps
 is observable behaviour copied from `internal/dnsforward`:
 
 1. a request without exactly one question gets `FORMERR`;
@@ -195,12 +213,12 @@ toggles, its own blocked services and its own safe search.
 - **Config field order is the file format.** Upstream warns against reordering,
   and the emitter preserves declaration order. Adding a field in the wrong
   place changes the file a user diffs.
-- **`agl-config`'s YAML emitter is hand-written** because Go's yaml.v3 indents
+- **`sift-config`'s YAML emitter is hand-written** because Go's yaml.v3 indents
   sequences under their key and prefers single quotes, and no Rust YAML crate
   does both. `reproduces_the_reference_config_byte_for_byte` guards it.
 - **`NetworkRule` is 56 bytes and that is load-bearing.** A real list holds
   ~180,000 of them. When the modifiers were stored inline the struct was 296
-  bytes and the engine used *more* memory than Go. `crates/agl-filter/tests/
+  bytes and the engine used *more* memory than Go. `crates/sift-filter/tests/
   sizes.rs` fails if the layout regresses.
 - **Reserved filter list IDs** match upstream's `rulelist.APIID`: `0` custom
   rules, `-1` the system hosts file, `-2` blocked services. The resolver maps
@@ -210,17 +228,17 @@ toggles, its own blocked services and its own safe search.
   depends on how the types were first walked. The bar is that each side decodes
   the other.
 - **The binary target is named `AdGuardHome`**, so `module_path!` reports that,
-  not the package name. A log filter spelled `adguardlite=info` compiles and
-  matches nothing; `crates/adguardlite/src/main.rs` has a test guarding this.
+  not the package name. A log filter spelled `sift=info` compiles and
+  matches nothing; `crates/sift/src/main.rs` has a test guarding this.
 - **The blocked-services schedule is inverted.** A day range says when the
   block is *paused*, not when it applies, so an empty schedule blocks around
-  the clock. `agl-core/src/schedule.rs` exposes `blocks_at` for that reason.
+  the clock. `sift-core/src/schedule.rs` exposes `blocks_at` for that reason.
 - **Blocked services are a separate engine** from the blocklists, so the
   schedule can pause them per request without rebuilding anything.
 - **`dns.blocked_hosts` holds rules, not names**, and an `@@` exception in it
   *blocks*. Upstream's `isBlockedHost` keeps only "something matched" from its
   engine and throws the match itself away, so an exception rule refuses the
-  query like any other. `agl-dns/src/blocked.rs` reproduces that deliberately,
+  query like any other. `sift-dns/src/blocked.rs` reproduces that deliberately,
   and its tests record what a running Go build answered for each form.
 - **The config is read before the tokio runtime starts.** Two of the things it
   decides — where the log goes and which user to run as — must be settled while
@@ -233,15 +251,59 @@ The workspace is split so `cargo` parallelises across crates. Dependencies are
 built at `opt-level = 2` even in debug so they are paid for once; our own crates
 stay unoptimised with line-tables-only debug info. An incremental rebuild after
 touching one file is roughly 8 seconds. Prefer a hand-written implementation to
-a new dependency when the need is narrow — that is why `agl-bolt`, `agl-gob`
-and the HTTPS fetch in `crates/adguardlite/src/fetch.rs` exist.
+a new dependency when the need is narrow — that is why `sift-bolt`, `sift-gob`
+and the HTTPS fetch in `crates/sift/src/fetch.rs` exist.
 
 ## The web interface
 
-Committed pre-built and gzip-compressed under `web/build` (9.7 MB of assets →
-2.5 MB in the binary), embedded by `agl-api/src/ui.rs`, which serves the stored
-bytes to clients that accept gzip and decompresses for those that do not.
-Rebuild it with `scripts/build-frontend.sh` after changing the pinned release.
+**The sources live in `web/client`** — a fork of AdGuard Home v0.107.79's
+`client/` at commit `05ba17b2`, with DHCP and DNSCrypt removed, the branding
+changed to Sift and every outbound link repointed. `NOTICE.md` lists
+what changed, states the modification for GPL-3.0 §5(a), and records the
+trademark position. Before editing, remember it is someone else's React app:
+match its shape rather than improving it.
+
+**Taking a newer upstream client**: `scripts/sync-frontend.sh v0.107.80` three-way
+merges upstream's own diff between the recorded base and that tag. It prints
+the checks to run afterwards — chiefly that DHCP and DNSCrypt have not come
+back and that no `link.adtidy.org` link has. Bump the base in the script and in
+`NOTICE.md` when a sync lands.
+
+The build is committed under `web/build`, **brotli**-compressed (9.1 MB of
+assets → 1.7 MB in the binary), and embedded by `sift-api/src/ui.rs`. Rebuild it
+with `scripts/build-frontend.sh` after **any** change under `web/client` — the
+committed output is what ships, and a source change nobody built is invisible.
+
+Three things about how assets are served:
+
+- **Brotli only, no gzip on the wire.** The stored form is `.br`; a client that
+  accepts `br` gets those bytes, and anything else is decompressed on the way
+  out. Over plain HTTP most browsers still advertise only gzip, so those
+  clients pay a decompression — which is affordable only because of the
+  caching below.
+- **A name carrying a content hash is cached forever.** `is_content_addressed`
+  spots webpack's `main.<20 hex>.js`, and those get `immutable` with a year's
+  `max-age`. The three HTML shells and the icons get `no-cache`, so a new build
+  is picked up.
+- **Every response carries an `ETag`** — the stored file's SHA-256, per
+  *representation*: the compressed and decompressed forms must not share one,
+  or a cache hands the wrong bytes to the wrong client. `If-None-Match` is
+  answered with a 304 before the body is touched.
+
+Working on the frontend:
+
+```bash
+cd web/client
+npx tsc --noEmit                 # typecheck
+npx eslint --ext .ts,.tsx src    # lint; CI-clean, keep it that way
+npx vitest --run                 # unit tests
+```
+
+Locale keys live in `src/__locales/*.json`, 36 files, alphabetically sorted.
+`en.json` is the source of truth; a key removed there must be removed from all
+36. All 36 say "Sift" — when renaming across them, check what attaches
+to the name: Korean particles and Finnish vowel harmony both change with it,
+and `TASK.md` records which ones moved.
 
 ## Housekeeping
 
@@ -264,7 +326,7 @@ about how they fit:
   listener is encrypted; DoH answers over plain HTTP only when
   `http.doh.insecure_enabled` is set, so an operator cannot expose queries by
   accident.
-- **DoH goes through `agl_dns::server::Server::handle`**, not straight to the
+- **DoH goes through `sift_dns::server::Server::handle`**, not straight to the
   resolver, so it gets the same rate limiting, access control, query log and
   statistics as UDP and TCP. Anything added to that path applies to DoH for
   free; anything that bypasses it silently does not.
@@ -273,7 +335,7 @@ about how they fit:
   transport differs. `Proto` is exhaustively matched in the query-log mapping,
   so adding a transport there fails the build until it is given a name.
 - **HTTP/3 is a fourth listener on the HTTPS port**, over UDP rather than TCP,
-  and it hands requests to the same `Router`. `agl-api/src/http3.rs` inserts
+  and it hands requests to the same `Router`. `sift-api/src/http3.rs` inserts
   `ConnectInfo` itself, because nothing does it for a hand-driven router.
 - **The certificate is reloadable.** The listeners are built around
   `tls::Reloadable`, a `ResolvesServerCert` that reads from a shared slot, so
@@ -294,9 +356,9 @@ decisions, not gaps. Each refuses clearly where a user would notice, and
 interface cannot store settings nothing acts on. Two things follow that are
 easy to get wrong:
 
-- **`DhcpConfig` in `agl-config` stays.** The config file must round-trip byte
+- **`DhcpConfig` in `sift-config` stays.** The config file must round-trip byte
   for byte, and a user switching back to the Go build keeps their settings.
-  Deleting the model breaks the golden test in `agl-config/src/file.rs`.
+  Deleting the model breaks the golden test in `sift-config/src/file.rs`.
 - **`dhcp_status` must not echo the stored config.** Reporting a stored
   `enabled: true` tells the interface a server is running when none is.
 

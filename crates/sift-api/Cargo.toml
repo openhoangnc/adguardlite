@@ -1,0 +1,62 @@
+[package]
+name = "sift-api"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sift-bolt = { path = "../sift-bolt" }
+sift-config = { path = "../sift-config" }
+sift-core = { path = "../sift-core" }
+sift-dns = { path = "../sift-dns" }
+sift-filter = { path = "../sift-filter" }
+sift-querylog = { path = "../sift-querylog" }
+sift-stats = { path = "../sift-stats" }
+ahash = "0.8.12"
+axum = { version = "0.8.9", features = ["http1", "http2", "json", "query", "tokio"] }
+base64 = "0.23.1"
+bcrypt = "0.19.3"
+h3 = "0.0.8"
+h3-quinn = "0.0.10"
+hickory-proto = "0.26.3"
+bytes = "1.12.1"
+http = "1.5.0"
+http-body-util = "0.1.5"
+hyper = "1.11.1"
+hyper-util = { version = "0.1.20", features = ["server", "server-auto", "tokio"] }
+idna = "1.1.0"
+jiff = { version = "0.2.37", features = ["serde"] }
+parking_lot = "0.12.5"
+rand = "0.10.2"
+rust-embed = "8.12.0"
+quinn = { version = "0.11.12", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "0.23.44", default-features = false, features = ["ring", "std", "tls12"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "net", "time", "sync", "macros", "fs"] }
+tokio-rustls = { version = "0.26.5", default-features = false, features = ["ring", "tls12"] }
+tower = "0.5.3"
+tracing = "0.1.44"
+if-addrs = "0.15.0"
+brotli-decompressor = { version = "6.0.0", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+sift-config = { path = "../sift-config" }
+rcgen = "0.14.10"
+rustls-pemfile = "2.2.0"
+sift-dns = { path = "../sift-dns" }
+sift-filter = { path = "../sift-filter" }
+sift-querylog = { path = "../sift-querylog" }
+sift-stats = { path = "../sift-stats" }
+axum = "0.8.9"
+base64 = "0.23.1"
+bytes = "1.12.1"
+http-body-util = "0.1.5"
+jiff = "0.2.37"
+parking_lot = "0.12.5"
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }

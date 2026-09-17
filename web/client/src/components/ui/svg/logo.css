@@ -1,0 +1,25 @@
+/* Colours for the wordmark in <svg/logo.tsx>.
+ *
+ * The lettering rides on `currentColor`, so a theme only has to set `color`;
+ * the funnel is gold and is left alone by the theme switch. */
+
+.logo {
+    color: #131313;
+}
+
+.logo__wordmark {
+    fill: currentColor;
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+}
+
+.logo__mark {
+    stroke: #d4a017;
+}
+
+[data-theme='dark'] .logo {
+    color: #fff;
+}
+
+[data-theme='dark'] .logo__mark {
+    stroke: #f0b429;
+}

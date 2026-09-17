@@ -1,11 +1,11 @@
 # Task tracker
 
-Work status for the Rust backend, against AdGuard Home **v0.107.79**.
+Work status for Sift, against AdGuard Home **v0.107.79**.
 
 Legend: **[x]** done and verified · **[~]** partial, see the note · **[ ]** not started
 
 Verification claims below are reproducible with `scripts/verify.sh` and
-`cargo test --workspace` (633 tests).
+`cargo test --workspace` (696 tests).
 
 ---
 
@@ -20,7 +20,7 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 | Query log | done, byte-identical |
 | Statistics | done, `stats.db` interoperable both ways |
 | HTTP API | all 81 paths routed · 73 implemented, 8 refuse by design |
-| Web interface | done, embedded |
+| Web interface | forked into `web/client`, built to `web/build`, embedded |
 | Docker | done, same runtime contract |
 | DHCP | **out of scope** — API reports it off and refuses changes |
 | Encrypted inbound listeners | DoT, DoH, HTTP/3 and DoQ done · DNSCrypt **out of scope** |
@@ -28,6 +28,7 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 | Clients | persistent settings, ClientID, ARP/rDNS/WHOIS/hosts discovery |
 | Operations | logging, rotation, pidfile, privileges, service install |
 | Self-update | **out of scope** — the check reports releases, the install refuses |
+| Version reported | this project's own, from the workspace version — v0.2.0 |
 
 ---
 
@@ -191,8 +192,8 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 - [x] Statistics: hourly units, upstream's result categories and quirks
 - [x] One live hour held in full, finished hours held in the top-N form
       they are stored in, as `internal/stats` holds them
-- [x] `agl-bolt`: bbolt reader and writer
-- [x] `agl-gob`: Go `gob` for the statistics unit
+- [x] `sift-bolt`: bbolt reader and writer
+- [x] `sift-gob`: Go `gob` for the statistics unit
 - [x] **Session persistence** in `sessions.db`, in the layout the Go build
       uses, so a restart does not sign everyone out and either build reads the
       other's file
@@ -211,10 +212,12 @@ Verification claims below are reproducible with `scripts/verify.sh` and
       dashboard it cannot load
 - [x] Setup wizard reachable before a user exists
 - [x] **Verified**: response shapes match Go for all 25 endpoints the UI loads
-- [x] Web interface embedded, gzip-compressed, served with content negotiation
-- [x] Version check: `/control/version.json` fetches AdGuard's announcement,
-      caches it for eight hours, honours `--no-check-update`, and reports
-      `can_autoupdate: false`
+- [x] Web interface forked into `web/client`, built to `web/build`, embedded
+      brotli-compressed, served with content negotiation, immutable caching
+      for hashed assets and `304` revalidation for the rest
+- [x] Version check: `/control/version.json` fetches this project's latest
+      GitHub release, caches it for eight hours, honours `--no-check-update`,
+      and reports `can_autoupdate: false`
 
 ### Packaging and operations
 - [x] CLI accepting every flag the Go binary documents
@@ -222,7 +225,7 @@ Verification claims below are reproducible with `scripts/verify.sh` and
       and data directory a Go instance produced
 - [x] **Published image**: `.github/workflows/docker.yml` builds `linux/amd64`
       and `linux/arm64` on native runners, pushes each by digest, and joins
-      them into one multi-architecture tag on `ghcr.io/openhoangnc/adguardlite`.
+      them into one multi-architecture tag on `ghcr.io/openhoangnc/sift`.
       A prune step keeps the newest three releases and their per-architecture
       children — resolved from each kept index rather than counted, because
       deleting a child breaks `docker pull` for that architecture. Attestations
@@ -302,7 +305,7 @@ Why it was excluded rather than scheduled:
   visible bug, and this project has no way to test for one the way it tests
   everything else — by comparing against a running Go build.
 - The protocols it would sit alongside all work, so a deployment that needs
-  DNSCrypt can front adguardlite with `dnscrypt-proxy`.
+  DNSCrypt can front sift with `dnscrypt-proxy`.
 
 Note that DNSCrypt is **not** a dead protocol: AdGuard's own provider list at
 <https://adguard-dns.io/kb/general/dns-providers/> still publishes DNSCrypt
@@ -313,25 +316,32 @@ with the Go implementation as an oracle throughout.
 
 ### Replacing its own binary
 
-**`POST /control/update` answers 501.** The releases the announcement server
-publishes are AdGuard Home's own Go binaries; downloading one and writing it
-over this executable would replace adguardlite with a different
-implementation. That is not an update, and doing it silently would be worse
-than refusing.
+**`POST /control/update` answers 501.** Rewriting a running executable in place
+is the job of whatever installed it; this ships as a container image and as
+archives, and doing it silently from inside the process would be worse than
+refusing.
 
 What does work:
 
 - `GET`/`POST /control/version.json` fetches
-  `https://static.adtidy.org/adguardhome/release/version.json`, caches the
-  answer for eight hours, and re-fetches on `recheck_now`. The interface can
-  therefore say a newer AdGuard Home exists.
+  `https://api.github.com/repos/openhoangnc/sift/releases/latest`,
+  caches the answer for eight hours, and re-fetches on `recheck_now`.
 - `can_autoupdate` is always `false`, which is how the interface is told not to
   offer the button.
 - `--no-check-update` reports the feature as `disabled`, and nothing is
-  fetched.
+  fetched. The Docker `CMD` passes it.
 
-Replace the binary through whatever installed it: the package manager, the
-container image, or `-s stop`, copy, `-s start`.
+`parse_version` accepts **two** documents: GitHub's, which names the version
+`tag_name` and the page `html_url`, and the flat `version`/`announcement_url`
+shape AdGuard's own announcement server serves — so pointing the checker at a
+hand-written `version.json` keeps working. A repository with no release yet
+answers 404, the fetch fails, and the handler reports the running version as
+`new_version`, which the interface reads as "nothing newer".
+
+**Why not AdGuard's announcement server any more.** It was the source while
+this build reported `v0.107.79`. Now that it reports its own version, that
+server would announce an AdGuard Home release as an update to Sift —
+permanently, and naming something this binary could not become.
 
 ---
 
@@ -348,7 +358,7 @@ shape of the mistakes is worth keeping, not because the work is outstanding.
   layered on the inner router sees it, so the comparison never matched and the
   only unauthenticated route was closed. The wizard hid it: `needs_install()`
   opens everything, so a fresh instance worked right up until it had a user.
-  `agl-api/tests/gate.rs` drives the assembled router, which is the only place
+  `sift-api/tests/gate.rs` drives the assembled router, which is the only place
   the seam exists.
 
 - **The first launch opened on a dashboard.** Upstream's `postInstallHandler`
@@ -391,7 +401,7 @@ shape of the mistakes is worth keeping, not because the work is outstanding.
 - **The wizard had no addresses to show.** `/control/install/get_addresses`
   returned `"interfaces": {}`, so the setup wizard listed no address to point
   a router at and both "Listen interface" dropdowns were empty. The interface
-  list is real now (`agl-api/src/netiface.rs`); the wizard reads `name`,
+  list is real now (`sift-api/src/netiface.rs`); the wizard reads `name`,
   `ip_addresses` and `flags`, and greys out anything whose flags lack `up`.
 
 - **`dhcp_available` was `true`.** Upstream sets it from whether it actually
@@ -416,7 +426,7 @@ hold.
   and `0o644`. The query log records every name every client on the network
   looked up, so on a shared host — or in a volume mounted into a second
   container — that is a disclosure the Go build does not make. The modes now
-  come from `agl_core::perms`, which the config writer, the query log, the
+  come from `sift_core::perms`, which the config writer, the query log, the
   filter cache and `Paths::ensure` all share.
 
 - **The setup wizard suggested the wrong admin port.** `web_port` in
@@ -481,7 +491,7 @@ look like a hang in the first place.
 At two million rules the engine's structure is the whole story, so the choices
 are recorded here rather than rediscovered. All of it was measured on a real
 37-list installation — 2,272,040 rules — with
-`cargo run --release -p agl-filter --example loadprofile <dir>`.
+`cargo run --release -p sift-filter --example loadprofile <dir>`.
 
 **Expressions are built on first use.** Every rule that is not `||domain^`
 needs one; 156,557 did. Building them all at load cost 22 seconds and most of
@@ -535,7 +545,7 @@ structure fixed that. It is the obvious place for the next person to look.
   query is answered by nothing. Every lookup timed out, `Checker::connect`
   failed, and both features stayed off with an error in the log while the
   interface reported them on. Port 53, and the unit test that asserted 443
-  now asserts 53 and says why. Found because `cargo test -p agl-dns --test
+  now asserts 53 and says why. Found because `cargo test -p sift-dns --test
   live -- --ignored` was run; nothing offline could have caught it, since the
   port only matters against a real resolver.
 - **A live test asserted AdGuard's data rather than this build's behaviour.**
@@ -582,7 +592,7 @@ signed out. Two defects met there.
 serve; signed in, `/` is 200 and `/login.html` is `302 /`; Basic credentials
 still open `/control/status`. A browser pointed at the root renders AdGuard's
 login form with no native dialog and no console errors. Three tests in
-`agl-api/tests/gate.rs` cover it, including the absence of the header.
+`sift-api/tests/gate.rs` cover it, including the absence of the header.
 
 ## Found reading the code after that, and fixed
 
@@ -624,7 +634,7 @@ credentials block the login form for the same address; a request carrying no
 credentials is not an attempt, so `/`, `/login.html` and an unauthenticated
 `/control/status` behave normally throughout; and `auth_attempts: 0` logs
 `login rate limiting is disabled` and never blocks. Four tests in
-`agl-api/tests/gate.rs` and five in `agl-api/src/auth.rs` cover it; the two
+`sift-api/tests/gate.rs` and five in `sift-api/src/auth.rs` cover it; the two
 throttle tests were confirmed to fail against an unlimited build, and the
 clearing test against a build that never calls `record_success`.
 
@@ -707,8 +717,8 @@ lowercases every entry, hands the whole list to `urlfilter.NewDNSEngine`, and
 asks it whether anything matched — so all three forms are just rule syntaxes,
 and the query *type* takes part in the match.
 
-The fix is to do the same: `agl_dns::blocked::BlockedHosts` compiles the list
-with `agl_filter`'s engine, the one the filter lists already use, so
+The fix is to do the same: `sift_dns::blocked::BlockedHosts` compiles the list
+with `sift_filter`'s engine, the one the filter lists already use, so
 `$dnstype`, hosts-file syntax and the rest come along rather than being
 special-cased. One conversion is needed first, and it is the whole reason the
 old behaviour looked defensible: upstream's parser tries `rules.NewHostRule`
@@ -757,7 +767,7 @@ before the fix showed 12 on the first sixteen cases alone. The list also
 applies without a restart: a `||live.example.org^` added through
 `/control/access/set` refuses the name and its subdomains on the next query,
 and a name dropped from the list is answered again. Twelve tests in
-`agl-dns/src/blocked.rs` carry the measured cases, each noted with what the Go
+`sift-dns/src/blocked.rs` carry the measured cases, each noted with what the Go
 build did.
 
 ## Found optimising the upstream query path, and fixed
@@ -791,7 +801,7 @@ interface offers, the config file records, and nothing acts on.
   | query log lines | 6 | 6 |
 
 - **`cache_optimistic_answer_ttl` had no readers at all.** It defaulted to 30s
-  in `agl-config` and nothing outside that crate ever looked at it. The run
+  in `sift-config` and nothing outside that crate ever looked at it. The run
   above is what settled its meaning: the configured TTL is *stamped* on an
   optimistically served answer rather than counted down from what the entry had
   left — which would hand the client a number that had already run out. The
@@ -913,7 +923,7 @@ buffer filling, and a four-minute run at 2 q/s — not enough to fill it —
 produced no write at all.
 
 - **`stats.db` was rewritten every 60 seconds, whole.** The maintenance tick
-  called `save` unconditionally, and `agl-bolt` writes a database by writing
+  called `save` unconditionally, and `sift-bolt` writes a database by writing
   all of it. At the default day-long window that is 1,440 rewrites of a
   311 KB file — **448 MB a day** — and the file grows with the window: 2.1 MB
   at seven days, 8.9 MB at thirty, 26.6 MB at ninety, where the same tick
@@ -961,7 +971,7 @@ at startup and every hour after. Verified end to end: an interval of a minute
 and a first entry three hours old rotated on startup, the API kept reading the
 entries out of `querylog.json.1`, and a recent first entry left it alone.
 
-**Left alone, deliberately.** `agl-bolt` writes a whole database where bbolt
+**Left alone, deliberately.** `sift-bolt` writes a whole database where bbolt
 writes the pages that changed, so an hour's rotation costs 311 KB against
 upstream's ~13 KB. At 24 writes a day that is 7.5 MB against 312 KB, and an
 incremental bbolt writer is a great deal of machinery for the difference.
@@ -1054,6 +1064,234 @@ part of one does not match.
 stores a question as the wire carried it — punycode — while the user types
 their own script. That is the third difference the comparison turned up, and it
 is closed with the same `idna` the tree already carries.
+
+---
+
+## The web interface, forked
+
+The interface was AdGuard's compiled output, embedded. It is now **this
+project's fork of their sources**, at `web/client`, built by
+`scripts/build-frontend.sh` into `web/build`. The reason to fork rather than
+keep vendoring the build: two of the three exclusions are visible in the UI as
+settings pages and upstream examples for things that do not exist here, and
+there is no way to take them out of a compiled bundle.
+
+`web/client` began as a verbatim copy of v0.107.79's `client/`, so
+`diff -ru upstream/client web/client` is the complete list of modifications.
+`NOTICE.md` records the copyright position; the changes themselves:
+
+- **DHCP is gone.** `components/Settings/Dhcp/`, `containers/Dhcp.ts`,
+  `reducers/dhcp.ts`, the route, the menu entry, the nine API methods, the
+  twenty-odd actions, the `DhcpData`/`DhcpInterface` state, the placeholder
+  helpers, the e2e spec, and 46 keys × 36 locale files. What is left that still
+  mentions DHCP is about the *router's* DHCP, which is a real thing a user
+  configures elsewhere.
+- **DNSCrypt is gone.** The `sdns://` line in the upstream examples, the
+  `dnscrypt` transport label in the query log, `port_dnscrypt` and
+  `dnscrypt_config_file` in the TLS status type, and three setup-guide entries
+  (DNSCloak and its DNS stamp, dnscrypt-proxy, dnscrypt.info's implementation
+  list). Five locale keys × 36 files.
+- **Rebranded to Sift.** AdGuard's shield is gone from `ui/svg/logo.tsx`,
+  replaced by a funnel of this project's own, and the lettering is a `<text>`
+  in the system UI stack rather than traced outlines. The mark and the wordmark
+  are separate elements so the dark theme can flip the lettering without
+  touching the gold; the three `filter: invert(1)` rules that used to flip the
+  whole SVG are gone, because inverting gold gives blue. The icons are
+  rasterised from the same path, filled rather than stroked, because a
+  2.8-unit stroke disappears at 16px. See [Naming](#naming) below.
+- **Links.** Seven `link.adtidy.org` redirectors resolved to their real
+  destinations (recorded in the commit); repository and issue links pointed at
+  this project; six AdGuard Home wiki links pointed at `docs/`, written for
+  this purpose.
+- **A Clear cache button** on the dashboard beside Refresh statistics, behind
+  the same `confirm_dns_cache_clear` the DNS settings page uses.
+- **`.twosky.json` dropped.** `helpers/twosky.ts` imported
+  `../../../.twosky.json` — AdGuard's translation-service configuration, which
+  lives *above* `client/` and so was not part of the fork. Replaced by
+  `helpers/languages.ts`, carrying the same 36-language list.
+
+### Assets: brotli, and cached properly
+
+`sift-api/src/ui.rs` used to store gzip and serve it to whoever accepted gzip.
+It now stores **brotli** — 9.1 MB of assets to 1.7 MB, against gzip's 2.5 MB —
+compressed by `scripts/brotli.mjs` at quality 11, run from the build script.
+
+The catch is that browsers advertise `br` only over a secure origin. Over plain
+HTTP on a LAN address, a browser sends `gzip, deflate` and is served the
+**decompressed** bytes: bigger on the wire than gzip was, and a decompression
+per request. Two things make that affordable, and they are the rest of the
+change:
+
+- a name carrying a content hash — webpack's `main.<20 hex>.js` —
+  is served `Cache-Control: public, max-age=31536000, immutable`, so it is
+  fetched once per build and never asked about again;
+- everything else is `no-cache` with an `ETag`, and `If-None-Match` is answered
+  **304** without touching the body.
+
+The `ETag` is the stored file's SHA-256, which rust-embed computes at build
+time, suffixed with the encoding: `"<hash>-br"` and `"<hash>-identity"`. They
+must differ — a shared validator lets a cache hand compressed bytes to a client
+that asked for plain ones. `Vary: Accept-Encoding` is on every response.
+
+`flate2`, `tower-http` and `mime_guess` left `sift-api`'s manifest with this:
+the first because nothing decodes gzip there any more, the other two because
+nothing had referenced them in the first place. `brotli-decompressor` replaced
+them — the decoder only, since the encoding happens in Node at build time.
+
+**Watch out for:** `content-length: 0` on a 304. hyper writes it and removing
+it in the handler does not survive serialisation. RFC 9110 makes the header
+optional there and a truthful value would mean decompressing the very body the
+304 exists to avoid, so it stays.
+
+## Found reviewing the fork, and fixed
+
+Three things the first pass left behind, and one it introduced.
+
+### Per-client upstreams were stored and ignored
+
+`clients.rs` carried `Persistent::upstreams`, `app.rs` copied it into the
+registry and the client form offered the field — and nothing read it. Every
+client resolved through the global pool. The exact shape this tree warns
+against everywhere else: a setting the interface accepts and the resolver
+throws away.
+
+Wired through, and the interesting part is what had to come with it:
+
+- **`Resolver::client_pools`**, a map from an upstream set to its pool, built
+  by `app::build_client_pools` and installed by `reload_upstreams` beside the
+  global one. Keyed by `clients::upstream_key` — the normalised upstream lines,
+  not the client's name — so two clients configured with the same servers share
+  one pool, and renaming a client reconnects nothing.
+- **`cache::Key::upstreams`.** Without this the fix would have been worse than
+  the bug: client A resolves an intranet name through its company's
+  split-horizon resolver, client B asks the same question, and B gets A's
+  answer out of the shared cache. The key now carries the same identity the
+  pool does, and `PendingKey` embeds `Key`, so request coalescing is namespaced
+  for free. `None` is the global pool, so the common case costs one word.
+- **Refreshes keep the entry's own upstreams.** `refresh::Job` already carried
+  the `Key`; the worker reads the pool identity from it rather than from the
+  settings, or a background refresh would overwrite a client's entry with an
+  answer its resolvers never gave.
+- **The reload window does not poison the cache.** Connecting takes seconds, so
+  a client added by a settings save briefly has a key and no pool. It is
+  answered from the global upstreams rather than failing — but `pool_for`
+  reports that it did, and `forward` drops the cache key, so nothing from that
+  window is stored as the client's own.
+- `upstream_fingerprint` now includes every client's upstream list, or editing
+  one would never trigger a rebuild.
+
+Verified live: the same question from the same address, once plain and once
+with a ClientID, went to `1.1.1.1` and `9.9.9.9` and took a cache entry each.
+
+### The caching rule was a guess
+
+`is_content_addressed` called any dotted segment of 16-plus hex characters a
+content hash. Right for webpack's `[chunkhash]` today, and quietly wrong — for
+a year, per client — the first time someone shortened the hash or added an
+asset whose name read like a digest.
+
+webpack now writes its hashed output under `static/` and nothing else there, so
+the predicate is `starts_with("static/")`: a fact about the build rather than a
+guess about the name. `everything_the_build_emitted_is_classified_the_way_it_was_built`
+walks the real embedded assets and fails if that stops being true.
+
+**That move broke the login page**, which is worth recording because nothing in
+the suite noticed. `is_public_page` matched `/login.`, and the login bundle had
+become `/static/login.<hash>.js`; a signed-out browser got a blank page and two
+401s. Same for the setup wizard. Both gates now strip the directory before
+matching the name, and two tests check them against the assets the build
+actually emitted rather than against names typed into a test.
+
+### The translations named the wrong product
+
+All 35 non-English locales said "AdGuard Home" under a LITE logo. The reason to
+hesitate was that a machine substitution can break languages that inflect a
+name — so that was checked rather than assumed. Every locale uses the literal
+ASCII string, and only two needed more than a replace:
+
+- **Korean** particles have two forms, chosen by whether the preceding syllable
+  ends in a consonant. "Home" is read 홈 and takes 은/이/을; "Lite" is 라이트 and
+  takes 는/가/를. Twenty-two of them moved.
+- **Finnish** vowel harmony: "Home" carries a back vowel and "Lite" does not, so
+  one partitive went from `-a` to `-ä`. The genitive `-n` and the illative
+  `-en` do not harmonise.
+
+Danish and Swedish genitive `-s`, and the Japanese and Chinese particles, are
+unaffected by what precedes them.
+
+## Naming
+
+The project was called **AdGuard Lite** and used a recoloured AdGuard shield.
+Both are gone. The reason is not the licence — the GPL-3.0 covers all of the
+code and is complied with — but trademark, which the GPL does not grant and
+explicitly lets an upstream withhold (§7(e)):
+
+- "AdGuard Lite" was built like a tier in their own product line — AdGuard
+  Home, AdGuard DNS, AdGuard VPN — which is the worst case for likelihood of
+  confusion as to source, the test that actually decides infringement.
+- The gold shield was a recolour of their figurative mark. Colour is not what
+  is protected; the shape is.
+- Every substantial fork of a trademarked project renames: Firefox→Iceweasel,
+  MySQL→MariaDB, Redis→Valkey, Terraform→OpenTofu.
+
+**Sift** is its own name and its own mark: a funnel, drawn in
+`ui/svg/logo.tsx`, and the word set in the system UI font. No AdGuard mark
+appears anywhere in the interface, the icons, the repository or the image.
+
+What the rename touched:
+
+| | |
+|---|---|
+| Crates | `agl-*` → `sift-*`, and the binary crate `adguardlite` → `sift` |
+| Binary | **unchanged**: `AdGuardHome` at `/opt/adguardhome/AdGuardHome` |
+| Config | **unchanged**: `AdGuardHome.yaml` |
+| Repository | `openhoangnc/adguardlite` → `openhoangnc/sift` |
+| Image | `ghcr.io/openhoangnc/adguardlite` → `ghcr.io/openhoangnc/sift` |
+| User-Agent | `AdGuardLite/<version>` → `Sift/<version>` |
+| Locales | all 36, 1,682 strings |
+
+The binary and config names stay because they are the drop-in contract, not
+branding — an existing installation already has them at those paths. `NOTICE.md`
+records that distinction so nobody "finishes the rename" and breaks every
+deployment.
+
+### What the translations needed beyond a replace
+
+The same class of problem as the previous rename, in different languages,
+because "Sift" ends in a consonant where "Lite" ended in a vowel:
+
+- **Finnish** inserts a linking `i` before a case ending on a consonant-final
+  foreign name: `Siftin`, `Siftiä`, `Siftiin`.
+- **Hungarian** picks both the article and the suffix by sound. "AdGuard"
+  opens with a vowel and carries a back one, so it took *az* and `-ot`/`-ban`;
+  "Sift" opens with a consonant and carries a front vowel, so it takes *a* and
+  `-et`/`-ben`.
+- **Korean** needed nothing this time: 시프트 ends without a final consonant
+  just as 라이트 did, so the particles fixed in the previous rename still hold.
+- Danish and Swedish genitive `-s`, the German, Dutch and Norwegian compound
+  hyphens, and the Japanese and Chinese particles are all unaffected by what
+  precedes them.
+
+One upstream typo surfaced while checking: the Dutch `update_announcement` had
+no space before `{{version}}`, which rendered as "Sift0.2.0 is nu
+beschikbaar". Fixed, since the file is ours now.
+
+## Version numbering
+
+The binary reports **its own** version, `sift_core::VERSION`, built from the
+workspace version in the root `Cargo.toml`, starting at **v0.2.0**. It used to
+report `v0.107.79`.
+
+- `sift_core::AGH_COMPAT_VERSION` keeps `v0.107.79` as what the formats are
+  matched against. Nothing reads it; it is there so the number has one home.
+- Nothing on disk carried the version, so this changed no file format. The
+  config's compatibility is `SCHEMA_VERSION`, which is untouched at 34.
+- The inter-crate `version = "0.107.79"` pins in every `crates/*/Cargo.toml`
+  were dropped in favour of bare `path` dependencies, so a version bump is one
+  line in the root manifest rather than twenty-three.
+- The outbound `User-Agent` is `Sift/<version>` (via `AdGuardLite/` before the
+  rename). It was `AdGuardHome/<version>`, which after the bump would have
+  claimed to be an AdGuard Home 0.2.0.
 
 ---
 

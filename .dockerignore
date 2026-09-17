@@ -4,3 +4,4 @@
 .git
 .github
 *.md
+web/client/node_modules

@@ -7,3 +7,8 @@
 
 # Scratch worktrees created for parallel agent runs.
 .claude/
+
+# The forked frontend's dependencies and its own build scratch.
+/web/client/node_modules/
+/web/client/test-results/
+/web/client/playwright-report/

@@ -3,208 +3,10 @@
 version = 4
 
 [[package]]
-name = "adguardlite"
-version = "0.107.79"
-dependencies = [
- "agl-api",
- "agl-config",
- "agl-core",
- "agl-dns",
- "agl-filter",
- "agl-querylog",
- "agl-stats",
- "anyhow",
- "axum",
- "bytes",
- "clap",
- "flate2",
- "hickory-proto",
- "http-body-util",
- "hyper",
- "hyper-util",
- "jiff",
- "parking_lot",
- "rand",
- "rustix",
- "rustls",
- "rustls-pki-types",
- "thiserror",
- "tokio",
- "tokio-rustls",
- "tracing",
- "tracing-subscriber",
- "webpki-roots",
-]
-
-[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
-
-[[package]]
-name = "agl-api"
-version = "0.107.79"
-dependencies = [
- "agl-bolt",
- "agl-config",
- "agl-core",
- "agl-dns",
- "agl-filter",
- "agl-querylog",
- "agl-stats",
- "ahash",
- "axum",
- "base64",
- "bcrypt",
- "bytes",
- "flate2",
- "h3",
- "h3-quinn",
- "hickory-proto",
- "http",
- "http-body-util",
- "hyper",
- "hyper-util",
- "idna",
- "if-addrs",
- "jiff",
- "mime_guess",
- "parking_lot",
- "quinn",
- "rand",
- "rcgen",
- "rust-embed",
- "rustls",
- "rustls-pemfile",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-rustls",
- "tower",
- "tower-http",
- "tracing",
-]
-
-[[package]]
-name = "agl-bolt"
-version = "0.107.79"
-dependencies = [
- "flate2",
- "thiserror",
-]
-
-[[package]]
-name = "agl-config"
-version = "0.107.79"
-dependencies = [
- "agl-core",
- "bcrypt",
- "indexmap",
- "saphyr",
- "serde",
- "serde_json",
- "serde_yaml_ng",
- "thiserror",
-]
-
-[[package]]
-name = "agl-core"
-version = "0.107.79"
-dependencies = [
- "jiff",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "agl-dns"
-version = "0.107.79"
-dependencies = [
- "agl-core",
- "agl-filter",
- "ahash",
- "base64",
- "bytes",
- "h3",
- "h3-quinn",
- "hickory-proto",
- "http-body-util",
- "hyper",
- "hyper-util",
- "jiff",
- "parking_lot",
- "quinn",
- "rand",
- "rcgen",
- "ring",
- "rustls",
- "rustls-pemfile",
- "rustls-pki-types",
- "serde",
- "thiserror",
- "tokio",
- "tokio-rustls",
- "tracing",
- "url",
- "webpki-roots",
- "x509-parser",
-]
-
-[[package]]
-name = "agl-filter"
-version = "0.107.79"
-dependencies = [
- "agl-config",
- "agl-core",
- "ahash",
- "flate2",
- "jiff",
- "memchr",
- "parking_lot",
- "regex",
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "agl-gob"
-version = "0.107.79"
-dependencies = [
- "serde",
- "thiserror",
-]
-
-[[package]]
-name = "agl-querylog"
-version = "0.107.79"
-dependencies = [
- "agl-core",
- "base64",
- "parking_lot",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
-]
-
-[[package]]
-name = "agl-stats"
-version = "0.107.79"
-dependencies = [
- "agl-bolt",
- "agl-core",
- "agl-gob",
- "ahash",
- "flate2",
- "parking_lot",
- "serde",
- "serde_json",
- "thiserror",
-]
 
 [[package]]
 name = "ahash"
@@ -226,6 +28,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c982642fa9e8606056828ee9a8505737230110bb1099153c79efe865c59d12ba"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "alloc-no-stdlib"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c2fb6cfd47bf496ff64095c20eaba0c201404ee38714d4142fcfa1dc334fcc7a"
+
+[[package]]
+name = "alloc-stdlib"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b5c1865780388bfa186411ab5f247819487fc4864c6e9c3106611fa347586e1"
+dependencies = [
+ "alloc-no-stdlib",
 ]
 
 [[package]]
@@ -327,18 +144,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
-]
-
-[[package]]
-name = "async-compression"
-version = "0.4.47"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef217a77a86a6e3dab9a5b3c81dc445b603fe743a90c1cb10a2f2144628d8cfa"
-dependencies = [
- "compression-codecs",
- "compression-core",
- "pin-project-lite",
- "tokio",
 ]
 
 [[package]]
@@ -465,6 +270,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "brotli-decompressor"
+version = "6.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46087801e40b785410c352bee60e9b6226312709cf52d5fff92776cdf5cf6490"
+dependencies = [
+ "alloc-no-stdlib",
+ "alloc-stdlib",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -580,23 +395,6 @@ dependencies = [
  "bytes",
  "memchr",
 ]
-
-[[package]]
-name = "compression-codecs"
-version = "0.4.42"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "257c7085cbb71be72d8fb97edff08b03d86d5d9f2222b9cc34a6bec87093bc10"
-dependencies = [
- "compression-core",
- "flate2",
- "memchr",
-]
-
-[[package]]
-name = "compression-core"
-version = "0.4.33"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6e8ccc4ea9f6acc32d102c0f6d471d11d913ad15f20c04de743374861fa1d414"
 
 [[package]]
 name = "const-oid"
@@ -1046,12 +844,6 @@ dependencies = [
  "http-body",
  "pin-project-lite",
 ]
-
-[[package]]
-name = "http-range-header"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9171a2ea8a68358193d15dd5d70c1c10a2afc3e7e4c5bc92bc9f025cebd7359c"
 
 [[package]]
 name = "httparse"
@@ -2137,6 +1929,202 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
+name = "sift"
+version = "0.2.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "bytes",
+ "clap",
+ "flate2",
+ "hickory-proto",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "jiff",
+ "parking_lot",
+ "rand",
+ "rustix",
+ "rustls",
+ "rustls-pki-types",
+ "sift-api",
+ "sift-config",
+ "sift-core",
+ "sift-dns",
+ "sift-filter",
+ "sift-querylog",
+ "sift-stats",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "tracing-subscriber",
+ "webpki-roots",
+]
+
+[[package]]
+name = "sift-api"
+version = "0.2.0"
+dependencies = [
+ "ahash",
+ "axum",
+ "base64",
+ "bcrypt",
+ "brotli-decompressor",
+ "bytes",
+ "h3",
+ "h3-quinn",
+ "hickory-proto",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "idna",
+ "if-addrs",
+ "jiff",
+ "parking_lot",
+ "quinn",
+ "rand",
+ "rcgen",
+ "rust-embed",
+ "rustls",
+ "rustls-pemfile",
+ "serde",
+ "serde_json",
+ "sift-bolt",
+ "sift-config",
+ "sift-core",
+ "sift-dns",
+ "sift-filter",
+ "sift-querylog",
+ "sift-stats",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tower",
+ "tracing",
+]
+
+[[package]]
+name = "sift-bolt"
+version = "0.2.0"
+dependencies = [
+ "flate2",
+ "thiserror",
+]
+
+[[package]]
+name = "sift-config"
+version = "0.2.0"
+dependencies = [
+ "bcrypt",
+ "indexmap",
+ "saphyr",
+ "serde",
+ "serde_json",
+ "serde_yaml_ng",
+ "sift-core",
+ "thiserror",
+]
+
+[[package]]
+name = "sift-core"
+version = "0.2.0"
+dependencies = [
+ "jiff",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "sift-dns"
+version = "0.2.0"
+dependencies = [
+ "ahash",
+ "base64",
+ "bytes",
+ "h3",
+ "h3-quinn",
+ "hickory-proto",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "jiff",
+ "parking_lot",
+ "quinn",
+ "rand",
+ "rcgen",
+ "ring",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-pki-types",
+ "serde",
+ "sift-core",
+ "sift-filter",
+ "thiserror",
+ "tokio",
+ "tokio-rustls",
+ "tracing",
+ "url",
+ "webpki-roots",
+ "x509-parser",
+]
+
+[[package]]
+name = "sift-filter"
+version = "0.2.0"
+dependencies = [
+ "ahash",
+ "flate2",
+ "jiff",
+ "memchr",
+ "parking_lot",
+ "regex",
+ "serde",
+ "serde_json",
+ "sift-config",
+ "sift-core",
+ "thiserror",
+]
+
+[[package]]
+name = "sift-gob"
+version = "0.2.0"
+dependencies = [
+ "serde",
+ "thiserror",
+]
+
+[[package]]
+name = "sift-querylog"
+version = "0.2.0"
+dependencies = [
+ "base64",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sift-core",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "sift-stats"
+version = "0.2.0"
+dependencies = [
+ "ahash",
+ "flate2",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sift-bolt",
+ "sift-core",
+ "sift-gob",
+ "thiserror",
+]
+
+[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2387,32 +2375,6 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
-]
-
-[[package]]
-name = "tower-http"
-version = "0.7.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "08a05a66a4fdd61cbbe0a1d755ffe0ca6aba159dd4820936a0ff8a8278245b9c"
-dependencies = [
- "async-compression",
- "bitflags 2.13.2",
- "bytes",
- "futures-core",
- "futures-util",
- "http",
- "http-body",
- "http-body-util",
- "http-range-header",
- "httpdate",
- "mime",
- "mime_guess",
- "percent-encoding",
- "pin-project-lite",
- "tokio",
- "tokio-util",
- "tower-layer",
- "tower-service",
 ]
 
 [[package]]

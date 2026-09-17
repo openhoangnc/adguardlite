@@ -1,27 +1,35 @@
-# adguardlite
+# sift
 
-[![Docker](https://github.com/openhoangnc/adguardlite/actions/workflows/docker.yml/badge.svg)](https://github.com/openhoangnc/adguardlite/actions/workflows/docker.yml)
-[![Image](https://img.shields.io/badge/ghcr.io-openhoangnc%2Fadguardlite-blue?logo=docker&logoColor=white)](https://github.com/openhoangnc/adguardlite/pkgs/container/adguardlite)
+[![Docker](https://github.com/openhoangnc/sift/actions/workflows/docker.yml/badge.svg)](https://github.com/openhoangnc/sift/actions/workflows/docker.yml)
+[![Image](https://img.shields.io/badge/ghcr.io-openhoangnc%2Fsift-blue?logo=docker&logoColor=white)](https://github.com/openhoangnc/sift/pkgs/container/sift)
 
-A Rust backend for [AdGuard Home](https://github.com/AdguardTeam/AdGuardHome),
-built as a drop-in replacement for the Go binary of release **v0.107.79**: the
-same config file, the same on-disk data, the same HTTP API, the same web
-interface, and the same Docker contract — in a smaller image, with less memory
-and more throughput.
+**Sift** is a Rust backend for
+[AdGuard Home](https://github.com/AdguardTeam/AdGuardHome), built as a drop-in
+replacement for the Go binary of release **v0.107.79**: the same config file,
+the same on-disk data, the same HTTP API, and the same Docker contract — in a
+smaller image, with less memory and more throughput. The web interface is a
+fork of AdGuard Home's own, with the features this build does not have taken
+out of it.
 
 The DNS filtering path, the web interface, the storage formats, the encrypted
 listeners and the operational surface are done and verified against the Go
 build. Three things are **deliberately excluded** rather than pending —
-DHCP, DNSCrypt, and replacing this binary with an AdGuard Home release — and
-each refuses clearly at the point a user would notice. [What is excluded, and
+DHCP, DNSCrypt, and replacing this binary with a release — and each refuses
+clearly at the point a user would notice. [What is excluded, and
 why](#what-is-excluded-and-why) explains each one.
+
+It is not produced, endorsed or supported by AdGuard; see
+[NOTICE.md](NOTICE.md). Documentation is under [`docs/`](docs/):
+[FAQ](docs/faq.md) · [Configuration](docs/configuration.md) ·
+[Clients](docs/clients.md) · [Encryption](docs/encryption.md) ·
+[Privacy](docs/privacy.md).
 
 ## Measured against the Go build
 
 Both running the same config and the same 179,334-rule AdGuard DNS filter, on
 the same machine.
 
-| | Go v0.107.79 | adguardlite | |
+| | Go v0.107.79 | sift | |
 |---|---:|---:|---|
 | Docker image | 110 MB | **56.9 MB** | 1.9× smaller |
 | Binary (with web UI) | 33.6 MB | **20.3 MB** | 1.7× smaller |
@@ -35,7 +43,7 @@ the same machine.
 Memory, throughput and latency were measured in one sitting with both servers
 running the same config and the same filter list, 15 seconds at concurrency 64
 against 5,000 blocked names. The load generator in
-`crates/adguardlite/examples/loadgen.rs` runs on the same machine as the
+`crates/sift/examples/loadgen.rs` runs on the same machine as the
 servers and so competes with them for CPU; treat the ratios as meaningful and
 the absolute numbers as a floor. The binary sizes compare against AdGuard's
 published release, not a local `go build`, which is larger because it keeps
@@ -47,7 +55,7 @@ That table is one 179,334-rule list, which is a modest deployment. A real one
 with **37 lists and 2,272,040 rules**, measured the same way on the same
 machine with the same data:
 
-| | Go v0.107.79 | adguardlite | |
+| | Go v0.107.79 | sift | |
 |---|---:|---:|---|
 | Time to answer DNS from a cold start | 4 s | **2 s** | 2× quicker |
 | Memory, after loading the lists | 346 MB | **267 MB** | 1.3× less |
@@ -67,7 +75,7 @@ rather than reading:
   boxed key strings costing 148 MB for 1.1M domains, and rule text copied into
   the engine when the list manager already held every byte of it.
 
-The shortcut index is the piece worth reading: `crates/agl-filter/src/
+The shortcut index is the piece worth reading: `crates/sift-filter/src/
 shortcut.rs` replaced an Aho-Corasick automaton, which is the textbook answer
 and was the wrong one here. Its 37.6 MB is walked one state-transition per
 byte, each dependent on the last, so a hostname's length buys a chain of cache
@@ -77,8 +85,8 @@ the whole set, and a query hashes its own windows independently — 7.4 MB, and
 the probes overlap in the memory system instead of chaining.
 
 Guards: `rules_needing_an_expression_load_as_cheaply_as_plain_ones` in
-`crates/agl-filter/tests/differential.rs` fails if expressions go back to
-being built at load. `cargo run --release -p agl-filter --example loadprofile
+`crates/sift-filter/tests/differential.rs` fails if expressions go back to
+being built at load. `cargo run --release -p sift-filter --example loadprofile
 <dir of lists>` prints the phase timings, a footprint breakdown and per-query
 costs, which is how all of the above was measured.
 
@@ -89,7 +97,7 @@ Raspberry Pi as well as a server — is published to the GitHub Container
 Registry on every push to `main`:
 
 ```bash
-docker pull ghcr.io/openhoangnc/adguardlite:latest
+docker pull ghcr.io/openhoangnc/sift:latest
 ```
 
 | Tag | What it points at |
@@ -116,7 +124,7 @@ filter lists, so a rollback costs nothing.
 ```yaml
 services:
   adguardhome:
-    image: ghcr.io/openhoangnc/adguardlite:latest
+    image: ghcr.io/openhoangnc/sift:latest
     container_name: adguardhome
     restart: unless-stopped
     volumes:
@@ -135,13 +143,13 @@ docker run -d --name adguardhome \
   -v "$PWD/work:/opt/adguardhome/work" \
   -v "$PWD/conf:/opt/adguardhome/conf" \
   -p 53:53/tcp -p 53:53/udp -p 3000:3000/tcp \
-  ghcr.io/openhoangnc/adguardlite:latest
+  ghcr.io/openhoangnc/sift:latest
 ```
 
 To build the same image yourself:
 
 ```bash
-docker build -f docker/Dockerfile -t adguardlite .
+docker build -f docker/Dockerfile -t sift .
 ```
 
 ## Compatibility, and how it was checked
@@ -177,7 +185,8 @@ netlink, and a few more).
   every settings change answers **501**, so the web interface cannot store DHCP
   configuration that nothing would act on. The `dhcp:` section of the config
   file is still read and written unchanged, so switching back to the Go build
-  keeps your settings.
+  keeps your settings, and the DHCP settings page is gone from the web
+  interface rather than present and inert.
 
 - **DNSCrypt.** It is the one remaining protocol needing cryptography this
   project does not already have — X25519, Ed25519 and a NaCl-style secretbox —
@@ -186,30 +195,34 @@ netlink, and a few more).
   `dnscrypt_config_file` round-trip through the config untouched; the port is
   never bound, and an `sdns://` upstream is reported at startup and skipped.
   DNSCrypt itself is still in use — AdGuard's own provider list publishes
-  stamps for it — so front adguardlite with `dnscrypt-proxy` if you need it.
+  stamps for it — so front sift with `dnscrypt-proxy` if you need it.
+  The web interface no longer offers it anywhere.
 
-- **Replacing its own binary.** `POST /control/update` answers **501**. The
-  releases the announcement server publishes are AdGuard Home's own Go
-  binaries; writing one over this executable would swap in a different
-  implementation, which is not an update. The version check itself works:
-  `/control/version.json` reports the latest release with
-  `can_autoupdate: false`, so the interface can tell you a new version exists
-  without offering to install it. Replace the binary through whatever installed
-  it.
+- **Replacing its own binary.** `POST /control/update` answers **501**.
+  Rewriting a running executable in place is the job of whatever installed it,
+  and this ships as an image and as archives. The version check itself works:
+  `/control/version.json` reads
+  [this project's releases](https://github.com/openhoangnc/sift/releases),
+  caches the answer for eight hours and reports `can_autoupdate: false`, so the
+  interface can tell you a new version exists without offering to install it.
+  See [the FAQ](docs/faq.md#manual-update).
 
 ## Layout
 
 ```
-crates/agl-core      shared types matching Go's wire and on-disk forms
-crates/agl-config    AdGuardHome.yaml: schema 34, and a Go-yaml.v3 emitter
-crates/agl-filter    the rule engine, list storage, services catalogue
-crates/agl-dns       wire codec, cache, upstreams, listeners, resolver
-crates/agl-querylog  querylog.json
-crates/agl-bolt      a minimal bbolt reader and writer
-crates/agl-gob       Go `gob` for the statistics unit
-crates/agl-stats     statistics collection, aggregation and persistence
-crates/agl-api       the control API and the embedded web interface
-crates/adguardlite   the binary
+crates/sift-core      shared types matching Go's wire and on-disk forms
+crates/sift-config    AdGuardHome.yaml: schema 34, and a Go-yaml.v3 emitter
+crates/sift-filter    the rule engine, list storage, services catalogue
+crates/sift-dns       wire codec, cache, upstreams, listeners, resolver
+crates/sift-querylog  querylog.json
+crates/sift-bolt      a minimal bbolt reader and writer
+crates/sift-gob       Go `gob` for the statistics unit
+crates/sift-stats     statistics collection, aggregation and persistence
+crates/sift-api       the control API and the embedded web interface
+crates/sift   the binary
+web/client           the forked web interface, in TypeScript and React
+web/build            the same, built and brotli-compressed for embedding
+docs                 the documentation the web interface links to
 ```
 
 ## Building
@@ -224,11 +237,22 @@ compiled at `opt-level = 2` even in debug builds so they are paid for once, and
 debug info is line tables only. An incremental rebuild after touching one file
 is about 8 seconds.
 
-The web interface is committed pre-built and gzip-compressed under `web/build`.
-To rebuild it from upstream's sources:
+The web interface's sources are forked into `web/client`, and the build is
+committed under `web/build`, brotli-compressed: ~9.1 MB of JavaScript and CSS
+become 1.7 MB in the binary. Rebuild it after any change under `web/client`:
 
 ```bash
 scripts/build-frontend.sh
+```
+
+Hashed bundles go under `web/build/static/` and are served `immutable` for a
+year; everything else revalidates and is answered with a `304` when nothing
+moved.
+
+To take a newer upstream client release into the fork:
+
+```bash
+scripts/sync-frontend.sh v0.107.80
 ```
 
 ## Running from source
@@ -239,7 +263,7 @@ cargo run --release -- --no-check-update -c ./AdGuardHome.yaml -w ./work
 
 ## Verifying
 
-`cargo test --workspace` runs 621 unit and integration tests, including the
+`cargo test --workspace` runs 696 unit and integration tests, including the
 differential against the real filter list and the query-log and gob golden
 files — none of which need a network or a running Go build.
 

@@ -20,16 +20,16 @@ WORKDIR /src
 
 # Copy the manifests first so a source-only change does not refetch crates.
 COPY Cargo.toml Cargo.lock ./
-COPY crates/agl-core/Cargo.toml      crates/agl-core/Cargo.toml
-COPY crates/agl-gob/Cargo.toml       crates/agl-gob/Cargo.toml
-COPY crates/agl-bolt/Cargo.toml      crates/agl-bolt/Cargo.toml
-COPY crates/agl-config/Cargo.toml    crates/agl-config/Cargo.toml
-COPY crates/agl-filter/Cargo.toml    crates/agl-filter/Cargo.toml
-COPY crates/agl-dns/Cargo.toml       crates/agl-dns/Cargo.toml
-COPY crates/agl-querylog/Cargo.toml  crates/agl-querylog/Cargo.toml
-COPY crates/agl-stats/Cargo.toml     crates/agl-stats/Cargo.toml
-COPY crates/agl-api/Cargo.toml       crates/agl-api/Cargo.toml
-COPY crates/adguardlite/Cargo.toml   crates/adguardlite/Cargo.toml
+COPY crates/sift-core/Cargo.toml      crates/sift-core/Cargo.toml
+COPY crates/sift-gob/Cargo.toml       crates/sift-gob/Cargo.toml
+COPY crates/sift-bolt/Cargo.toml      crates/sift-bolt/Cargo.toml
+COPY crates/sift-config/Cargo.toml    crates/sift-config/Cargo.toml
+COPY crates/sift-filter/Cargo.toml    crates/sift-filter/Cargo.toml
+COPY crates/sift-dns/Cargo.toml       crates/sift-dns/Cargo.toml
+COPY crates/sift-querylog/Cargo.toml  crates/sift-querylog/Cargo.toml
+COPY crates/sift-stats/Cargo.toml     crates/sift-stats/Cargo.toml
+COPY crates/sift-api/Cargo.toml       crates/sift-api/Cargo.toml
+COPY crates/sift/Cargo.toml           crates/sift/Cargo.toml
 
 # Stub sources so `cargo fetch` can resolve the workspace.
 RUN set -eux; \
@@ -37,15 +37,17 @@ RUN set -eux; \
         mkdir -p "$d/src"; \
         echo '' > "$d/src/lib.rs"; \
     done; \
-    mkdir -p crates/adguardlite/src; \
-    echo 'fn main() {}' > crates/adguardlite/src/main.rs
+    mkdir -p crates/sift/src; \
+    echo 'fn main() {}' > crates/sift/src/main.rs
 
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
     cargo fetch --locked
 
 # Now the real sources.
 COPY crates crates
-COPY web web
+# Only the built interface is embedded; web/client is the source it came from
+# and would be several megabytes of build context for nothing.
+COPY web/build web/build
 COPY tests tests
 
 ARG TARGETARCH
@@ -69,11 +71,11 @@ ARG VCS_REF
 
 LABEL \
 	org.opencontainers.image.created=$BUILD_DATE \
-	org.opencontainers.image.description="Network-wide ads & trackers blocking DNS server, Rust backend" \
+	org.opencontainers.image.description="Sift: a drop-in Rust backend for AdGuard Home. Not affiliated with AdGuard." \
 	org.opencontainers.image.licenses="GPL-3.0" \
 	org.opencontainers.image.revision=$VCS_REF \
-	org.opencontainers.image.source="https://github.com/openhoangnc/adguardlite" \
-	org.opencontainers.image.title="adguardlite" \
+	org.opencontainers.image.source="https://github.com/openhoangnc/sift" \
+	org.opencontainers.image.title="sift" \
 	org.opencontainers.image.version=$VERSION
 
 RUN apk --no-cache add ca-certificates libcap tzdata && \

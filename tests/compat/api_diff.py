@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare the control API of a Go AdGuardHome and an adguardlite instance.
+"""Compare the control API of a Go AdGuardHome and an sift instance.
 
 Both must be running with the same configuration.  For each endpoint the
 script compares the JSON *shape* — the set of keys and the type of each value,

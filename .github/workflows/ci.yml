@@ -2,7 +2,7 @@ name: CI
 
 # Deliberately manual. The only workflow that runs on its own is docker.yml,
 # which builds and publishes the image; everything here — formatting, lints,
-# the 585-test suite and the differential against a freshly cloned AdGuard
+# the 696-test suite and the differential against a freshly cloned AdGuard
 # Home — runs locally with `cargo test --workspace` and `scripts/verify.sh`,
 # and needs no Actions minutes to be trusted.
 #
@@ -43,7 +43,7 @@ jobs:
         run: cargo test --workspace --locked
 
       - name: Release build
-        run: cargo build --release --locked -p adguardlite
+        run: cargo build --release --locked -p sift
 
   compatibility:
     name: Differential against AdGuard Home
@@ -73,7 +73,7 @@ jobs:
       - name: Logs on failure
         if: failure()
         run: |
-          for f in "${TMPDIR:-/tmp}"/adguardlite-verify/*.log; do
+          for f in "${TMPDIR:-/tmp}"/sift-verify/*.log; do
             [ -e "$f" ] || continue
             echo "::group::$f"
             tail -100 "$f"
@@ -95,7 +95,7 @@ jobs:
           file: docker/Dockerfile
           push: false
           load: true
-          tags: adguardlite:ci
+          tags: sift:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -127,7 +127,7 @@ jobs:
             -v "$PWD/work:/opt/adguardhome/work" \
             -v "$PWD/conf:/opt/adguardhome/conf" \
             -p 15353:53/udp -p 3000:3000/tcp \
-            adguardlite:ci
+            sift:ci
           sleep 8
           docker logs agl
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare DNS answers from a Go AdGuardHome and an adguardlite instance.
+"""Compare DNS answers from a Go AdGuardHome and an sift instance.
 
 Both must be running with the same configuration and filter lists.  The script
 sends identical queries to each and reports where they disagree.

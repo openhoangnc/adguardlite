@@ -1,0 +1,22 @@
+[package]
+name = "sift-stats"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+sift-bolt = { path = "../sift-bolt" }
+sift-core = { path = "../sift-core" }
+sift-gob = { path = "../sift-gob" }
+ahash = "0.8.12"
+parking_lot = "0.12.5"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+
+[dev-dependencies]
+flate2 = "1.1.10"

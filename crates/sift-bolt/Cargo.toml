@@ -1,0 +1,15 @@
+[package]
+name = "sift-bolt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = "2.0.20"
+
+[dev-dependencies]
+flate2 = "1.1.10"

@@ -1,14 +1,14 @@
 #!/bin/sh
 # Runs every compatibility check against a real AdGuard Home.
 #
-# Builds the Go reference from upstream/, starts it and adguardlite side by
+# Builds the Go reference from upstream/, starts it and sift side by
 # side on high ports with the same configuration, and compares their config
 # output, DNS answers, HTTP API and statistics database.
 
 set -e -u
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-work="${AGL_VERIFY_DIR:-${TMPDIR:-/tmp}/adguardlite-verify}"
+work="${SIFT_VERIFY_DIR:-${TMPDIR:-/tmp}/sift-verify}"
 
 go_http=14000
 go_dns=14053
@@ -38,7 +38,7 @@ say "building both servers"
 	mkdir -p "$work"
 	( cd "$root/upstream" && go build -o "$work/AdGuardHome-go" . )
 }
-cargo build --release --quiet -p adguardlite
+cargo build --release --quiet -p sift
 
 rm -rf "$work/go" "$work/rust"
 mkdir -p "$work/go/conf" "$work/go/work/data/filters" "$work/rust/conf" "$work/rust/work/data/filters"
@@ -70,7 +70,7 @@ sleep 12
 # Reuse the filter list the Go build downloaded, so both engines see the same rules.
 cp "$work/go/work/data/filters/"*.txt "$work/rust/work/data/filters/" 2>/dev/null || true
 
-say "starting adguardlite"
+say "starting sift"
 "$root/target/release/AdGuardHome" --no-check-update \
 	-c "$work/rust/conf/AdGuardHome.yaml" -w "$work/rust/work" > "$work/rust.log" 2>&1 &
 rs_pid=$!
@@ -112,7 +112,7 @@ for i in $(seq 1 12); do
 done
 kill -INT "$rs_pid"; wait "$rs_pid" 2>/dev/null || true; rs_pid=
 sleep 2
-[ -f "$work/rust/work/data/stats.db" ] || fail "adguardlite wrote no statistics database"
+[ -f "$work/rust/work/data/stats.db" ] || fail "sift wrote no statistics database"
 
 cp "$work/rust/work/data/stats.db" "$work/go/work/data/stats.db"
 kill -INT "$go_pid"; wait "$go_pid" 2>/dev/null || true
@@ -122,7 +122,7 @@ go_pid=$!
 sleep 12
 total=$(curl -sf --max-time 10 -u "$user:$pass" "http://127.0.0.1:$go_http/control/stats" \
 	| python3 -c 'import sys,json; print(json.load(sys.stdin)["num_dns_queries"])')
-[ "${total:-0}" -gt 0 ] || fail "the Go build read no statistics from the database adguardlite wrote"
-echo "Go read $total queries from the database adguardlite wrote"
+[ "${total:-0}" -gt 0 ] || fail "the Go build read no statistics from the database sift wrote"
+echo "Go read $total queries from the database sift wrote"
 
 printf '\n\033[32mall compatibility checks passed\033[0m\n'

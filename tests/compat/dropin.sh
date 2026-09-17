@@ -10,7 +10,7 @@
 # Usage: dropin.sh [agl-image] [go-image]
 set -uo pipefail
 
-AGL="${1:-ghcr.io/openhoangnc/adguardlite:0.107.79}"
+AGL="${1:-ghcr.io/openhoangnc/sift:0.107.79}"
 GO="${2:-adguard/adguardhome:v0.107.79}"
 R="$(mktemp -d "${TMPDIR:-/tmp}/agl-dropin.XXXXXX")"
 B=http://127.0.0.1:13900
@@ -89,9 +89,9 @@ is "blocked services survived" "$(J "$B/control/blocked_services/get" | jq -c .i
 is "the client and its tags survived" "$(J "$B/control/clients" | jq -c '[.clients[] | {name, tags}]')" '[{"name":"laptop","tags":["device_laptop"]}]'
 is "a blocked name still answers 0.0.0.0" "$(dig @127.0.0.1 -p 15390 ads.example.com A +short +timeout=3 | head -1)" "0.0.0.0"
 is "a rewrite still answers"              "$(dig @127.0.0.1 -p 15390 rw.example.com A +short +timeout=3 | head -1)" "10.1.2.3"
-agl_stats=$(J "$B/control/stats" | jq -r .num_dns_queries)
-[ "${agl_stats:-0}" -ge "${go_stats:-1}" ] && ok "statistics continued from Go's ($go_stats -> $agl_stats)" \
-  || bad "statistics reset (Go had $go_stats, now $agl_stats)"
+sift_stats=$(J "$B/control/stats" | jq -r .num_dns_queries)
+[ "${sift_stats:-0}" -ge "${go_stats:-1}" ] && ok "statistics continued from Go's ($go_stats -> $sift_stats)" \
+  || bad "statistics reset (Go had $go_stats, now $sift_stats)"
 qn=$(J "$B/control/querylog?limit=100" | jq '.data | length')
 [ "${qn:-0}" -ge "${go_stats:-1}" ] && ok "the Go build's query log is readable ($qn entries)" \
   || bad "query log lost entries (want >= $go_stats, got $qn)"
@@ -121,8 +121,8 @@ is "Go reads the wildcard rewrite"   "$(J "$B/control/rewrite/list" | jq -c '[.[
 is "Go blocks the way the mode we wrote says" \
    "$(dig @127.0.0.1 -p 15390 ads.example.com A +timeout=3 | grep -oE 'status: [A-Z]+' | head -1 | awk '{print $2}')" "NXDOMAIN"
 go_back=$(J "$B/control/stats" | jq -r .num_dns_queries)
-[ "${go_back:-0}" -ge "${agl_stats:-1}" ] && ok "Go continued our statistics ($agl_stats -> $go_back)" \
-  || bad "Go lost our statistics (had $agl_stats, now $go_back)"
+[ "${go_back:-0}" -ge "${sift_stats:-1}" ] && ok "Go continued our statistics ($sift_stats -> $go_back)" \
+  || bad "Go lost our statistics (had $sift_stats, now $go_back)"
 
 echo
 printf 'passed %d, failed %d\n' "$pass" "$fail"
