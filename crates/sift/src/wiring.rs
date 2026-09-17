@@ -177,8 +177,19 @@ impl Observer for Recorder {
             })
             .unwrap_or_default();
 
+        // A ClientID identifies the device; an address identifies whatever
+        // shares it. Upstream's `updateStats` counts by the ClientID when the
+        // query carried one, so several devices behind one address — a phone
+        // and a laptop both on DoH — are counted apart rather than lumped
+        // together under the router's address.
+        let stats_client = if ev.outcome.client_id.is_empty() {
+            client
+        } else {
+            ev.outcome.client_id.clone()
+        };
+
         self.stats.add(&StatEntry {
-            client,
+            client: stats_client,
             domain: host,
             result: StatResult::from_reason(ev.outcome.reason),
             processing_time: ev.outcome.elapsed,
@@ -507,5 +518,59 @@ mod tests {
         assert_eq!(proto_of(Proto::Tls), ClientProto::Dot);
         assert_eq!(proto_of(Proto::Https), ClientProto::Doh);
         assert_eq!(proto_of(Proto::Quic), ClientProto::Doq);
+    }
+
+    /// Several devices reach the server through one address whenever DoH or
+    /// DoT is proxied, and each carries its own ClientID.  Upstream counts
+    /// those apart, and the interface resolves the ClientID to the client's
+    /// name, so the dashboard names the device rather than the router.
+    #[test]
+    fn statistics_count_a_client_id_apart_from_the_address_it_shares() {
+        use hickory_proto::op::{Message, Query};
+        use hickory_proto::rr::{Name, RecordType};
+        use sift_dns::resolver::Proto;
+
+        let dir = std::env::temp_dir().join("sift-wiring-stats-client");
+        let rec = Recorder::new(
+            Arc::new(QueryLog::new(
+                dir.join("querylog.json"),
+                dir.join("querylog.json.1"),
+                sift_querylog::log::Config::default(),
+            )),
+            Arc::new(Stats::new(sift_stats::stats::Config::default())),
+            false,
+        );
+
+        let mut req = Message::query();
+        req.add_query(Query::query(
+            Name::from_utf8("example.com.").unwrap(),
+            RecordType::A,
+        ));
+
+        let client: std::net::SocketAddr = "192.168.1.1:5353".parse().unwrap();
+        for id in ["phone", "laptop", "laptop", ""] {
+            let outcome = sift_dns::resolver::Outcome {
+                client_id: id.to_string(),
+                ..Default::default()
+            };
+            rec.observe(&Event {
+                request: &req,
+                outcome: &outcome,
+                client,
+                proto: Proto::Https,
+            });
+        }
+
+        let top = rec.stats.data().top_clients;
+        let count = |k: &str| top.iter().find_map(|m| m.get(k)).copied();
+        assert_eq!(count("phone"), Some(1));
+        assert_eq!(count("laptop"), Some(2));
+        assert_eq!(count("192.168.1.1"), Some(1), "no ClientID, so the address");
+
+        // The query log keeps recording the address, with the ClientID in its
+        // own field, which is where the interface reads it.
+        let recent = rec.querylog.read(0, 4);
+        assert_eq!(recent.len(), 4);
+        assert!(recent.iter().all(|e| e.ip == "192.168.1.1"));
     }
 }

@@ -1080,6 +1080,32 @@ is closed with the same `idna` the tree already carries.
 
 ---
 
+## Found reading the dashboard's Top clients, and fixed
+
+**The statistics counted every ClientID under the address it came from.** Top
+clients reported 11,538 queries from `192.168.99.1` — the router every DoH and
+DoT client on the network arrives through — while the query log beside it named
+`hoangnc-chrome` and `mi12t` on rows sharing that address. The two views
+disagreed because only the query log carried the ClientID: `Recorder::observe`
+built the statistics entry from the client address alone.
+
+Upstream's `updateStats` takes the ClientID when the query carried one and the
+address only when it did not, the same priority `processQueryLogsAndStats`
+gives the two identifiers everywhere else. This build does that now, and
+nothing downstream needed changing: `/control/clients/find` already resolves a
+ClientID to its persistent client, so the interface turns the new key into the
+client's name rather than showing a bare identifier, and the query log keeps
+recording the address with the ClientID in `CID` as before.
+
+The effect is visible only where it should be — a network whose clients use
+ClientIDs. Anything arriving by plain UDP or TCP has no ClientID and is counted
+by address exactly as it was, and the units already on disk are untouched:
+older hours keep the keys they were written with.
+`statistics_count_a_client_id_apart_from_the_address_it_shares` in
+`crates/sift/src/wiring.rs` pins both halves.
+
+---
+
 ## The web interface, forked
 
 The interface was AdGuard's compiled output, embedded. It is now **this
