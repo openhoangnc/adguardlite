@@ -1930,7 +1930,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "sift"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1964,7 +1964,7 @@ dependencies = [
 
 [[package]]
 name = "sift-api"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ahash",
  "axum",
@@ -2007,7 +2007,7 @@ dependencies = [
 
 [[package]]
 name = "sift-bolt"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "flate2",
  "thiserror",
@@ -2015,7 +2015,7 @@ dependencies = [
 
 [[package]]
 name = "sift-config"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "bcrypt",
  "indexmap",
@@ -2029,7 +2029,7 @@ dependencies = [
 
 [[package]]
 name = "sift-core"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "jiff",
  "serde",
@@ -2039,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "sift-dns"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ahash",
  "base64",
@@ -2073,7 +2073,7 @@ dependencies = [
 
 [[package]]
 name = "sift-filter"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ahash",
  "flate2",
@@ -2090,7 +2090,7 @@ dependencies = [
 
 [[package]]
 name = "sift-gob"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -2098,7 +2098,7 @@ dependencies = [
 
 [[package]]
 name = "sift-querylog"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "base64",
  "parking_lot",
@@ -2111,7 +2111,7 @@ dependencies = [
 
 [[package]]
 name = "sift-stats"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "ahash",
  "flate2",

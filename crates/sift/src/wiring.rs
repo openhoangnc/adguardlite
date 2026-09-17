@@ -434,12 +434,7 @@ impl LiveReloader {
     /// decided when the listeners start, so changing a port still needs a
     /// restart.
     fn reload_certificate(&self, cfg: &Config) {
-        let src = sift_dns::tls::Source {
-            certificate_chain: cfg.tls.certificate_chain.clone(),
-            private_key: cfg.tls.private_key.clone(),
-            certificate_path: cfg.tls.certificate_path.clone(),
-            private_key_path: cfg.tls.private_key_path.clone(),
-        };
+        let src = crate::app::tls_source(cfg);
 
         if !cfg.tls.enabled || src.is_empty() {
             return;

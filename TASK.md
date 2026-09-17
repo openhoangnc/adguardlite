@@ -5,7 +5,7 @@ Work status for Sift, against AdGuard Home **v0.107.79**.
 Legend: **[x]** done and verified · **[~]** partial, see the note · **[ ]** not started
 
 Verification claims below are reproducible with `scripts/verify.sh` and
-`cargo test --workspace` (696 tests).
+`cargo test --workspace` (706 tests).
 
 ---
 
@@ -28,7 +28,7 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 | Clients | persistent settings, ClientID, ARP/rDNS/WHOIS/hosts discovery |
 | Operations | logging, rotation, pidfile, privileges, service install |
 | Self-update | **out of scope** — the check reports releases, the install refuses |
-| Version reported | this project's own, from the workspace version — v0.2.0 |
+| Version reported | this project's own, from the workspace version — v0.3.0 |
 
 ---
 
@@ -158,10 +158,23 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 - [x] **Certificate reload without a restart**: the listeners are given a
       resolver rather than a certificate, so one replaced through
       `/control/tls/configure` is served on the next handshake
+- [x] **Renewal on disk is picked up**: when the certificate or key is read
+      from a path, the files are compared against what is being served on the
+      maintenance tick, and a changed pair installed for the next handshake —
+      an ACME client rewrites them on its own schedule and nothing in the
+      config moves when it does. A pair caught half-written replaces nothing
+      and is retried a minute later; a certificate inside a week of expiry
+      with nothing renewing it is reported hourly, and an expired one as an
+      error
 - [x] **Verified**: AdGuard's own dnsproxy client, with full certificate
       verification, resolves through all three listeners; the query log records
       them as `dot`, `doh` and `doq`; `/control/tls/status` matches Go field for
       field with the same certificate loaded
+- [x] **Verified**: a running server serving one certificate over HTTPS and
+      DoT, its files overwritten underneath it — the certificate alone first,
+      which was refused as a mismatched pair while the old one kept being
+      served, then the key, after which both listeners handed out the new
+      certificate on the next handshake without a restart
 
 ### Clients
 - [x] Persistent clients matched by address, subnet, MAC or ClientID, most
@@ -1379,6 +1392,25 @@ Not bugs; recorded so nobody "fixes" them.
 - **A changed listener *port* still needs a restart.** The certificate is
   live-reloadable; which ports are bound is decided when the listeners start.
   Everything else on the DNS settings page now applies without one.
+- **A certificate renewed on disk is picked up without being told.** The Go
+  build reads `certificate_path` and `private_key_path` once, at startup and
+  whenever the config is saved, so a certbot renewal is served only after the
+  next restart — a deployment that never restarts serves an expired
+  certificate. `docs/encryption.md` had already promised otherwise, which is
+  what turned this up. When either path is set, the maintenance tick digests
+  what the files hold and installs a pair that differs from the one being
+  served; inline PEM is left alone, because it can only change through
+  `/control/tls/configure`, which installs it itself. No config key: the file
+  `reproduces_the_reference_config_byte_for_byte` guards must not grow one.
+  Three things make it safe to run on a timer rather than on a signal. The new
+  pair has to parse and prove itself against rustls before anything is
+  installed, so a renewal caught between its two files replaces nothing and is
+  retried a minute later. The comparison is of contents, not mtime, so a
+  renewal script that rewrites both files nightly costs one digest rather than
+  a rebuilt signing key. And the same failure is logged once rather than every
+  minute, so a genuinely broken pair does not bury the log. The watch runs only
+  when encrypted listeners actually started: installing into a slot nothing
+  serves would log a reload that reached nobody.
 
 ---
 

@@ -343,14 +343,19 @@ pub fn ddr_endpoints(c: &Config) -> Option<sift_dns::ddr::Endpoints> {
     (!ep.is_empty()).then_some(ep)
 }
 
-/// Reports whether the configured certificate carries an IP address.
-fn certificate_names_an_ip(c: &Config) -> bool {
-    let src = sift_dns::tls::Source {
+/// Where the configured certificate and key are to be read from.
+pub fn tls_source(c: &Config) -> sift_dns::tls::Source {
+    sift_dns::tls::Source {
         certificate_chain: c.tls.certificate_chain.clone(),
         private_key: c.tls.private_key.clone(),
         certificate_path: c.tls.certificate_path.clone(),
         private_key_path: c.tls.private_key_path.clone(),
-    };
+    }
+}
+
+/// Reports whether the configured certificate carries an IP address.
+fn certificate_names_an_ip(c: &Config) -> bool {
+    let src = tls_source(c);
     if src.is_empty() {
         return false;
     }

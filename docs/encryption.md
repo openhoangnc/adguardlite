@@ -29,9 +29,31 @@ restarting anything.
 
 ## Reloading
 
-The listeners hold the certificate behind a shared slot, so saving a new one
-through `/control/tls/configure` takes effect on the **next handshake**. No
-restart, and connections already open are not disturbed.
+The listeners hold the certificate behind a shared slot, so replacing one takes
+effect on the **next handshake**. No restart, and connections already open are
+not disturbed.
+
+Two things replace it:
+
+- **Saving one** through Settings → Encryption settings, which installs it at
+  once.
+- **Rewriting the files.** When `tls.certificate_path` or
+  `tls.private_key_path` is set, the files are compared with what is being
+  served once a minute, and a changed pair is installed. This is what makes an
+  ACME client's renewal reach the listeners: it rewrites the files on its own
+  schedule and has no way to tell the server, and nothing in the configuration
+  moves when it does.
+
+A renewal that is caught halfway through — the new certificate beside the old
+key — does not replace anything: the pair has to parse and belong together
+first, and the check a minute later finds it whole. The same goes for a file
+that is briefly missing. In both cases the certificate in use keeps being
+served, and the log says what it saw.
+
+A certificate with less than a week to run and nothing renewing it is reported
+hourly, and an expired one as an error. Neither can be fixed from here — by
+that point whatever was meant to renew it has stopped — but it is the last
+chance to act before clients start refusing to connect.
 
 Listener **ports** are read at startup. Changing one needs a restart.
 
@@ -41,8 +63,8 @@ Any certificate works; nothing here talks to a CA. The two usual routes:
 
 **Let's Encrypt, for a name that resolves publicly.** Use your preferred ACME
 client and point `tls.certificate_path` and `tls.private_key_path` at what it
-writes, so a renewal is picked up on the next handshake without touching the
-configuration.
+writes. A renewal is then picked up within a minute and served on the next
+handshake, without touching the configuration and without a restart.
 
 ```yaml
 tls:

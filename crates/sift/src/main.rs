@@ -308,6 +308,9 @@ async fn run(args: Args, paths: Paths, mut config: sift_config::Config) -> anyho
     // replaced through the API reaches them without a restart.
     let tls = load_tls(&application.config, &certificate)
         .then(|| sift_dns::tls::reloadable(certificate.clone()));
+    // Watching the files for a renewal is only worth it once something is
+    // serving them; the listeners below are what decides that.
+    let watched = tls.is_some().then(|| certificate.clone());
 
     // The web interface over plain HTTP.
     let listener = tokio::net::TcpListener::bind(web_addr).await?;
@@ -424,6 +427,7 @@ async fn run(args: Args, paths: Paths, mut config: sift_config::Config) -> anyho
     tasks.push(tokio::spawn(maintenance(
         state.clone(),
         stats_path.clone(),
+        watched,
         shutdown_rx.clone(),
     )));
 
@@ -514,13 +518,7 @@ fn load_tls(cfg: &sift_config::Config, into: &sift_dns::tls::Reloadable) -> bool
         return false;
     }
 
-    let src = sift_dns::tls::Source {
-        certificate_chain: cfg.tls.certificate_chain.clone(),
-        private_key: cfg.tls.private_key.clone(),
-        certificate_path: cfg.tls.certificate_path.clone(),
-        private_key_path: cfg.tls.private_key_path.clone(),
-    };
-
+    let src = app::tls_source(cfg);
     if src.is_empty() {
         tracing::warn!("encryption is enabled but no certificate is configured");
 
@@ -541,12 +539,169 @@ fn load_tls(cfg: &sift_config::Config, into: &sift_dns::tls::Reloadable) -> bool
     }
 }
 
+/// How close to expiry is worth complaining about.
+///
+/// Renewal normally happens with a month to spare -- Let's Encrypt issues for
+/// ninety days and certbot renews at thirty -- so by the time a week is left,
+/// whatever was meant to rewrite the files has stopped doing it and nobody
+/// has noticed yet.
+const EXPIRY_WARNING: i64 = 7 * 24 * 3600;
+
+/// How often that warning is repeated.
+const EXPIRY_WARNING_EVERY: Duration = Duration::from_secs(3600);
+
+/// Watches the certificate files, so a renewal is served without a restart.
+///
+/// Whatever renews the certificate -- certbot, acme.sh, a mounted secret --
+/// rewrites the files underneath a running server and has no way to tell it.
+/// Nothing else notices: `/control/tls/configure` is the only other path that
+/// installs a certificate, and a renewal does not go through the API.  So the
+/// files are compared with what is being served, on the maintenance tick, and
+/// a changed pair is installed for the next handshake.
+///
+/// The cost is two small files and a digest a minute, which is less than the
+/// statistics prune it runs beside; checking rarely and then racing the expiry
+/// would buy nothing back.
+struct CertWatch {
+    /// The slot the listeners resolve their certificate from.
+    slot: Arc<sift_dns::tls::Reloadable>,
+    /// The last failure reported, so a file caught halfway through being
+    /// rewritten does not repeat the same line every minute until it is not.
+    last_error: Option<String>,
+    /// When expiry was last complained about.
+    warned: Option<std::time::Instant>,
+}
+
+/// What a certificate's remaining life is worth saying.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Expiry {
+    /// It expires within [`EXPIRY_WARNING`], in this many seconds.
+    Soon(i64),
+    /// It has already expired.
+    Gone,
+}
+
+impl CertWatch {
+    fn new(slot: Arc<sift_dns::tls::Reloadable>) -> Self {
+        Self {
+            slot,
+            last_error: None,
+            warned: None,
+        }
+    }
+
+    /// Reloads the certificate when the files have changed, and says so when
+    /// it is running out of time and nothing has replaced it.
+    fn check(&mut self, state: &Shared) {
+        // The config lock is released before anything touches the disk: a
+        // settings save must not wait on a certificate read.
+        let src = {
+            let cfg = state.config.read();
+
+            cfg.tls.enabled.then(|| app::tls_source(&cfg))
+        };
+
+        if let Some(src) = src.filter(sift_dns::tls::Source::reads_files) {
+            self.reload(&src);
+        }
+
+        self.warn_if_expiring();
+    }
+
+    /// Installs what is on disk, if it is not what is already being served.
+    fn reload(&mut self, src: &sift_dns::tls::Source) {
+        match sift_dns::tls::refresh(src, &self.slot) {
+            Ok(Some(st)) => {
+                tracing::info!(
+                    names = ?st.dns_names,
+                    expires = %st.not_after,
+                    "certificate renewed on disk and reloaded"
+                );
+                self.last_error = None;
+                // A new certificate gets its own warning when its own time
+                // comes, rather than inheriting the silence of the old one.
+                self.warned = None;
+            }
+            Ok(None) => self.last_error = None,
+            Err(e) => {
+                // The running certificate is untouched -- nothing is installed
+                // until the new pair has been proven -- so this is a warning
+                // rather than an error.  A renewal that writes the certificate
+                // and the key separately is a mismatched pair in between, and
+                // the next check finds it whole.
+                let text = e.to_string();
+                if self.last_error.as_deref() != Some(text.as_str()) {
+                    tracing::warn!(
+                        error = %text,
+                        "rereading the certificate; keeping the one in use"
+                    );
+                }
+                self.last_error = Some(text);
+            }
+        }
+    }
+
+    /// Reports a certificate that is running out of time, once an hour.
+    ///
+    /// Nothing here can fix it: renewal is somebody else's job, and by this
+    /// point they are not doing it.  Saying so is what gives the operator the
+    /// chance to act before their clients refuse to connect.
+    fn warn_if_expiring(&mut self) {
+        let left = self
+            .slot
+            .expires_at()
+            .map(|at| at - jiff::Timestamp::now().as_second());
+
+        match self.expiry(std::time::Instant::now(), left) {
+            Some(Expiry::Gone) => {
+                tracing::error!("the certificate has expired; clients will refuse to connect");
+            }
+            Some(Expiry::Soon(left)) => tracing::warn!(
+                hours_left = left / 3600,
+                "the certificate expires soon and nothing has renewed it"
+            ),
+            None => {}
+        }
+    }
+
+    /// Decides what to say about a certificate with `left` seconds to run,
+    /// and records having said it.
+    ///
+    /// `None` is either time still in hand, nothing installed, or a warning
+    /// already given within the hour.
+    fn expiry(&mut self, now: std::time::Instant, left: Option<i64>) -> Option<Expiry> {
+        let left = left?;
+        if left > EXPIRY_WARNING {
+            // Back in hand, which is what a renewal looks like from here.
+            self.warned = None;
+
+            return None;
+        }
+
+        if self.warned.is_some_and(|w| now - w < EXPIRY_WARNING_EVERY) {
+            return None;
+        }
+        self.warned = Some(now);
+
+        Some(if left <= 0 {
+            Expiry::Gone
+        } else {
+            Expiry::Soon(left)
+        })
+    }
+}
+
 /// Runs the periodic upkeep the server needs.
 async fn maintenance(
     state: Shared,
     stats_path: std::path::PathBuf,
+    certificate: Option<Arc<sift_dns::tls::Reloadable>>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
+    // Only when encrypted listeners are actually running: replacing a
+    // certificate nothing serves would log a reload that reached nobody.
+    let mut certificate = certificate.map(CertWatch::new);
+
     let mut tick = tokio::time::interval(Duration::from_secs(60));
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -585,6 +740,10 @@ async fn maintenance(
                 Ok(false) => {}
                 Err(e) => tracing::warn!(error = %e, "rotating the query log"),
             }
+        }
+
+        if let Some(w) = certificate.as_mut() {
+            w.check(&state);
         }
 
         // Refresh any list whose own interval has elapsed, checked every
@@ -711,6 +870,76 @@ mod tests {
         }
     }
     static PROBE: Probe = Probe;
+
+    /// A watch over a slot holding nothing, so the expiry decision can be
+    /// driven with a remaining life rather than a real certificate.
+    fn watch() -> super::CertWatch {
+        super::CertWatch::new(std::sync::Arc::new(sift_dns::tls::Reloadable::new()))
+    }
+
+    #[test]
+    fn a_certificate_with_time_in_hand_is_not_complained_about() {
+        let mut w = watch();
+        let now = std::time::Instant::now();
+
+        assert_eq!(w.expiry(now, None), None, "nothing is installed");
+        assert_eq!(
+            w.expiry(now, Some(super::EXPIRY_WARNING + 1)),
+            None,
+            "a week and a second is still routine"
+        );
+    }
+
+    #[test]
+    fn a_certificate_running_out_is_reported_once_an_hour() {
+        // Every minute would bury the log; never would leave the operator to
+        // find out from their clients.
+        let mut w = watch();
+        let start = std::time::Instant::now();
+        let left = Some(super::EXPIRY_WARNING - 1);
+
+        assert_eq!(w.expiry(start, left), Some(super::Expiry::Soon(604_799)));
+        assert_eq!(
+            w.expiry(start + std::time::Duration::from_secs(59 * 60), left),
+            None
+        );
+        assert_eq!(
+            w.expiry(start + super::EXPIRY_WARNING_EVERY, left),
+            Some(super::Expiry::Soon(604_799)),
+            "an hour on, it is worth saying again"
+        );
+    }
+
+    #[test]
+    fn an_expired_certificate_is_reported_as_expired() {
+        let mut w = watch();
+
+        assert_eq!(
+            w.expiry(std::time::Instant::now(), Some(0)),
+            Some(super::Expiry::Gone),
+            "the moment it lapses"
+        );
+    }
+
+    #[test]
+    fn a_renewal_earns_its_own_warning() {
+        // Otherwise the hour of silence after the last warning would carry
+        // over, and a certificate replaced by one that is itself about to
+        // expire would say nothing.
+        let mut w = watch();
+        let start = std::time::Instant::now();
+
+        assert!(w.expiry(start, Some(60)).is_some());
+        assert_eq!(w.expiry(start, Some(60)), None, "still within the hour");
+
+        // A certificate with a year on it clears the slate.
+        assert_eq!(w.expiry(start, Some(365 * 24 * 3600)), None);
+        assert_eq!(
+            w.expiry(start, Some(60)),
+            Some(super::Expiry::Soon(60)),
+            "the next one to run short is reported at once"
+        );
+    }
 
     #[test]
     fn the_default_filter_does_not_silence_the_binarys_own_logs() {
