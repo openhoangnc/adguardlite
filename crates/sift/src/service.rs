@@ -66,6 +66,14 @@ pub enum Init {
     /// systemd, on Linux.
     Systemd,
     /// launchd, on macOS.
+    ///
+    /// Built on every platform, not only the one that can run it: the plist
+    /// generator and the tests that check it are worth compiling and running
+    /// wherever the suite runs, and only `detect` is platform-specific.  That
+    /// leaves nothing constructing this on a build that is not for macOS --
+    /// `Systemd` escapes the same lint only by accident, because `uninstall`
+    /// happens to compare against it.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     Launchd,
 }
 

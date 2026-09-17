@@ -32,6 +32,11 @@ pub enum Error {
     },
 
     /// The platform does not support the setting.
+    ///
+    /// Carried only where it can happen.  Every setting in the `os` block is
+    /// honoured on Linux, so nothing there constructs this, and a variant
+    /// that cannot occur is one a reader has to rule out.
+    #[cfg(not(target_os = "linux"))]
     #[error("{0} is not supported on this platform")]
     Unsupported(&'static str),
 }
