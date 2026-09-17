@@ -123,20 +123,32 @@ pub async fn querylog(
         s.querylog.read(offset, over_read)
     };
 
-    let search = p.search.as_deref().map(str::to_ascii_lowercase);
+    let search = p.search.as_deref().and_then(Search::parse);
     let status = p.response_status.as_deref().unwrap_or("all");
 
+    // A configured client's name before a discovered one, as upstream's
+    // `clientOrArtificial` does: it asks the persistent store first and only
+    // then the runtime one.  Consulting only the runtime store left a client
+    // the user had named in the interface unsearchable by that name, and
+    // unnamed in the column beside the query.
     let name_of = |e: &Entry| -> String {
-        e.ip.parse()
-            .ok()
-            .map(|a| s.resolver.runtime.name_of(a))
+        let addr = e.ip.parse::<std::net::IpAddr>().ok();
+        let id = Some(e.client_id.as_str()).filter(|s| !s.is_empty());
+
+        if let Some(c) = s.resolver.clients().find(addr, id, None)
+            && !c.name.is_empty()
+        {
+            return c.name.clone();
+        }
+
+        addr.map(|a| s.resolver.runtime.name_of(a))
             .unwrap_or_default()
     };
 
     let filtered: Vec<&Entry> = raw
         .iter()
         .filter(|e| is_older_than(e, cutoff))
-        .filter(|e| matches_search(e, search.as_deref(), &name_of(e)))
+        .filter(|e| matches_search(e, search.as_ref(), &name_of(e)))
         .filter(|e| matches_status(e, status))
         .take(limit)
         .collect();
@@ -167,23 +179,92 @@ fn is_older_than(e: &Entry, cutoff: Option<jiff::Timestamp>) -> bool {
     parse_time(&e.time).is_some_and(|t| t < c)
 }
 
-/// Reports whether an entry matches a search term.
+/// What the interface's one search box asks for.
 ///
-/// The term is matched against the queried name, the client's address and the
-/// name discovery found for it, which is what the interface's single search
-/// box implies.
-fn matches_search(e: &Entry, term: Option<&str>, client_name: &str) -> bool {
-    let Some(t) = term else {
-        return true;
-    };
-    if t.is_empty() {
-        return true;
+/// A term the interface wrapped in double quotes is an **exact** match on one
+/// of the fields; anything else is a substring of one.  That is upstream's
+/// `getDoubleQuotesEnclosedValue` and its two `ctDomainOrClientCase` forms —
+/// and the interface quotes the term whenever the user picks a client out of
+/// the log, so matching the quotes literally found nothing at all.
+#[derive(Debug)]
+struct Search {
+    /// The term, lowercased, with the enclosing quotes removed.
+    value: String,
+    /// The term in its ASCII form, when it is a name that has one.
+    ///
+    /// The log stores a question as the wire carried it, so an
+    /// internationalised name is on disk in punycode while the user types it
+    /// in their own script.  Upstream converts the term and tries both.
+    ascii: Option<String>,
+    /// Whether a field has to equal the term rather than contain it.
+    strict: bool,
+}
+
+impl Search {
+    /// Parses the `search` parameter, or `None` when there was none.
+    ///
+    /// An empty parameter is no search at all; a term of `""` is a *strict*
+    /// search for the empty string, which is what upstream does with it,
+    /// because it tests the raw value before it unwraps the quotes.
+    fn parse(raw: &str) -> Option<Self> {
+        if raw.is_empty() {
+            return None;
+        }
+
+        let b = raw.as_bytes();
+        let strict = b.len() >= 2 && b[0] == b'"' && b[b.len() - 1] == b'"';
+        // The quotes are ASCII, so these are character boundaries.
+        let value = if strict { &raw[1..raw.len() - 1] } else { raw };
+        let value = value.to_lowercase();
+
+        // Only worth carrying when it differs, which is upstream's test too.
+        let ascii = idna::domain_to_ascii(&value).ok().filter(|a| *a != value);
+
+        Some(Self {
+            value,
+            ascii,
+            strict,
+        })
     }
 
-    e.question_host.to_ascii_lowercase().contains(t)
-        || e.ip.to_ascii_lowercase().contains(t)
-        || client_name.to_ascii_lowercase().contains(t)
-        || e.client_id.to_ascii_lowercase().contains(t)
+    /// Reports whether an entry matches.
+    ///
+    /// The fields are upstream's: the queried name, the client's address, the
+    /// name known for it, and its ClientID.
+    fn matches(&self, e: &Entry, client_name: &str) -> bool {
+        let fields = [
+            e.question_host.as_str(),
+            e.ip.as_str(),
+            client_name,
+            e.client_id.as_str(),
+        ];
+
+        if fields.into_iter().any(|f| self.holds(f, &self.value)) {
+            return true;
+        }
+
+        // The ASCII form is only ever tried against the queried name, as
+        // upstream does: a client's address or name is not a domain.
+        self.ascii
+            .as_deref()
+            .is_some_and(|a| self.holds(&e.question_host, a))
+    }
+
+    /// Reports whether one field matches one form of the term.
+    fn holds(&self, field: &str, term: &str) -> bool {
+        let f = field.to_lowercase();
+
+        if self.strict {
+            f == term
+        } else {
+            f.contains(term)
+        }
+    }
+}
+
+/// Reports whether an entry matches a search term.
+fn matches_search(e: &Entry, term: Option<&Search>, client_name: &str) -> bool {
+    term.is_none_or(|t| t.matches(e, client_name))
 }
 
 /// Reports whether an entry matches a response-status filter.
@@ -580,15 +661,20 @@ mod tests {
         }
     }
 
+    /// The search a `search=` parameter asks for.
+    fn term(raw: &str) -> Option<Search> {
+        Search::parse(raw)
+    }
+
     #[test]
     fn search_matches_host_and_client() {
         let e = entry("ads.example.com", Reason::FilteredBlockList);
-        assert!(matches_search(&e, Some("example"), ""));
-        assert!(matches_search(&e, Some("192.168"), ""));
-        assert!(!matches_search(&e, Some("nothing"), ""));
+        assert!(matches_search(&e, term("example").as_ref(), ""));
+        assert!(matches_search(&e, term("192.168").as_ref(), ""));
+        assert!(!matches_search(&e, term("nothing").as_ref(), ""));
         assert!(matches_search(&e, None, ""), "no term matches everything");
         assert!(
-            matches_search(&e, Some(""), ""),
+            matches_search(&e, term("").as_ref(), ""),
             "an empty term matches everything"
         );
     }
@@ -598,15 +684,87 @@ mod tests {
         // The interface has one search box, and a user searching for a device
         // types its name rather than its address.
         let e = entry("ads.example.com", Reason::FilteredBlockList);
-        assert!(matches_search(&e, Some("printer"), "printer.lan"));
-        assert!(!matches_search(&e, Some("printer"), ""));
+        assert!(matches_search(&e, term("printer").as_ref(), "printer.lan"));
+        assert!(!matches_search(&e, term("printer").as_ref(), ""));
     }
 
     #[test]
     fn search_matches_the_client_id() {
         let mut e = entry("ads.example.com", Reason::FilteredBlockList);
         e.client_id = "kids-tablet".into();
-        assert!(matches_search(&e, Some("kids"), ""));
+        assert!(matches_search(&e, term("kids").as_ref(), ""));
+    }
+
+    #[test]
+    fn a_quoted_term_is_an_exact_match_on_a_whole_field() {
+        // What the interface sends when the user picks a client out of the
+        // log.  Matching the quotes literally found nothing, which is how
+        // this was reported: searching a client's own address returned
+        // "Nothing found".
+        let e = entry("ads.example.com", Reason::FilteredBlockList);
+        assert_eq!(e.ip, "192.168.1.5");
+
+        assert!(matches_search(&e, term("\"192.168.1.5\"").as_ref(), ""));
+        assert!(
+            !matches_search(&e, term("\"192.168.1\"").as_ref(), ""),
+            "part of an address is not the whole of it"
+        );
+        assert!(
+            matches_search(&e, term("192.168.1").as_ref(), ""),
+            "and unquoted it still matches a part"
+        );
+
+        assert!(matches_search(&e, term("\"ads.example.com\"").as_ref(), ""));
+        assert!(!matches_search(&e, term("\"example.com\"").as_ref(), ""));
+    }
+
+    #[test]
+    fn a_quoted_client_name_is_matched_exactly() {
+        let e = entry("ads.example.com", Reason::FilteredBlockList);
+        assert!(matches_search(
+            &e,
+            term("\"hoangnc-chrome\"").as_ref(),
+            "hoangnc-chrome"
+        ));
+        assert!(!matches_search(
+            &e,
+            term("\"hoangnc\"").as_ref(),
+            "hoangnc-chrome"
+        ));
+    }
+
+    #[test]
+    fn a_quoted_term_is_still_matched_without_regard_to_case() {
+        let e = entry("ads.example.com", Reason::FilteredBlockList);
+        assert!(matches_search(&e, term("\"ADS.Example.COM\"").as_ref(), ""));
+        assert!(matches_search(
+            &e,
+            term("\"Printer.LAN\"").as_ref(),
+            "printer.lan"
+        ));
+    }
+
+    #[test]
+    fn an_internationalised_name_is_searchable_as_it_is_typed() {
+        // The log holds the question as the wire carried it, which is
+        // punycode, while the user types their own script.  Upstream converts
+        // the term and tries both forms against the queried name.
+        let e = entry("xn--e1afmkfd.xn--p1ai", Reason::NotFilteredNotFound);
+
+        assert!(matches_search(&e, term("пример.рф").as_ref(), ""));
+        assert!(matches_search(&e, term("\"пример.рф\"").as_ref(), ""));
+        assert!(
+            matches_search(&e, term("xn--e1afmkfd.xn--p1ai").as_ref(), ""),
+            "and the stored form still matches itself"
+        );
+        assert!(!matches_search(&e, term("\"другое.рф\"").as_ref(), ""));
+    }
+
+    #[test]
+    fn a_single_quote_is_not_a_quoted_term() {
+        // Upstream needs two of them, so one is part of the term itself.
+        let e = entry("ads.example.com", Reason::FilteredBlockList);
+        assert!(!matches_search(&e, term("\"").as_ref(), ""));
     }
 
     #[test]

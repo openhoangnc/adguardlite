@@ -29,6 +29,7 @@ http = "1.5.0"
 http-body-util = "0.1.5"
 hyper = "1.11.1"
 hyper-util = { version = "0.1.20", features = ["server", "server-auto", "tokio"] }
+idna = "1.1.0"
 jiff = { version = "0.2.37", features = ["serde"] }
 mime_guess = "2.0.5"
 parking_lot = "0.12.5"

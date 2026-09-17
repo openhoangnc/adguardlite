@@ -970,6 +970,93 @@ the configuration only when something changes it.
 
 ---
 
+## Found watching the same container again, and fixed
+
+Holding one hour of statistics instead of the whole window was a real leak and
+not that deployment's. It kept growing: 380 MB eighteen hours after the fixed
+image started, against a 269 MB baseline, and `memory.stat` said `anon`, so
+none of it was page cache. The box turned out to answer **950 queries an hour**
+across **147 distinct names** and **19 client addresses all told** — far too
+little traffic for statistics, clients, connections or descriptors to be it.
+Twenty-two open descriptors, nine threads, no filter refresh in eighteen hours.
+
+**The expression cache had no ceiling.** `Pattern::Rx` holds a `LazyRegex`
+whose `OnceLock` is filled the first time something matches against it, and
+never emptied again. That solved what building 156,557 automata at load cost —
+22 seconds and most of a gigabyte — by arriving at the same place slowly
+instead: every name the network asks for that reaches a new candidate rule adds
+an expression that is then held for the life of the process.
+
+Reproduced with that installation's own 36 lists, 2,285,525 rules, in the
+published image, asking for real names in batches of twenty thousand:
+
+| distinct names asked for | unbounded | bounded |
+|---|---:|---:|
+| none (lists loaded) | 269.7 MB | 272.8 MB |
+| 20,000 | 347.4 MB | 347.9 MB |
+| 40,000 | 410.7 MB | 353.7 MB |
+| 60,000 | 475.2 MB | 357.1 MB |
+| 80,000 | 537.7 MB | 358.1 MB |
+| 120,000 | — | 363.2 MB |
+
+The same load with `filtering_enabled: false` moved it 20 MB and then stopped,
+which is what said it was the engine and not the response cache, the query log
+or the statistics.
+
+An expression costs about 25 KB. It is the compiled program, not the lazy
+DFA's cache — `dfa_size_limit` at 4 KB moved 24.4 KB to 21.7 KB and nothing
+else did anything — so the only thing that bounds it is holding fewer of them.
+`MAX_COMPILED` is 2,000, the oldest is dropped to make room, and an expression
+that has matched since it was last considered gets a second chance first:
+building one costs 105 microseconds, and the point is not to pay that again for
+the one name the network asks for constantly. Dropping one costs nothing but
+building it again, which `only_so_many_expressions_are_kept_built` checks along
+with the verdict being the same either way.
+
+## Found reading the Go search code beside ours, and fixed
+
+Searching the query log for a client — `"192.168.99.1"`, `"hoangnc-chrome"` —
+answered "Nothing found" for both. Two reasons, both in the same function.
+
+- **A quoted term was matched with its quotes.** Upstream's
+  `getDoubleQuotesEnclosedValue` strips a surrounding pair and turns the search
+  from a substring into an exact match; `ctDomainOrClientCaseStrict` then
+  compares the whole of the queried name, the client's address, its name and
+  its ClientID. This build took the parameter as written and looked for
+  `"192.168.99.1"`, quotes included, inside each field — which nothing ever
+  contains. The interface quotes the term whenever the user picks a client out
+  of the log, so the one search a user is most likely to run was the one that
+  could never match.
+
+- **Only discovered names were searched.** The name came from the runtime
+  store alone, so a client the user had named in the interface was neither
+  findable by that name nor shown beside its queries. Upstream's
+  `clientOrArtificial` asks the persistent store first and the runtime one
+  after, which is what `name_of` does now — and `client_info.name` carries the
+  configured name with it.
+
+Checked against a running server, five queries from a client named
+`hoangnc-chrome`:
+
+| search | before | after |
+|---|---:|---:|
+| `"127.0.0.1"` | 0 | 10 |
+| `"hoangnc-chrome"` | 0 | 10 |
+| `127.0.0` | 10 | 10 |
+| `"127.0.0"` | 0 | 0 |
+| `"hoangnc"` | 0 | 0 |
+
+The last two are the point of the quotes: an exact match on a whole field, so a
+part of one does not match.
+
+**And the term's ASCII form.** Upstream converts the lowercased term with
+`idna.ToASCII` and tries that against the queried name as well, because the log
+stores a question as the wire carried it — punycode — while the user types
+their own script. That is the third difference the comparison turned up, and it
+is closed with the same `idna` the tree already carries.
+
+---
+
 ## Deliberate deviations
 
 

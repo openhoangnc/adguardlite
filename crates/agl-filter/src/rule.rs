@@ -12,7 +12,11 @@
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use std::sync::OnceLock;
+use std::collections::VecDeque;
+use std::sync::Weak;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use parking_lot::{Mutex, RwLock};
 
 use regex::Regex;
 
@@ -134,16 +138,62 @@ impl NetworkRule {
 pub struct LazyRegex {
     /// The expression source, as [`crate::pattern::to_regex`] produced it.
     src: Box<str>,
-    /// The compiled form, built once.
-    re: OnceLock<Option<Regex>>,
+    /// The compiled form, while it is being kept.
+    re: RwLock<Slot>,
+    /// Whether anything has matched against it since it was last considered
+    /// for eviction.  Building one costs 105 microseconds, so an expression
+    /// the network keeps reaching should not be thrown away just for being
+    /// the oldest.
+    used: AtomicBool,
 }
+
+/// What a [`LazyRegex`] is holding.
+enum Slot {
+    /// Never built, or built and since dropped to stay under the ceiling.
+    Empty,
+    /// Built once and refused by the regex crate; it can never match, and
+    /// remembering that costs nothing, so it is never dropped.
+    Failed,
+    /// Built and being kept.
+    ///
+    /// Behind an `Arc` so a match can take a reference and let go of the lock
+    /// before running: a match must never be what an eviction waits on.
+    Built(Arc<Regex>),
+}
+
+/// How many compiled expressions are kept at once.
+///
+/// One costs about 25 KB, measured over the expression rules of real lists,
+/// and it is the compiled program rather than the lazy DFA's cache — so
+/// `dfa_size_limit` does not touch it, which was the first thing tried.
+/// Two thousand of them is therefore a ceiling of roughly 50 MB, and the
+/// whole process measured about 90 MB above its idle size at the ceiling,
+/// the rest being the response cache and the hour of statistics.
+///
+/// There has to be a ceiling. Building every expression at load cost 22
+/// seconds and most of a gigabyte on a 37-list installation, which is why
+/// they are built on first use; but a cache nothing bounds only arrives at
+/// the same place more slowly. That installation holds 2,277,924 rules, of
+/// which 156,557 need an expression — 3.8 GB, if the network eventually asks
+/// for a name that reaches each one. It was doing so at 6 MB an hour.
+pub const MAX_COMPILED: usize = 2_000;
+
+/// The point past which a second chance is no longer offered.
+const HARD_CEILING: usize = MAX_COMPILED + MAX_COMPILED / 8;
+
+/// The expressions currently built, oldest first.
+///
+/// Weak, so an engine that has been rebuilt does not keep its old rules alive
+/// through this, and entries that no longer upgrade are simply skipped.
+static COMPILED: Mutex<VecDeque<Weak<LazyRegex>>> = Mutex::new(VecDeque::new());
 
 impl LazyRegex {
     /// Holds an expression without compiling it.
     pub fn new(src: String) -> Self {
         Self {
             src: src.into_boxed_str(),
-            re: OnceLock::new(),
+            re: RwLock::new(Slot::Empty),
+            used: AtomicBool::new(false),
         }
     }
 
@@ -151,27 +201,96 @@ impl LazyRegex {
     ///
     /// Used for the `/regex/` form, which a user writes by hand and which is
     /// therefore compiled at load so a malformed one is still rejected there.
+    ///
+    /// It is not registered for eviction: a user writes few of these by hand,
+    /// and dropping one would lose the validation that compiling it proved.
     pub fn compiled(src: String, re: Regex) -> Self {
-        let cell = OnceLock::new();
-        let _ = cell.set(Some(re));
-
         Self {
             src: src.into_boxed_str(),
-            re: cell,
+            re: RwLock::new(Slot::Built(Arc::new(re))),
+            used: AtomicBool::new(false),
         }
     }
 
-    /// Reports whether the expression matches, compiling it if needed.
-    pub fn is_match(&self, haystack: &str) -> bool {
-        self.re
-            .get_or_init(|| Regex::new(&self.src).ok())
-            .as_ref()
-            .is_some_and(|re| re.is_match(haystack))
+    /// Reports whether the expression matches, building it if needed.
+    pub fn is_match(self: &Arc<Self>, haystack: &str) -> bool {
+        // Take a reference to the expression and let the lock go before
+        // matching against it.
+        let held = match &*self.re.read() {
+            Slot::Built(re) => Some(Arc::clone(re)),
+            Slot::Failed => return false,
+            Slot::Empty => None,
+        };
+
+        if let Some(re) = held {
+            self.used.store(true, Ordering::Relaxed);
+
+            return re.is_match(haystack);
+        }
+
+        self.build().is_some_and(|re| re.is_match(haystack))
+    }
+
+    /// Builds the expression and keeps it, evicting the oldest if need be.
+    fn build(self: &Arc<Self>) -> Option<Arc<Regex>> {
+        let Some(re) = Regex::new(&self.src).ok().map(Arc::new) else {
+            *self.re.write() = Slot::Failed;
+
+            return None;
+        };
+
+        *self.re.write() = Slot::Built(Arc::clone(&re));
+
+        let mut compiled = COMPILED.lock();
+        compiled.push_back(Arc::downgrade(self));
+
+        // At most one pass, so an expression given a second chance cannot be
+        // reconsidered in the same one.  When every expression held has been
+        // used the pass clears their marks and stops, leaving the ceiling
+        // exceeded by a little until the next build; that is the cost of not
+        // discarding something the network is still asking for.
+        let mut passes = compiled.len();
+        while compiled.len() > MAX_COMPILED && passes > 0 {
+            passes -= 1;
+
+            let Some(old) = compiled.pop_front() else {
+                break;
+            };
+            // An expression whose rule is gone -- the engine was rebuilt --
+            // simply leaves.
+            let Some(lr) = old.upgrade() else {
+                continue;
+            };
+
+            // Past the hard ceiling the second chance is not offered: a
+            // resolver busy enough to reach every expression between two
+            // builds must not be able to grow this without end.
+            if compiled.len() <= HARD_CEILING && lr.used.swap(false, Ordering::Relaxed) {
+                compiled.push_back(old);
+
+                continue;
+            }
+
+            // The caller keeps its own reference, so dropping the rule's is
+            // safe even when the expression evicted is this one.
+            let mut slot = lr.re.write();
+            if matches!(&*slot, Slot::Built(_)) {
+                *slot = Slot::Empty;
+            }
+        }
+
+        Some(re)
     }
 
     /// The expression source.
     pub fn source(&self) -> &str {
         &self.src
+    }
+
+    /// Whether the expression is built and being kept, for tests.
+    #[cfg(test)]
+    fn is_built(&self) -> bool {
+        matches!(&*self.re.read(), Slot::Built(_))
     }
 }
 
@@ -179,7 +298,7 @@ impl std::fmt::Debug for LazyRegex {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LazyRegex")
             .field("src", &self.src)
-            .field("compiled", &self.re.get().is_some())
+            .field("compiled", &matches!(&*self.re.read(), Slot::Built(_)))
             .finish()
     }
 }
@@ -756,12 +875,61 @@ mod tests {
             panic!("expected an expression pattern");
         };
 
-        assert!(
-            re.re.get().is_none(),
-            "the automaton was built at parse time"
-        );
+        assert!(!re.is_built(), "the automaton was built at parse time");
         assert!(re.is_match("http://example.com/ads/banner.png"));
-        assert!(re.re.get().is_some(), "the automaton should now be cached");
+        assert!(re.is_built(), "the automaton should now be cached");
+    }
+
+    #[test]
+    fn only_so_many_expressions_are_kept_built() {
+        // Building every expression at load cost 22 seconds and most of a
+        // gigabyte, which is why they are built on first use.  Keeping every
+        // one that is built arrives at the same ceiling more slowly: on the
+        // installation this came from, 156,557 rules need an expression and
+        // one costs about 25 KB.
+        let held: Vec<Arc<LazyRegex>> = (0..MAX_COMPILED + 64)
+            .map(|i| Arc::new(LazyRegex::new(format!("(?i)ads{i}\\.example\\.com"))))
+            .collect();
+
+        for (i, re) in held.iter().enumerate() {
+            assert!(re.is_match(&format!("ads{i}.example.com")), "rule {i}");
+        }
+
+        assert!(
+            held.iter().filter(|r| r.is_built()).count() <= MAX_COMPILED,
+            "more expressions are being held than the ceiling allows"
+        );
+        assert!(
+            !held[0].is_built(),
+            "the oldest expression should have been dropped"
+        );
+
+        // Dropping one costs nothing but building it again when it is next
+        // needed, and the verdict is the same either way.
+        assert!(held[0].is_match("ads0.example.com"));
+        assert!(!held[0].is_match("ads1.example.com"));
+        assert!(held[0].is_built());
+    }
+
+    #[test]
+    fn an_expression_still_being_used_is_not_the_one_dropped() {
+        // Oldest-first alone would throw away an expression the network keeps
+        // reaching, and pay 105 microseconds to build it again on the next
+        // query that reaches it.
+        let hot = Arc::new(LazyRegex::new(r"(?i)hot\.example\.com".to_string()));
+        assert!(hot.is_match("hot.example.com"));
+
+        for i in 0..MAX_COMPILED + 64 {
+            let cold = Arc::new(LazyRegex::new(format!(r"(?i)cold{i}\.example\.com")));
+            assert!(cold.is_match(&format!("cold{i}.example.com")));
+            // Reaching it again is what earns it the second chance.
+            assert!(hot.is_match("hot.example.com"));
+        }
+
+        assert!(
+            hot.is_built(),
+            "an expression in constant use should not have been dropped"
+        );
     }
 
     #[test]
@@ -778,10 +946,7 @@ mod tests {
         let Pattern::Rx { re, .. } = &n.rule.pattern else {
             panic!("expected an expression pattern");
         };
-        assert!(
-            re.re.get().is_some(),
-            "a handwritten regex compiles at load"
-        );
+        assert!(re.is_built(), "a handwritten regex compiles at load");
     }
 
     #[test]
