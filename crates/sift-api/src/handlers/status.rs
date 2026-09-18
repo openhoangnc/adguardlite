@@ -144,9 +144,8 @@ fn expand_wildcards(addrs: &[String]) -> Vec<String> {
         }
 
         let found = local.get_or_insert_with(|| {
-            crate::netiface::all()
-                .into_values()
-                .flat_map(|i| i.ip_addresses)
+            crate::netiface::addresses()
+                .into_iter()
                 .filter(|ip| !ip.is_loopback() && !is_link_local(ip))
                 .collect()
         });

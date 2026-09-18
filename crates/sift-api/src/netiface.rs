@@ -1,6 +1,8 @@
 //! Network interfaces, in the shape `/control/install/get_addresses` returns.
 //!
-//! The setup wizard is the only caller: it lists the addresses the admin
+//! The setup wizard is the main caller -- `/control/status` uses
+//! [`addresses`] to expand a wildcard listen address: it lists the addresses
+//! the admin
 //! interface and the DNS server will answer on, and fills the two "Listen
 //! interface" dropdowns.  It reads `name`, `ip_addresses` and `flags`, and
 //! greys out any interface whose flags do not contain `up`.  Reporting an
@@ -53,6 +55,28 @@ pub fn all() -> BTreeMap<String, NetInterface> {
         let ip = iface.addr.ip();
         if !entry.ip_addresses.contains(&ip) {
             entry.ip_addresses.push(ip);
+        }
+    }
+
+    out
+}
+
+/// Every address configured on any interface.
+///
+/// Separate from [`all`] because `/control/status` is polled every ten
+/// seconds and needs nothing but the addresses: `all` reads two
+/// `/sys/class/net` files per interface for the MAC and the MTU, which only
+/// the setup wizard ever looks at.
+pub fn addresses() -> Vec<IpAddr> {
+    let Ok(found) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
+
+    let mut out: Vec<IpAddr> = Vec::new();
+    for iface in found {
+        let ip = iface.addr.ip();
+        if !out.contains(&ip) {
+            out.push(ip);
         }
     }
 
@@ -145,6 +169,20 @@ mod tests {
             assert_eq!(key, iface.name);
             assert!(!iface.ip_addresses.is_empty(), "{key} has no address");
         }
+    }
+
+    #[test]
+    fn the_cheap_address_list_agrees_with_the_full_one() {
+        // Two enumerations of the same thing drift apart silently; the only
+        // thing keeping them together is this.
+        let mut cheap = addresses();
+        let mut full: Vec<IpAddr> = all().into_values().flat_map(|i| i.ip_addresses).collect();
+        cheap.sort();
+        cheap.dedup();
+        full.sort();
+        full.dedup();
+
+        assert_eq!(cheap, full);
     }
 
     #[test]
