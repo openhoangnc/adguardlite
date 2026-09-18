@@ -104,11 +104,85 @@ fn join_host_port(host: &str, port: u16) -> String {
     }
 }
 
+/// Replaces a wildcard listen address with the addresses it actually answers
+/// on.
+///
+/// `bind_hosts: [0.0.0.0]` is the default, and reporting it verbatim put
+/// `0.0.0.0:53` in the setup guide's "This server answers on" card -- which is
+/// the one thing on that page nobody can type into a router.  Upstream's
+/// `getDNSAddrs` expands an unspecified host the same way, from
+/// `aghnet.CollectAllIfacesAddrs`.
+///
+/// Two differences from Go, both deliberate:
+///
+/// - each entry is expanded on its own, and to its **own family**, where
+///   upstream replaces the whole list with every interface address as soon as
+///   one entry is unspecified.  The two agree for every single-entry list,
+///   which is what a config file holds;
+/// - loopback and IPv6 link-local addresses are left out.  They answer, but
+///   the card exists to give somebody an address to point a device at, and
+///   neither is one.
+///
+/// A host that expands to nothing is kept as it was, so the card is never
+/// empty on a machine whose interfaces could not be read.
+fn expand_wildcards(addrs: &[String]) -> Vec<String> {
+    use std::net::{IpAddr, SocketAddr};
+
+    // Read once: a machine with several wildcard entries should not walk its
+    // interface list once per entry.
+    let mut local: Option<Vec<IpAddr>> = None;
+
+    let mut out = Vec::new();
+    for a in addrs {
+        let Ok(sock) = a.parse::<SocketAddr>() else {
+            out.push(a.clone());
+            continue;
+        };
+        if !sock.ip().is_unspecified() {
+            out.push(a.clone());
+            continue;
+        }
+
+        let found = local.get_or_insert_with(|| {
+            crate::netiface::all()
+                .into_values()
+                .flat_map(|i| i.ip_addresses)
+                .filter(|ip| !ip.is_loopback() && !is_link_local(ip))
+                .collect()
+        });
+
+        let want_v4 = sock.is_ipv4();
+        let mut any = false;
+        for ip in found.iter().filter(|ip| ip.is_ipv4() == want_v4) {
+            let one = SocketAddr::new(*ip, sock.port()).to_string();
+            if !out.contains(&one) {
+                out.push(one);
+            }
+            any = true;
+        }
+
+        if !any {
+            out.push(a.clone());
+        }
+    }
+
+    out
+}
+
+/// Reports whether an address is link-local: 169.254/16, or `fe80::/10`.
+fn is_link_local(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(a) => a.is_link_local(),
+        // `Ipv6Addr::is_unicast_link_local` is still unstable.
+        std::net::IpAddr::V6(a) => (a.segments()[0] & 0xffc0) == 0xfe80,
+    }
+}
+
 /// `GET /control/status`
 pub async fn status(State(s): State<Shared>) -> Json<StatusResp> {
     let cfg = s.config.read();
 
-    let mut dns_addresses = s.dns_addresses.read().clone();
+    let mut dns_addresses = expand_wildcards(&s.dns_addresses.read());
     dns_addresses.extend(encrypted_addresses(&cfg));
 
     Json(StatusResp {
@@ -516,20 +590,33 @@ pub async fn version(
     let Some(mut info) = fetched else {
         // Upstream answers 502 here; reporting the running version keeps the
         // interface usable when the announcement server is unreachable, and
-        // reads as "nothing newer" rather than as an update banner.
+        // reads as "nothing newer" rather than as an update banner.  The
+        // interface still has to be able to tell the two apart, which is what
+        // `check_failed` is for -- without it a check that never reached
+        // GitHub renders exactly like a server that is up to date.
         return Json(json!({
             "new_version": sift_core::VERSION,
             "can_autoupdate": false,
+            "check_failed": true,
             "disabled": false,
         }));
     };
 
     // The interface reads `can_autoupdate` as "offer the button", so it is
     // only ever true for a release worth pressing it for.
-    let can = pending_update(Some(&info)).is_some()
-        && s.updater
-            .can_update(needs_privileged_ports(&s.config.read()));
-    info["can_autoupdate"] = json!(can);
+    let blocker = s
+        .updater
+        .update_blocker(needs_privileged_ports(&s.config.read()));
+    let pending = pending_update(Some(&info)).is_some();
+    info["can_autoupdate"] = json!(pending && blocker.is_none());
+    info["check_failed"] = json!(false);
+
+    // Ours, not upstream's: an update the operator can see but cannot install
+    // is the one case where the interface has to say why, or the missing
+    // button reads as a broken server.
+    if let Some(why) = blocker {
+        info["autoupdate_blocked_by"] = json!(why);
+    }
 
     *s.version_cache.write() = Some((jiff::Timestamp::now(), info.clone()));
 
@@ -602,13 +689,13 @@ pub async fn update(State(s): State<Shared>) -> ApiResult<Json<serde_json::Value
         ));
     };
 
-    if !s
+    if let Some(why) = s
         .updater
-        .can_update(needs_privileged_ports(&s.config.read()))
+        .update_blocker(needs_privileged_ports(&s.config.read()))
     {
-        return Err(ApiError::bad_request(
-            "this installation cannot replace its own binary;              update the image, or run the installer",
-        ));
+        return Err(ApiError::bad_request(format!(
+            "this installation cannot replace its own binary: {why}"
+        )));
     }
 
     s.updater
@@ -762,6 +849,57 @@ pub async fn test_upstream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_wildcard_listen_address_is_reported_as_the_real_ones() {
+        // The regression: `bind_hosts: [0.0.0.0]` is the default, and the
+        // setup guide showed "0.0.0.0:53" as the address to point a router at.
+        let got = expand_wildcards(&["0.0.0.0:53".to_string()]);
+
+        assert!(!got.is_empty(), "never empty, even with no interfaces");
+        for a in &got {
+            let sock: std::net::SocketAddr = a.parse().expect("a socket address");
+            assert_eq!(sock.port(), 53, "the port is kept");
+            assert!(sock.is_ipv4(), "0.0.0.0 expands to IPv4 only, got {a}");
+        }
+
+        // On a machine with an ordinary interface the wildcard is gone; on one
+        // with nothing but loopback it is kept rather than leaving the card
+        // empty, so only assert the pair.
+        assert!(
+            got.iter().all(|a| a != "0.0.0.0:53") || got == ["0.0.0.0:53"],
+            "either expanded or kept whole, got {got:?}"
+        );
+    }
+
+    #[test]
+    fn a_real_address_and_an_unparsable_one_are_left_alone() {
+        let got = expand_wildcards(&[
+            "192.168.1.5:53".to_string(),
+            "[2001:db8::1]:53".to_string(),
+            "not an address".to_string(),
+        ]);
+
+        assert_eq!(
+            got,
+            ["192.168.1.5:53", "[2001:db8::1]:53", "not an address"]
+        );
+    }
+
+    #[test]
+    fn neither_loopback_nor_link_local_is_offered_as_an_address_to_type() {
+        for a in expand_wildcards(&["0.0.0.0:53".to_string(), "[::]:53".to_string()]) {
+            let Ok(sock) = a.parse::<std::net::SocketAddr>() else {
+                continue;
+            };
+            if sock.ip().is_unspecified() {
+                continue;
+            }
+
+            assert!(!sock.ip().is_loopback(), "{a} is loopback");
+            assert!(!is_link_local(&sock.ip()), "{a} is link-local");
+        }
+    }
 
     #[test]
     fn blocking_modes_round_trip_through_their_api_names() {

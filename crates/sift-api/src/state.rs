@@ -69,13 +69,23 @@ pub type UpdateFuture =
 /// where it lives on disk, can download an archive, and can hand its process
 /// over to what it downloaded.
 pub trait SelfUpdater: Send + Sync + 'static {
-    /// Reports whether replacing the binary could work on this machine.
+    /// Says what stops this machine from replacing the binary, if anything.
+    ///
+    /// `None` means it could work.  Otherwise the string is shown to the
+    /// operator, because "the Install button is not there" and "this build
+    /// cannot check for updates at all" look identical from the interface, and
+    /// the difference is the whole of what the operator needs to do next.
     ///
     /// `needs_privileged_ports` says whether the running configuration binds
-    /// anything below 1024; the answer is no if a restart could not bind them
-    /// again, because an update that leaves the resolver unable to start is
+    /// anything below 1024; a restart that could not bind them again is a
+    /// blocker, because an update that leaves the resolver unable to start is
     /// worse than no update.
-    fn can_update(&self, needs_privileged_ports: bool) -> bool;
+    fn update_blocker(&self, needs_privileged_ports: bool) -> Option<String>;
+
+    /// Reports whether replacing the binary could work on this machine.
+    fn can_update(&self, needs_privileged_ports: bool) -> bool {
+        self.update_blocker(needs_privileged_ports).is_none()
+    }
 
     /// Downloads `version` and puts it in place of the running binary.
     ///
@@ -94,8 +104,8 @@ pub trait SelfUpdater: Send + Sync + 'static {
 pub struct NoSelfUpdate;
 
 impl SelfUpdater for NoSelfUpdate {
-    fn can_update(&self, _needs_privileged_ports: bool) -> bool {
-        false
+    fn update_blocker(&self, _needs_privileged_ports: bool) -> Option<String> {
+        Some("updating is not available in this build".to_string())
     }
 
     fn update(&self, _version: String) -> UpdateFuture {

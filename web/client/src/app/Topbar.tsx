@@ -64,10 +64,11 @@ const THEMES: { value: Theme; label: string }[] = [
 ];
 
 export default function Topbar({ onBurger }: { onBurger: () => void }) {
-    const { status, profile, version, setProtection, setTheme } = useServer();
+    const { status, profile, version, checkVersion, setProtection, setTheme } = useServer();
     const toast = useToast();
     const [left, setLeft] = useState(status.protection_disabled_duration);
     const [installing, setInstalling] = useState(false);
+    const [checking, setChecking] = useState(false);
 
     // The server reports how long protection stays off; the countdown here is
     // only the display of it, and is re-seeded every time the status reloads.
@@ -108,6 +109,49 @@ export default function Topbar({ onBurger }: { onBurger: () => void }) {
         version && !version.disabled && version.new_version && isNewer(version.new_version, status.version)
             ? version.new_version
             : undefined;
+
+    /**
+     * What the profile menu says about updates.
+     *
+     * Every branch says something. A server that is current, one whose check
+     * never reached GitHub, and one that found a release it cannot install
+     * all showed nothing at all before, which reads from the operator's seat
+     * as a build that cannot update itself.
+     */
+    const updateState = (): string => {
+        if (!version) {
+            return 'Checking for updates…';
+        }
+        if (version.disabled) {
+            return 'Update checks are off (--no-check-update)';
+        }
+        if (version.check_failed) {
+            return 'Could not reach the release server';
+        }
+        if (!newVersion) {
+            return 'Up to date';
+        }
+
+        return version.can_autoupdate
+            ? `${newVersion} is ready to install`
+            : `${newVersion} is available — ${version.autoupdate_blocked_by ?? 'install it yourself'}`;
+    };
+
+    const check = async () => {
+        setChecking(true);
+        try {
+            const info = await checkVersion(true);
+            if (info.check_failed) {
+                toast.fail('Could not reach the release server');
+            } else if (info.new_version && isNewer(info.new_version, status.version)) {
+                toast.ok(`${info.new_version} is available`);
+            } else {
+                toast.ok(`Up to date — ${status.version} is the newest release`);
+            }
+        } finally {
+            setChecking(false);
+        }
+    };
 
     const install = async () => {
         if (
@@ -242,6 +286,14 @@ export default function Topbar({ onBurger }: { onBurger: () => void }) {
                 <div className="menu-item" style={{ color: 'var(--text-faint)', fontSize: 12 }}>
                     Sift {status.version}
                 </div>
+                <div className="menu-item" style={{ color: 'var(--text-faint)', fontSize: 12 }}>
+                    {updateState()}
+                </div>
+                {!version?.disabled && (
+                    <button type="button" className="menu-item" disabled={checking} onClick={() => void check()}>
+                        {checking ? 'Checking…' : 'Check for updates'}
+                    </button>
+                )}
                 <div className="menu-sep" />
                 <button
                     type="button"

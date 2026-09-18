@@ -253,6 +253,20 @@ Verification claims below are reproducible with `scripts/verify.sh` and
       filter works across the whole log rather than the page in hand. Parsed
       leniently, so a value that is not a number is ignored rather than
       answered 400
+- [x] **A wildcard listen address is reported as the addresses it answers
+      on.** `bind_hosts: [0.0.0.0]` is the default, and `/control/status`
+      reported it verbatim, so the setup guide's "This server answers on" card
+      offered `0.0.0.0:53` — the one thing on that page nobody can type into a
+      router. Expanded per entry and to its own family, loopback and
+      link-local left out, and kept whole if the interfaces cannot be read so
+      the card is never empty. Upstream's `getDNSAddrs` does the same from
+      `aghnet.CollectAllIfacesAddrs`
+- [x] **The update state is always visible.** "Up to date", a check that never
+      reached GitHub, and a release found but not installable all rendered as
+      nothing at all, which from the operator's seat is a server that cannot
+      update itself. The profile menu now says which of the three it is and
+      offers **Check for updates**; `version.json` carries `check_failed` and
+      `autoupdate_blocked_by` to say so, both ours
 - [x] **The query log says which list matched, and filters by it.** The
       details modal names the list under each matched rule, and a second
       dropdown beside the verdict one narrows the log to a single list —

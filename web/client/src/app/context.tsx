@@ -18,6 +18,8 @@ interface Server {
     status: ServerStatus;
     profile: Profile;
     version: VersionInfo | undefined;
+    /** Asks the server about releases again, and reports what it said. */
+    checkVersion: (recheck?: boolean) => Promise<VersionInfo>;
     /** Re-reads the status, which is what a protection change moves. */
     refresh: () => Promise<void>;
     setProtection: (enabled: boolean, durationMs?: number) => Promise<void>;
@@ -48,11 +50,20 @@ export function ServerProvider({
 }) {
     const [version, setVersion] = useState<VersionInfo>();
 
-    useEffect(() => {
-        // Never blocks a page: an announcement the server could not fetch is
-        // simply not shown.
-        void api.getVersion().then(setVersion).catch(() => undefined);
+    // Never blocks a page. A request that fails outright is recorded as a
+    // failed check rather than left undefined, because the header has to be
+    // able to tell "up to date" from "nobody has answered" -- the two used to
+    // render the same way, which is to say not at all.
+    const checkVersion = useCallback(async (recheck = false) => {
+        const info = await api.getVersion(recheck).catch(() => ({ check_failed: true }) as VersionInfo);
+        setVersion(info);
+
+        return info;
     }, []);
+
+    useEffect(() => {
+        void checkVersion();
+    }, [checkVersion]);
 
     // Protection can lapse on its own -- it is often turned off for a set
     // time -- so the header asks again while the tab is in front.
@@ -76,8 +87,8 @@ export function ServerProvider({
     );
 
     const value = useMemo<Server>(
-        () => ({ status, profile, version, refresh: reload, setProtection, setTheme }),
-        [status, profile, version, reload, setProtection, setTheme],
+        () => ({ status, profile, version, refresh: reload, checkVersion, setProtection, setTheme }),
+        [status, profile, version, reload, checkVersion, setProtection, setTheme],
     );
 
     return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

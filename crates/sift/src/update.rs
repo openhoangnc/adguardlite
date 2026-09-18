@@ -84,28 +84,35 @@ pub struct Updater {
 }
 
 impl SelfUpdater for Updater {
-    fn can_update(&self, needs_privileged_ports: bool) -> bool {
+    fn update_blocker(&self, needs_privileged_ports: bool) -> Option<String> {
         if self.disabled {
-            return false;
+            return Some("this server was started with --no-check-update".into());
         }
 
         // In a container the image is the unit of update: a binary replaced
         // inside a running container is thrown away by the next `docker run`,
         // so offering the button there teaches the wrong habit.
         if Path::new("/.dockerenv").exists() {
-            return false;
+            return Some("this server runs in a container; pull a newer image instead".into());
         }
 
         // A restart that cannot bind port 53 again is worse than no update.
         if needs_privileged_ports && !can_bind_privileged() {
-            return false;
+            return Some(
+                "this server listens below port 1024 and does not run as root,                  so it could not bind those ports again after a restart"
+                    .into(),
+            );
         }
 
         // Replacing the binary means creating a file in its directory.
-        match exe_dir() {
-            Some(dir) => is_writable(&dir),
-            None => false,
+        let Some(dir) = exe_dir() else {
+            return Some("this executable has no path".into());
+        };
+        if !is_writable(&dir) {
+            return Some(format!("{} is not writable", dir.display()));
         }
+
+        None
     }
 
     fn update(&self, version: String) -> UpdateFuture {

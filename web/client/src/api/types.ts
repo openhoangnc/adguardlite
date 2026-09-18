@@ -38,6 +38,10 @@ export interface VersionInfo {
     announcement?: string;
     announcement_url?: string;
     can_autoupdate?: boolean;
+    /** Ours: the check ran and could not reach the release server. */
+    check_failed?: boolean;
+    /** Ours: why the Install button is not offered, when a release exists. */
+    autoupdate_blocked_by?: string;
 }
 
 /** `GET /control/dns_info`, and the body `POST /control/dns_config` takes. */

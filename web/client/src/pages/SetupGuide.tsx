@@ -441,6 +441,12 @@ export default function SetupGuide() {
     // them, rather than in among the addresses the steps say to type in.
     const plain = status.dns_addresses.filter((a) => !a.includes('://'));
 
+    // The server expands a wildcard listen address into the ones the machine
+    // actually answers on, so this is normally empty.  It is not empty when
+    // the interfaces could not be read, and then the caveat is the only thing
+    // that stops somebody typing 0.0.0.0 into a router.
+    const wildcard = plain.some((a) => a.startsWith('0.0.0.0:') || a.startsWith('[::]:'));
+
     return (
         <>
             <div className="page-head">
@@ -455,8 +461,10 @@ export default function SetupGuide() {
                     ))}
                 </ul>
                 <p className="hint" style={{ marginBottom: 0 }}>
-                    Use an address your devices can actually reach — 0.0.0.0 means "every interface", not an address to
-                    type in. The encrypted addresses are under Encrypted DNS, below.
+                    {wildcard
+                        ? 'Use an address your devices can actually reach — 0.0.0.0 and :: mean "every interface", not an address to type in. '
+                        : 'Pick whichever one your devices can reach. '}
+                    The encrypted addresses are under Encrypted DNS, below.
                 </p>
             </Card>
 

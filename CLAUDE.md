@@ -57,7 +57,7 @@ installation.
 ```bash
 cargo build --release            # fast to build and to run
 cargo build --profile dist       # fat LTO, panic=abort, stripped: ~10.7 MB
-cargo test --workspace           # 741 tests, no network or Go build needed
+cargo test --workspace           # 744 tests, no network or Go build needed
 cargo clippy --workspace --all-targets
 ```
 
@@ -297,6 +297,10 @@ client. Serving it keeps `web/client` free of AdGuard's material, which is what
 ever answers 404. Adding a path is safe for the drop-in contract because the
 two builds never serve the same interface.
 
+**Two response fields are ours too**: `/control/version.json` carries
+`check_failed` and `autoupdate_blocked_by`, so the interface can tell "up to
+date" from "nobody answered" from "found one, cannot install it".
+
 **One query parameter is ours too**: `/control/querylog` takes `filter_id`,
 which keeps only the entries a rule from that list matched, so the query log's
 list filter works across the whole log rather than the page in hand. It is
@@ -518,7 +522,11 @@ the running file.
 inside a container (the image is the unit of update there), false when the
 executable's directory is read-only, and false when a restart could not bind
 the ports the configuration uses — upstream asks the same question in
-`setAllowedToAutoUpdate`. `status::pending_update` is the guard on what gets
+`setAllowedToAutoUpdate`. `SelfUpdater::update_blocker` answers it as a
+*reason* rather than a bool, and `version.json` carries that reason as
+`autoupdate_blocked_by` alongside `check_failed`, both ours: a missing Install
+button and a check that never reached GitHub look identical otherwise, and the
+interface has to be able to say which it is. `status::pending_update` is the guard on what gets
 installed: the version the announcement named, and only when it is **strictly
 newer**, because every build from `main` is ahead of the newest release and
 inequality alone would offer a downgrade and take it.
