@@ -225,8 +225,8 @@ toggles, its own blocked services and its own safe search.
   does both. `reproduces_the_reference_config_byte_for_byte` guards it.
 - **`NetworkRule` is 56 bytes and that is load-bearing.** A real list holds
   ~180,000 of them. When the modifiers were stored inline the struct was 296
-  bytes and the engine used *more* memory than Go. `crates/sift-filter/tests/
-  sizes.rs` fails if the layout regresses.
+  bytes and the engine used *more* memory than Go.
+  `crates/sift-filter/tests/sizes.rs` fails if the layout regresses.
 - **Reserved filter list IDs** match upstream's `rulelist.APIID`: `0` custom
   rules, `-1` the system hosts file, `-2` blocked services. The resolver maps
   these to the reason the web UI expects.

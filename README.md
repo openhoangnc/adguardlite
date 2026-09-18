@@ -260,8 +260,7 @@ rather than reading:
   boxed key strings costing 148 MB for 1.1M domains, and rule text copied into
   the engine when the list manager already held every byte of it.
 
-The shortcut index is the piece worth reading: `crates/sift-filter/src/
-shortcut.rs` replaced an Aho-Corasick automaton, which is the textbook answer
+The shortcut index is the piece worth reading: `crates/sift-filter/src/shortcut.rs` replaced an Aho-Corasick automaton, which is the textbook answer
 and was the wrong one here. Its 37.6 MB is walked one state-transition per
 byte, each dependent on the last, so a hostname's length buys a chain of cache
 misses. The haystack is tiny and the patterns are long, so each pattern is
@@ -271,8 +270,7 @@ the probes overlap in the memory system instead of chaining.
 
 Guards: `rules_needing_an_expression_load_as_cheaply_as_plain_ones` in
 `crates/sift-filter/tests/differential.rs` fails if expressions go back to
-being built at load. `cargo run --release -p sift-filter --example loadprofile
-<dir of lists>` prints the phase timings, a footprint breakdown and per-query
+being built at load. `cargo run --release -p sift-filter --example loadprofile <dir of lists>` prints the phase timings, a footprint breakdown and per-query
 costs, which is how all of the above was measured.
 
 ## Compatibility, and how it was checked
