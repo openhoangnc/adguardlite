@@ -150,7 +150,7 @@ run the installer line again.
 
 - **Filtering.** Blocklists and allowlists in AdGuard's and uBlock's syntax,
   your own rules, and the system hosts file. The **Filters** page offers a
-  catalogue of 65 vetted lists, each with a written note, a measured rule count
+  catalogue of 66 vetted lists, each with a written note, a measured rule count
   and tags — including a flag for the country a regional list serves — so the
   picker answers "which one do I want?" rather than listing names.
 - **Blocked services.** A catalogue of 139 services, blockable globally or per

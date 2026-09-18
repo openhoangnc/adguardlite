@@ -110,9 +110,11 @@ never was. `scripts/blocklist-notes.json` holds, for this project:
 - the ISO 3166-1 country each regional list serves, which the interface draws
   as a flag;
 - `_add`, lists this project carries that upstream's registry does not.
-  Currently one: [hostsVN](https://github.com/bigdargon/hostsVN), MIT, ©
-  BigDargon — linked and fetched at runtime like every other list, not
-  redistributed here.
+  Currently two: [hostsVN](https://github.com/bigdargon/hostsVN), MIT, ©
+  BigDargon, and
+  [kboghdady's YouTube Ads Blocklist](https://github.com/kboghdady/youTube_ads_4_pi-hole),
+  no licence declared, © Kirolos Boghdady — both linked and fetched at
+  runtime like every other list, not redistributed here.
 
 The rule count beside each list is measured by downloading it, not copied from
 anywhere. `scripts/import-blocklists.py` merges all of it into the generated

@@ -244,10 +244,10 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 
 ### HTTP API and interface
 - [x] All 81 upstream paths routed
-- [x] **One path added**: `GET /control/filtering/catalogue`, the 64 vetted
-      blocklists AdGuard bundles in its client. Serving it rather than
-      bundling it keeps `web/client` free of AdGuard's material — see
-      *Deliberate deviations*
+- [x] **One path added**: `GET /control/filtering/catalogue`, the 66 vetted
+      blocklists the picker offers — the 64 AdGuard bundles in its client,
+      and two of ours. Serving it rather than bundling it keeps
+      `web/client` free of AdGuard's material — see *Deliberate deviations*
 - [x] **One parameter added**: `filter_id` on `GET /control/querylog`, keeping
       only the entries a rule from that list matched, so the query log's list
       filter works across the whole log rather than the page in hand. Parsed
@@ -279,14 +279,14 @@ Verification claims below are reproducible with `scripts/verify.sh` and
       Stored as a deadline in `filtering.protection_disabled_until`, so it
       survives a restart; a one-second task turns protection back on when it
       passes
-- [x] **Every catalogue list validated**: all 64 downloaded and counted, all
+- [x] **Every catalogue list validated**: all 66 downloaded and counted, all
       answered 200 with rules in them, from 15 rules (Dandelion Sprout's Game
-      Console list) to 2,530,911 (HaGeZi's Threat Intelligence Feeds, 49 MB).
+      Console list) to 2,567,728 (HaGeZi's Threat Intelligence Feeds, 50 MB).
       `scripts/import-blocklists.py --measure` is the check, and it refuses to
       write the catalogue when one fails
 - [x] **Tagged and annotated**: a tag set and a written note per list, both
       this project's, so the picker answers "which one do I want?" rather than
-      listing 65 names. The size tag is derived from the measured count, so it
+      listing 66 names. The size tag is derived from the measured count, so it
       cannot drift; the interface filters by tag
 - [x] **The nine tags that carry a decision are coloured** — `starter` green,
       `malware`/`phishing`/`scam`/`crypto-mining` red, `strict`/`huge` amber,
@@ -300,6 +300,10 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 - [x] **hostsVN added**, the Vietnamese list upstream's registry does not
       carry. `_add` in the notes file is the mechanism, and such a list is
       validated and measured on the same terms as an imported one
+- [x] **kboghdady's YouTube Ads Blocklist added**, through the same `_add`.
+      15,869 ad-serving hostnames, tagged `strict`: ads and videos come from
+      the same `googlevideo.com` names, so the list is the trade a TV owner
+      makes rather than a safe default
 - [x] Sessions: `agh_session` cookie, HTTP Basic
 - [x] Login rate limiting, on the form *and* on the Basic credentials
       every endpoint accepts: `auth_attempts` failures from an address
@@ -1716,11 +1720,12 @@ report `v0.107.79`.
   five lists, which is the question most people arrive with.
 - **One API path is added, none changed.** `GET /control/filtering/catalogue`
   serves the vetted-blocklist catalogue that AdGuard Home bundles in its own
-  client, so the "Choose blocklists" picker can offer 64 known lists without
-  `web/client` carrying anything of AdGuard's. Nothing upstream answers is
-  altered, and the picker degrades to the custom-address form if the path is
-  ever missing. `scripts/import-blocklists.py` regenerates the bundled blob
-  from upstream's generated `filters.ts`, byte for byte.
+  client, so the "Choose blocklists" picker can offer 66 known lists — their
+  64 and two added here — without `web/client` carrying anything of theirs.
+  Nothing upstream answers is altered, and the picker degrades to the
+  custom-address form if the path is ever missing.
+  `scripts/import-blocklists.py` regenerates the bundled blob from
+  upstream's generated `filters.ts`, byte for byte.
 - **The interface is English only.** Upstream ships 36 translations and the
   first version of this rewrite kept their catalogues. They are gone, with
   them: a translation is someone else's writing, and this interface's wording

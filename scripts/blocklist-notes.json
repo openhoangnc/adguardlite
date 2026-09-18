@@ -47,6 +47,12 @@
       "category_id": "regional",
       "homepage": "https://bigdargon.github.io/hostsVN/",
       "url": "https://raw.githubusercontent.com/bigdargon/hostsVN/master/hosts"
+    },
+    "kboghdadys_youtube_ads_blocklist": {
+      "name": "kboghdady's YouTube Ads Blocklist",
+      "category_id": "other",
+      "homepage": "https://github.com/kboghdady/youTube_ads_4_pi-hole",
+      "url": "https://raw.githubusercontent.com/kboghdady/youTube_ads_4_pi-hole/master/youtubelist.txt"
     }
   },
   "1hosts_lite": {
@@ -544,5 +550,12 @@
       "vn"
     ],
     "note": "The most widely used Vietnamese blocklist, covering ads and tracking on Vietnamese sites and apps. Larger and more actively maintained than ABPVN; either works, both together is redundant."
+  },
+  "kboghdadys_youtube_ads_blocklist": {
+    "tags": [
+      "ads",
+      "strict"
+    ],
+    "note": "YouTube's ad-serving hostnames, for the TVs and consoles a browser extension cannot reach. Ads share googlevideo.com with the videos, so some get through and a clip occasionally will not play."
   }
 }
