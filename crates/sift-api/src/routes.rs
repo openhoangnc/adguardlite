@@ -2,16 +2,17 @@
 
 use std::time::Duration;
 
-use axum::extract::{Request, State};
+use axum::extract::{Query, Request, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::doh;
-use crate::error::ApiResult;
+use crate::error::{ApiError, ApiResult};
 use crate::handlers::{filtering, logs, misc, status};
 use crate::state::Shared;
 
@@ -470,27 +471,94 @@ async fn dhcp_unsupported() -> Response {
         .into_response()
 }
 
+/// The one parameter both profile endpoints take.
+#[derive(Deserialize, Default)]
+struct MobileConfigQuery {
+    /// The name to write into the profile, in place of `tls.server_name`.
+    ///
+    /// It matters when no server name is configured: the listeners run anyway,
+    /// serving whatever the certificate covers, so the setup guide has a name
+    /// to offer even when the settings name none.
+    #[serde(default)]
+    host: Option<String>,
+}
+
 /// `GET /control/apple/doh.mobileconfig`
-async fn mobileconfig_doh(State(s): State<Shared>) -> ApiResult<Response> {
-    mobileconfig(&s, "HTTPS")
+async fn mobileconfig_doh(
+    State(s): State<Shared>,
+    Query(q): Query<MobileConfigQuery>,
+) -> ApiResult<Response> {
+    mobileconfig(&s, "HTTPS", q.host.as_deref())
 }
 
 /// `GET /control/apple/dot.mobileconfig`
-async fn mobileconfig_dot(State(s): State<Shared>) -> ApiResult<Response> {
-    mobileconfig(&s, "TLS")
+async fn mobileconfig_dot(
+    State(s): State<Shared>,
+    Query(q): Query<MobileConfigQuery>,
+) -> ApiResult<Response> {
+    mobileconfig(&s, "TLS", q.host.as_deref())
+}
+
+/// Whether `host` is a plausible DNS name.
+///
+/// This is what keeps the name out of trouble once it reaches the plist: the
+/// accepted characters cannot close a tag, so nothing below needs escaping.
+/// Both of its sources -- a query parameter and a hand-edited config file --
+/// are worth checking for that alone.
+fn is_dns_name(host: &str) -> bool {
+    if host.is_empty() || host.len() > 253 {
+        return false;
+    }
+
+    host.split('.').all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+    })
 }
 
 /// Builds an Apple DNS settings profile.
-fn mobileconfig(s: &Shared, proto: &str) -> ApiResult<Response> {
+///
+/// A profile names one host, so it is only meaningful once there is a name to
+/// put in it.  Where upstream falls back to the literal `adguardhome`, this
+/// refuses: a downloaded profile that quietly points a phone at a host that
+/// does not resolve is worse than a button that says why it cannot.
+fn mobileconfig(s: &Shared, proto: &str, requested: Option<&str>) -> ApiResult<Response> {
     let cfg = s.config.read();
-    let host = if cfg.tls.server_name.is_empty() {
-        "adguardhome".to_string()
-    } else {
-        cfg.tls.server_name.clone()
-    };
+    let host = requested
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+        .unwrap_or(&cfg.tls.server_name);
+
+    if host.is_empty() {
+        return Err(ApiError::bad_request(
+            "no server name: set one under encryption, or name one with ?host=",
+        ));
+    }
+
+    if !is_dns_name(host) {
+        return Err(ApiError::bad_request(format!(
+            "{host:?} is not a host name"
+        )));
+    }
 
     let server_entry = if proto == "HTTPS" {
-        format!("<key>ServerURL</key><string>https://{host}/dns-query</string>")
+        // Apple's ServerURL carries a port, so a DNS-over-HTTPS listener moved
+        // off 443 is still describable.  ServerName, which the TLS profile
+        // uses, has no port at all -- a DNS-over-TLS listener elsewhere than
+        // 853 cannot be written as a profile, which is Apple's limit rather
+        // than one of ours, and the setup guide offers the button only when
+        // the port is the standard one.
+        let authority = if cfg.tls.port_https == 443 || cfg.tls.port_https == 0 {
+            host.to_string()
+        } else {
+            format!("{host}:{}", cfg.tls.port_https)
+        };
+        format!("<key>ServerURL</key><string>https://{authority}/dns-query</string>")
     } else {
         format!("<key>ServerName</key><string>{host}</string>")
     };
@@ -551,6 +619,36 @@ mod tests {
 
         h.insert(header::HOST, "".parse().unwrap());
         assert_eq!(host_without_port(&h), None);
+    }
+
+    #[test]
+    fn a_profile_host_has_to_be_a_host_name() {
+        for ok in [
+            "dns.example.org",
+            "pi-hole",
+            "a.b.c.d.example",
+            "xn--80ak6aa92e.com",
+        ] {
+            assert!(is_dns_name(ok), "{ok:?} is a host name");
+        }
+
+        // The plist writes the name into an element without escaping it, so
+        // anything that could close one has to be refused here.
+        for bad in [
+            "",
+            "dns.example.org/../x",
+            "</string><key>PayloadType</key><string>evil",
+            "dns example org",
+            "-leading.example",
+            "trailing-.example",
+            "double..dot",
+            "2001:db8::1",
+        ] {
+            assert!(!is_dns_name(bad), "{bad:?} is not a host name");
+        }
+
+        assert!(!is_dns_name(&"a".repeat(64)), "a label caps at 63 bytes");
+        assert!(is_dns_name(&"a".repeat(63)));
     }
 
     #[tokio::test]

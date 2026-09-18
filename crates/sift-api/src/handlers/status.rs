@@ -17,6 +17,9 @@ pub struct StatusResp {
     /// The configured UI language.
     pub language: String,
     /// The addresses the DNS server listens on.
+    ///
+    /// Plain DNS first, as the listeners bound it, then the encrypted
+    /// addresses [`encrypted_addresses`] derives from the TLS settings.
     pub dns_addresses: Vec<String>,
     /// The DNS port.
     pub dns_port: u16,
@@ -40,14 +43,78 @@ pub struct StatusResp {
     pub running: bool,
 }
 
+/// Upstream's default HTTPS port, the one it leaves out of the DNS-over-HTTPS
+/// address it reports.
+const DEFAULT_PORT_HTTPS: u16 = 443;
+
+/// The encrypted addresses `/control/status` reports alongside the plain ones.
+///
+/// Upstream's `getDNSAddresses` appends these to `dns_addresses`, and its web
+/// interface builds the whole DNS privacy section by filtering that list by
+/// scheme.  Reporting only the plain addresses -- which this build did -- tells
+/// every such client that encryption is unconfigured on a server that is
+/// serving DNS-over-TLS perfectly well.
+///
+/// Three details are Go's and are copied rather than tidied: nothing is
+/// reported without a `server_name`, since there is no name to hand a client
+/// that has to validate the certificate; the port is spelled out for
+/// DNS-over-TLS and DNS-over-QUIC even when it is the default 853, but left off
+/// HTTPS when it is 443; and this is derived from the settings rather than from
+/// the running listeners, so a port changed through `/control/tls/configure`
+/// is reported before the restart that moves the listener.
+fn encrypted_addresses(cfg: &sift_config::model::Config) -> Vec<String> {
+    let t = &cfg.tls;
+    if !t.enabled || t.server_name.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+
+    if t.port_https != 0 {
+        let host = if t.port_https == DEFAULT_PORT_HTTPS {
+            t.server_name.clone()
+        } else {
+            join_host_port(&t.server_name, t.port_https)
+        };
+        out.push(format!("https://{host}/dns-query"));
+    }
+
+    for (scheme, port) in [("tls", t.port_dns_over_tls), ("quic", t.port_dns_over_quic)] {
+        if port != 0 {
+            out.push(format!(
+                "{scheme}://{}",
+                join_host_port(&t.server_name, port)
+            ));
+        }
+    }
+
+    out
+}
+
+/// `host:port`, bracketing the host when it is an IPv6 literal.
+///
+/// Go reaches these addresses through `netutil.JoinHostPort`, which brackets;
+/// a `server_name` is normally a hostname, but nothing stops it being an
+/// address, and `::1:853` would parse as neither.
+fn join_host_port(host: &str, port: u16) -> String {
+    if host.contains(':') {
+        format!("[{host}]:{port}")
+    } else {
+        format!("{host}:{port}")
+    }
+}
+
 /// `GET /control/status`
 pub async fn status(State(s): State<Shared>) -> Json<StatusResp> {
     let cfg = s.config.read();
 
+    let mut dns_addresses = s.dns_addresses.read().clone();
+    dns_addresses.extend(encrypted_addresses(&cfg));
+
     Json(StatusResp {
         version: sift_core::VERSION.to_string(),
         language: cfg.language.clone(),
-        dns_addresses: s.dns_addresses.read().clone(),
+        dns_addresses,
         dns_port: cfg.dns.port,
         http_port: cfg.http.address.0.port(),
         protection_disabled_duration: s.protection_pause_left(),
@@ -643,5 +710,70 @@ mod tests {
         // GitHub answers this when a repository has published no release yet.
         assert!(parse_version(r#"{"message":"Not Found"}"#.to_string()).is_none());
         assert!(parse_version("not json".to_string()).is_none());
+    }
+
+    /// A config with encryption on, a name, and the default ports.
+    fn encrypted_config() -> sift_config::model::Config {
+        let mut cfg = sift_config::model::Config::default();
+        cfg.tls.enabled = true;
+        cfg.tls.server_name = "dns.example.org".to_string();
+        cfg
+    }
+
+    #[test]
+    fn status_reports_the_encrypted_addresses_go_reports() {
+        // What `getDNSAddresses` builds from the same settings: HTTPS without
+        // its default port, DoT and DoQ with theirs.
+        assert_eq!(
+            encrypted_addresses(&encrypted_config()),
+            [
+                "https://dns.example.org/dns-query",
+                "tls://dns.example.org:853",
+                "quic://dns.example.org:853",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_moved_https_port_is_named_in_the_address() {
+        let mut cfg = encrypted_config();
+        cfg.tls.port_https = 8443;
+
+        assert_eq!(
+            encrypted_addresses(&cfg)[0],
+            "https://dns.example.org:8443/dns-query"
+        );
+    }
+
+    #[test]
+    fn a_port_left_at_zero_is_not_listened_on_and_not_reported() {
+        let mut cfg = encrypted_config();
+        cfg.tls.port_https = 0;
+        cfg.tls.port_dns_over_quic = 0;
+
+        assert_eq!(encrypted_addresses(&cfg), ["tls://dns.example.org:853"]);
+    }
+
+    #[test]
+    fn nothing_is_reported_without_encryption_or_a_server_name() {
+        let mut off = encrypted_config();
+        off.tls.enabled = false;
+        assert!(encrypted_addresses(&off).is_empty());
+
+        // The listeners still run without a name -- they serve whatever the
+        // certificate covers -- but there is no name to report them under.
+        let mut nameless = encrypted_config();
+        nameless.tls.server_name = String::new();
+        assert!(encrypted_addresses(&nameless).is_empty());
+
+        assert!(encrypted_addresses(&sift_config::model::Config::default()).is_empty());
+    }
+
+    #[test]
+    fn an_ipv6_server_name_is_bracketed_in_its_address() {
+        let mut cfg = encrypted_config();
+        cfg.tls.server_name = "2001:db8::1".to_string();
+
+        assert_eq!(encrypted_addresses(&cfg)[1], "tls://[2001:db8::1]:853");
     }
 }

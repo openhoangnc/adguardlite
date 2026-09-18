@@ -175,6 +175,22 @@ Verification claims below are reproducible with `scripts/verify.sh` and
       which was refused as a mismatched pair while the old one kept being
       served, then the key, after which both listeners handed out the new
       certificate on the next handshake without a restart
+- [x] **The encrypted addresses reach `/control/status`**: upstream's
+      `getDNSAddresses` appends `https://…/dns-query`, `tls://…` and `quic://…`
+      to `dns_addresses` once encryption is on and `tls.server_name` is set,
+      and its web interface builds the whole DNS privacy section by filtering
+      that field by scheme. This build reported only the plain addresses, so
+      every such client was told encryption was unconfigured on a server
+      happily serving DoT. The list is derived per request from the settings,
+      so a port changed through `/control/tls/configure` is reported before
+      the restart that moves the listener
+- [x] **The setup guide answers without a server name too**: the listeners run
+      whether or not `tls.server_name` is set — they serve whatever the
+      certificate covers — so the guide falls back to the certificate's first
+      DNS name and says where the name came from, rather than claiming
+      encryption is unconfigured. It spells out any port that is not the
+      scheme's own, and offers Apple's DNS-over-TLS profile only for a
+      listener left on 853, which is the only one that profile can describe
 
 ### Clients
 - [x] Persistent clients matched by address, subnet, MAC or ClientID, most
