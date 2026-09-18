@@ -1,10 +1,11 @@
 import { useState } from 'react';
+import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 
 import * as api from '../api';
 import type { TlsStatus } from '../api';
 import { useServer } from '../app/context';
-import { Card, Loading, Notice } from '../components/ui';
+import { Card, Field, Loading, Notice } from '../components/ui';
 import { IconDownload } from '../components/icons';
 import { useAsync } from '../lib/hooks';
 import type { Async } from '../lib/hooks';
@@ -80,10 +81,62 @@ const DEFAULT_PORT = { tls: 853, https: 443, quic: 853 };
  * Where the server builds an Apple configuration profile for `host`.
  *
  * Under `/control`, which is where this build serves them; the profile names
- * whichever host it is given, since the settings may name none.
+ * whichever host it is given, since the settings may name none.  A ClientID is
+ * passed through under upstream's own parameter name, and the server writes it
+ * into the profile the way that protocol's listener reads it back.
  */
-function profile(kind: 'doh' | 'dot', host: string) {
-    return `/control/apple/${kind}.mobileconfig?host=${encodeURIComponent(host)}`;
+function profile(kind: 'doh' | 'dot', host: string, clientId: string, port: number) {
+    const q = new URLSearchParams({ host });
+    if (clientId) {
+        q.set('client_id', clientId);
+    }
+    // Apple's DNS-over-TLS profile carries no port, so sending one would say
+    // this field changes something it cannot.
+    if (kind === 'doh') {
+        q.set('port', String(port));
+    }
+
+    return `/control/apple/${kind}.mobileconfig?${q}`;
+}
+
+/**
+ * Why `id` is not a ClientID, or null when it is one.
+ *
+ * The same rule the listeners apply -- `is_valid_client_id` in
+ * `sift-dns/src/server.rs` -- so the field refuses what the server would, here
+ * rather than after a download.
+ */
+function clientIdError(id: string): string | null {
+    if (!id) {
+        return null;
+    }
+    if (id.length > 63) {
+        return 'A ClientID is at most 63 characters.';
+    }
+    if (!/^[A-Za-z0-9-]+$/.test(id)) {
+        return 'Letters, digits and hyphens only — no dots, spaces or underscores.';
+    }
+    if (id.startsWith('-') || id.endsWith('-')) {
+        return 'A ClientID cannot start or end with a hyphen.';
+    }
+
+    return null;
+}
+
+/**
+ * Why `port` is not a port, or null when it is one.
+ *
+ * Zero is what the settings use for "not listening", which is not something a
+ * device can be sent to, so it is refused here as the endpoint refuses it.
+ */
+function portError(port: string): string | null {
+    if (!/^\d+$/.test(port.trim())) {
+        return 'A port is a number.';
+    }
+
+    const n = Number(port);
+
+    return n >= 1 && n <= 65535 ? null : 'A port is between 1 and 65535.';
 }
 
 /** `host`, with the port spelled out when it is not the scheme's own. */
@@ -95,24 +148,63 @@ function authority(host: string, port: number, scheme: keyof typeof DEFAULT_PORT
  * The addresses for whichever encrypted listeners are running.
  *
  * A port left at zero is not listened on, so it is not offered.
+ *
+ * A ClientID reaches each one the way that listener reads it back: a path
+ * segment under DNS-over-HTTPS, and a label below the server name — the name
+ * the handshake asks for — under DNS-over-TLS and DNS-over-QUIC.
  */
-function addresses(tls: TlsStatus, host: string) {
+function addresses(tls: TlsStatus, host: string, clientId: string, httpsPort: number) {
     const out: { label: string; address: string }[] = [];
+    const sni = clientId ? `${clientId}.${host}` : host;
+    const path = clientId ? `/dns-query/${clientId}` : '/dns-query';
 
     if (tls.port_dns_over_tls > 0) {
-        out.push({ label: 'DNS-over-TLS', address: `tls://${authority(host, tls.port_dns_over_tls, 'tls')}` });
+        out.push({ label: 'DNS-over-TLS', address: `tls://${authority(sni, tls.port_dns_over_tls, 'tls')}` });
     }
     if (tls.port_https > 0) {
         out.push({
             label: 'DNS-over-HTTPS',
-            address: `https://${authority(host, tls.port_https, 'https')}/dns-query`,
+            address: `https://${authority(host, httpsPort, 'https')}${path}`,
         });
     }
     if (tls.port_dns_over_quic > 0) {
-        out.push({ label: 'DNS-over-QUIC', address: `quic://${authority(host, tls.port_dns_over_quic, 'quic')}` });
+        out.push({ label: 'DNS-over-QUIC', address: `quic://${authority(sni, tls.port_dns_over_quic, 'quic')}` });
     }
 
     return out;
+}
+
+/**
+ * One profile download, or the same button refusing to offer one.
+ *
+ * Without an `href` the link is neither clickable nor focusable, which is what
+ * a disabled control has to be: an `<a>` cannot be `:disabled`, and dimming it
+ * alone leaves a download that comes back as a 400 saved to disk.
+ */
+function ProfileButton({
+    kind,
+    host,
+    clientId,
+    port,
+    blocked,
+    children,
+}: {
+    kind: 'doh' | 'dot';
+    host: string;
+    clientId: string;
+    port: number;
+    blocked: boolean;
+    children: ReactNode;
+}) {
+    return (
+        <a
+            className="btn"
+            href={blocked ? undefined : profile(kind, host, clientId, port)}
+            aria-disabled={blocked || undefined}
+            download>
+            <IconDownload size={15} /> {children}
+        </a>
+    );
 }
 
 /**
@@ -126,6 +218,12 @@ function addresses(tls: TlsStatus, host: string) {
  * something still to be set up.
  */
 function EncryptedDns({ tls }: { tls: Async<TlsStatus> }) {
+    // Null until the field is touched, so the name the settings give can keep
+    // arriving after this renders and still fill the box.
+    const [typed, setTyped] = useState<string | null>(null);
+    const [typedPort, setTypedPort] = useState<string | null>(null);
+    const [clientId, setClientId] = useState('');
+
     if (tls.error) {
         return <Notice kind="error">{tls.error}</Notice>;
     }
@@ -146,9 +244,13 @@ function EncryptedDns({ tls }: { tls: Async<TlsStatus> }) {
     }
 
     const named = s.server_name?.trim() ?? '';
-    const host = named || s.dns_names?.[0] || '';
+    const configured = named || s.dns_names?.[0] || '';
+    // What the box shows, and what the addresses use: an empty box means the
+    // name the settings give, which is what its placeholder says.
+    const box = typed ?? configured;
+    const host = box.trim() || configured;
 
-    if (!host) {
+    if (!configured) {
         return (
             <Notice kind="warn">
                 Encryption is on, but nothing says which name clients should ask for: the server name is blank and the
@@ -157,8 +259,24 @@ function EncryptedDns({ tls }: { tls: Async<TlsStatus> }) {
         );
     }
 
-    const running = addresses(s, host);
+    // The same shape as the host: the box starts on the listener's own port,
+    // and a bad one falls back to it rather than writing nonsense into the
+    // addresses below.
+    const portBox = typedPort ?? String(s.port_https);
+    const portProblem = portError(portBox);
+    const httpsPort = portProblem ? s.port_https : Number(portBox);
+
+    const idError = clientIdError(clientId);
+    const id = idError ? '' : clientId;
+    // The server refuses these, so a button does not offer a download that
+    // would come back as a 400 the browser saves to disk.  The port reaches
+    // only the HTTPS profile, so only that one waits for it.
+    const running = addresses(s, host, id, httpsPort);
     const standardDot = s.port_dns_over_tls === DEFAULT_PORT.tls;
+    // The label only registers when it sits below the name the listeners were
+    // started with, which is `tls.server_name` and nothing else: they compare
+    // the handshake's name against that one to find it.
+    const sniCarriesId = Boolean(named) && host === named;
 
     if (!running.length) {
         return (
@@ -171,6 +289,57 @@ function EncryptedDns({ tls }: { tls: Async<TlsStatus> }) {
 
     return (
         <>
+            <div className="grid grid-3">
+                <Field
+                    label="Hostname"
+                    hint="The name clients ask for. It has to resolve to this server and be one the certificate covers.">
+                    <input
+                        value={box}
+                        placeholder={configured}
+                        onChange={(e) => setTyped(e.target.value)}
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        spellCheck={false}
+                    />
+                </Field>
+
+                <Field
+                    label="HTTPS port"
+                    error={portProblem}
+                    hint={
+                        <>
+                            The port devices dial for DNS-over-HTTPS. Change it if something in front of this server
+                            answers on another one.
+                        </>
+                    }>
+                    <input
+                        value={portBox}
+                        inputMode="numeric"
+                        onChange={(e) => setTypedPort(e.target.value)}
+                    />
+                </Field>
+
+                <Field
+                    label="ClientID (optional)"
+                    error={idError}
+                    hint={
+                        <>
+                            Names this one device. Give the same ClientID to a client under{' '}
+                            <Link to="/clients">Clients</Link> and it gets that client’s settings, wherever it connects
+                            from.
+                        </>
+                    }>
+                    <input
+                        value={clientId}
+                        placeholder="kids-tablet"
+                        onChange={(e) => setClientId(e.target.value)}
+                        autoCapitalize="off"
+                        autoCorrect="off"
+                        spellCheck={false}
+                    />
+                </Field>
+            </div>
+
             <ul style={{ paddingLeft: 18 }}>
                 {running.map((r) => (
                     <li key={r.label}>
@@ -182,8 +351,35 @@ function EncryptedDns({ tls }: { tls: Async<TlsStatus> }) {
             {!named && (
                 <Notice kind="warn">
                     The server name under Encryption is blank, so these use{' '}
-                    <code className="mono">{host}</code>, the first name on the certificate. Fill the field in to pick a
-                    different one, and to let clients find this server by itself.
+                    <code className="mono">{configured}</code>, the first name on the certificate. Fill the field in to
+                    pick a different one, and to let clients find this server by itself.
+                </Notice>
+            )}
+
+            {/* A ClientID travels differently on each transport, and only the
+                HTTPS one costs nothing: the others spend a certificate name. */}
+            {id && !sniCarriesId && (
+                <Notice kind="warn">
+                    Only the DNS-over-HTTPS address carries this ClientID. The others put it in the name the client asks
+                    for, and the server reads it back only below the server name set under{' '}
+                    <Link to="/encryption">Encryption</Link>
+                    {named ? (
+                        <>
+                            , which is <code className="mono">{named}</code>
+                        </>
+                    ) : (
+                        ', which is blank'
+                    )}
+                    .
+                </Notice>
+            )}
+
+            {id && sniCarriesId && (s.port_dns_over_tls > 0 || s.port_dns_over_quic > 0) && (
+                <Notice kind="info">
+                    The DNS-over-TLS and DNS-over-QUIC addresses only work if the certificate covers{' '}
+                    <code className="mono">{`${id}.${host}`}</code> — in practice a wildcard for{' '}
+                    <code className="mono">{`*.${host}`}</code>. DNS-over-HTTPS carries the ClientID in the path and
+                    needs nothing extra.
                 </Notice>
             )}
 
@@ -191,7 +387,8 @@ function EncryptedDns({ tls }: { tls: Async<TlsStatus> }) {
                 itself, so it can reach a standard listener and no other. */}
             {standardDot && (
                 <p className="hint">
-                    Android’s Private DNS field takes the host name on its own: <code className="mono">{host}</code>.
+                    Android’s Private DNS field takes the host name on its own:{' '}
+                    <code className="mono">{id && sniCarriesId ? `${id}.${host}` : host}</code>.
                 </p>
             )}
 
@@ -200,20 +397,30 @@ function EncryptedDns({ tls }: { tls: Async<TlsStatus> }) {
                     <h3 style={{ marginTop: 16 }}>Apple devices</h3>
                     <p className="muted">
                         Install one of these profiles and the device uses encrypted DNS everywhere, on Wi-Fi and on
-                        mobile data alike.
+                        mobile data alike — with the ClientID above, if you set one.
                     </p>
                     <div className="btn-row" style={{ marginTop: 8 }}>
                         {s.port_https > 0 && (
-                            <a className="btn" href={profile('doh', host)} download>
-                                <IconDownload size={15} /> DNS-over-HTTPS profile
-                            </a>
+                            <ProfileButton
+                                kind="doh"
+                                host={host}
+                                clientId={id}
+                                port={httpsPort}
+                                blocked={Boolean(idError || portProblem)}>
+                                DNS-over-HTTPS profile
+                            </ProfileButton>
                         )}
                         {/* Apple’s TLS profile names a host and no port, so it
                             can only describe a listener left on 853. */}
                         {standardDot && (
-                            <a className="btn" href={profile('dot', host)} download>
-                                <IconDownload size={15} /> DNS-over-TLS profile
-                            </a>
+                            <ProfileButton
+                                kind="dot"
+                                host={host}
+                                clientId={id}
+                                port={httpsPort}
+                                blocked={Boolean(idError)}>
+                                DNS-over-TLS profile
+                            </ProfileButton>
                         )}
                     </div>
                 </>
@@ -249,7 +456,7 @@ export default function SetupGuide() {
                 </ul>
                 <p className="hint" style={{ marginBottom: 0 }}>
                     Use an address your devices can actually reach — 0.0.0.0 means "every interface", not an address to
-                    type in.
+                    type in. The encrypted addresses are under Encrypted DNS, below.
                 </p>
             </Card>
 

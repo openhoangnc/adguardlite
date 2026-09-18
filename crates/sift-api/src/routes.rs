@@ -453,7 +453,7 @@ async fn dhcp_unsupported() -> Response {
         .into_response()
 }
 
-/// The one parameter both profile endpoints take.
+/// The parameters both profile endpoints take.
 #[derive(Deserialize, Default)]
 struct MobileConfigQuery {
     /// The name to write into the profile, in place of `tls.server_name`.
@@ -463,6 +463,28 @@ struct MobileConfigQuery {
     /// to offer even when the settings name none.
     #[serde(default)]
     host: Option<String>,
+
+    /// The ClientID the device should identify itself as, if any.
+    ///
+    /// `client_id`, which is what upstream's own handler reads, so a link
+    /// someone kept still works.  A profile is per device, which is exactly
+    /// the granularity a ClientID has: install it and that phone arrives under
+    /// its own name, with its own settings, rather than sharing whatever its
+    /// address is that day.
+    #[serde(default)]
+    client_id: Option<String>,
+
+    /// The HTTPS port to write into the DNS-over-HTTPS profile's URL.
+    ///
+    /// The listener's own port otherwise.  It is worth overriding when
+    /// something in front of this server answers on another one -- a reverse
+    /// proxy, or a router forwarding a port inwards -- since the profile has
+    /// to name the port the *device* dials, not the one this process bound.
+    ///
+    /// Apple's DNS-over-TLS profile carries a host name and no port at all, so
+    /// this reaches the HTTPS profile and nothing else.
+    #[serde(default)]
+    port: Option<u16>,
 }
 
 /// `GET /control/apple/doh.mobileconfig`
@@ -470,7 +492,13 @@ async fn mobileconfig_doh(
     State(s): State<Shared>,
     Query(q): Query<MobileConfigQuery>,
 ) -> ApiResult<Response> {
-    mobileconfig(&s, "HTTPS", q.host.as_deref())
+    mobileconfig(
+        &s,
+        "HTTPS",
+        q.host.as_deref(),
+        q.client_id.as_deref(),
+        q.port,
+    )
 }
 
 /// `GET /control/apple/dot.mobileconfig`
@@ -478,7 +506,7 @@ async fn mobileconfig_dot(
     State(s): State<Shared>,
     Query(q): Query<MobileConfigQuery>,
 ) -> ApiResult<Response> {
-    mobileconfig(&s, "TLS", q.host.as_deref())
+    mobileconfig(&s, "TLS", q.host.as_deref(), q.client_id.as_deref(), q.port)
 }
 
 /// Whether `host` is a plausible DNS name.
@@ -509,7 +537,13 @@ fn is_dns_name(host: &str) -> bool {
 /// put in it.  Where upstream falls back to the literal `adguardhome`, this
 /// refuses: a downloaded profile that quietly points a phone at a host that
 /// does not resolve is worse than a button that says why it cannot.
-fn mobileconfig(s: &Shared, proto: &str, requested: Option<&str>) -> ApiResult<Response> {
+fn mobileconfig(
+    s: &Shared,
+    proto: &str,
+    requested: Option<&str>,
+    client_id: Option<&str>,
+    port: Option<u16>,
+) -> ApiResult<Response> {
     let cfg = s.config.read();
     let host = requested
         .map(str::trim)
@@ -528,6 +562,58 @@ fn mobileconfig(s: &Shared, proto: &str, requested: Option<&str>) -> ApiResult<R
         )));
     }
 
+    let client_id = client_id.map(str::trim).filter(|c| !c.is_empty());
+
+    // The same rule the listeners apply when they read one off the wire, so a
+    // profile cannot carry an identifier the server would then ignore.  It
+    // also keeps the name out of trouble in the plist below, which writes both
+    // it and the host into elements without escaping them.
+    if let Some(id) = client_id
+        && !sift_dns::server::is_valid_client_id(id)
+    {
+        return Err(ApiError::bad_request(format!(
+            "{id:?} is not a ClientID: letters, digits and hyphens, \
+             up to 63 of them, and not starting or ending with a hyphen"
+        )));
+    }
+
+    // Zero is what the settings use for "not listening", which is not
+    // something a device can dial: as a request it is a mistake, not a port.
+    if port == Some(0) {
+        return Err(ApiError::bad_request(
+            "port 0 is not a port a device can be sent to",
+        ));
+    }
+
+    let plist = profile_plist(proto, host, port.unwrap_or(cfg.tls.port_https), client_id);
+
+    // The filename upstream sends, so a profile opened straight from its URL
+    // lands as `doh.mobileconfig` rather than as the query string it was
+    // asked for.
+    let filename = if proto == "HTTPS" {
+        "attachment; filename=doh.mobileconfig"
+    } else {
+        "attachment; filename=dot.mobileconfig"
+    };
+
+    Ok((
+        [
+            (header::CONTENT_TYPE, "application/xml"),
+            (header::CONTENT_DISPOSITION, filename),
+        ],
+        plist,
+    )
+        .into_response())
+}
+
+/// The profile itself, for a host that has already been checked.
+///
+/// A ClientID rides on each protocol the way that protocol's listener reads it
+/// back: DNS-over-HTTPS takes it as a path segment below the query route, and
+/// DNS-over-TLS as a label below the server's own name, which is the SNI the
+/// handshake carries.  The TLS form needs a certificate covering that label;
+/// the HTTPS form needs nothing extra.
+fn profile_plist(proto: &str, host: &str, port_https: u16, client_id: Option<&str>) -> String {
     let server_entry = if proto == "HTTPS" {
         // Apple's ServerURL carries a port, so a DNS-over-HTTPS listener moved
         // off 443 is still describable.  ServerName, which the TLS profile
@@ -535,17 +621,27 @@ fn mobileconfig(s: &Shared, proto: &str, requested: Option<&str>) -> ApiResult<R
         // 853 cannot be written as a profile, which is Apple's limit rather
         // than one of ours, and the setup guide offers the button only when
         // the port is the standard one.
-        let authority = if cfg.tls.port_https == 443 || cfg.tls.port_https == 0 {
+        let authority = if port_https == 443 || port_https == 0 {
             host.to_string()
         } else {
-            format!("{host}:{}", cfg.tls.port_https)
+            format!("{host}:{port_https}")
         };
-        format!("<key>ServerURL</key><string>https://{authority}/dns-query</string>")
+        let path = match client_id {
+            Some(id) => format!("/dns-query/{id}"),
+            None => "/dns-query".to_string(),
+        };
+
+        format!("<key>ServerURL</key><string>https://{authority}{path}</string>")
     } else {
-        format!("<key>ServerName</key><string>{host}</string>")
+        let name = match client_id {
+            Some(id) => format!("{id}.{host}"),
+            None => host.to_string(),
+        };
+
+        format!("<key>ServerName</key><string>{name}</string>")
     };
 
-    let plist = format!(
+    format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -573,9 +669,7 @@ fn mobileconfig(s: &Shared, proto: &str, requested: Option<&str>) -> ApiResult<R
 </dict>
 </plist>
 "#
-    );
-
-    Ok(([(header::CONTENT_TYPE, "application/xml")], plist).into_response())
+    )
 }
 
 /// A JSON body of `{"enabled": ...}`, used by several toggles.
@@ -631,6 +725,100 @@ mod tests {
 
         assert!(!is_dns_name(&"a".repeat(64)), "a label caps at 63 bytes");
         assert!(is_dns_name(&"a".repeat(63)));
+    }
+
+    #[test]
+    fn a_client_id_rides_where_its_listener_reads_it_back() {
+        // Over HTTPS it is a path segment, which `/dns-query/{client_id}`
+        // routes; over TLS it is a label below the server name, which is what
+        // the handshake's SNI carries.  A profile that spelled either the
+        // other way round would install and then arrive unidentified.
+        let doh = profile_plist("HTTPS", "dns.example", 443, Some("kids-tablet"));
+        assert!(
+            doh.contains("<string>https://dns.example/dns-query/kids-tablet</string>"),
+            "{doh}"
+        );
+
+        let dot = profile_plist("TLS", "dns.example", 443, Some("kids-tablet"));
+        assert!(
+            dot.contains("<string>kids-tablet.dns.example</string>"),
+            "{dot}"
+        );
+
+        // And the name the listener would read back out of that SNI is the one
+        // that was asked for.
+        assert_eq!(
+            sift_dns::server::client_id_from_sni("kids-tablet.dns.example", "dns.example")
+                .as_deref(),
+            Some("kids-tablet"),
+        );
+    }
+
+    #[test]
+    fn no_client_id_leaves_the_profile_as_it_was() {
+        let doh = profile_plist("HTTPS", "dns.example", 443, None);
+        assert!(
+            doh.contains("<string>https://dns.example/dns-query</string>"),
+            "{doh}"
+        );
+
+        // A non-standard HTTPS port is still describable, and the ClientID
+        // goes after it rather than into it.
+        let moved = profile_plist("HTTPS", "dns.example", 8443, Some("phone"));
+        assert!(
+            moved.contains("<string>https://dns.example:8443/dns-query/phone</string>"),
+            "{moved}"
+        );
+
+        let dot = profile_plist("TLS", "dns.example", 443, None);
+        assert!(dot.contains("<string>dns.example</string>"), "{dot}");
+    }
+
+    #[test]
+    fn the_https_profile_names_the_port_the_device_dials() {
+        // Apple's ServerURL carries one, so a listener behind a proxy or a
+        // forwarded port is still describable; its own default is left out.
+        let moved = profile_plist("HTTPS", "dns.example", 8443, None);
+        assert!(
+            moved.contains("<string>https://dns.example:8443/dns-query</string>"),
+            "{moved}"
+        );
+
+        let standard = profile_plist("HTTPS", "dns.example", 443, None);
+        assert!(
+            standard.contains("<string>https://dns.example/dns-query</string>"),
+            "{standard}"
+        );
+
+        // ServerName has no port at all, so the TLS profile is the same
+        // whatever the HTTPS listener is on.
+        assert_eq!(
+            profile_plist("TLS", "dns.example", 8443, None),
+            profile_plist("TLS", "dns.example", 443, None),
+        );
+    }
+
+    #[test]
+    fn a_profile_client_id_is_what_the_listeners_accept() {
+        // The profile writes the identifier into an element without escaping
+        // it, and a server that would ignore it is worse than a refusal, so
+        // the endpoint applies the listeners' own rule.  Guarding it here
+        // keeps the two from drifting apart.
+        for ok in ["kids-tablet", "PHONE", "a", &"a".repeat(63)] {
+            assert!(sift_dns::server::is_valid_client_id(ok), "{ok:?}");
+        }
+
+        for bad in [
+            "",
+            "-leading",
+            "trailing-",
+            "has.dot",
+            "has space",
+            "</string><key>x</key><string>evil",
+            &"a".repeat(64),
+        ] {
+            assert!(!sift_dns::server::is_valid_client_id(bad), "{bad:?}");
+        }
     }
 
     #[tokio::test]

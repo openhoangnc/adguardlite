@@ -410,6 +410,16 @@ kbd {
     opacity: 0.55;
 }
 
+/*
+ * A download link with nothing valid to ask for.  An <a> cannot be :disabled,
+ * and the link is rendered without an href so it is not clickable either --
+ * this only makes it look the way it behaves.
+ */
+.btn[aria-disabled='true'] {
+    cursor: default;
+    opacity: 0.55;
+}
+
 .btn.primary {
     color: var(--accent-text);
     background: var(--accent);

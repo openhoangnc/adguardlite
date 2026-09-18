@@ -192,6 +192,20 @@ Verification claims below are reproducible with `scripts/verify.sh` and
       encryption is unconfigured. It spells out any port that is not the
       scheme's own, and offers Apple's DNS-over-TLS profile only for a
       listener left on 853, which is the only one that profile can describe
+- [x] **A ClientID and an HTTPS port in the setup guide**, beside the host
+      name: they rewrite the three encrypted addresses and the Android Private
+      DNS line, and ride into the Apple profiles through `client_id=` and
+      `port=` on `/control/apple/{doh,dot}.mobileconfig` — the ClientID as a
+      path segment under DNS-over-HTTPS and as a label below the server name
+      under DNS-over-TLS, which is how each listener reads one back, and the
+      port only into the HTTPS profile, since Apple's `ServerName` carries a
+      host and no port at all. The endpoint applies the
+      listeners' own `is_valid_client_id`, so a profile cannot carry an
+      identifier the server would ignore, and the guide says which of the two
+      forms the settings can actually deliver: the SNI label only registers
+      below `tls.server_name`, and only with a certificate covering it.
+      Verified against a running build — a profile's own DoH URL and DoT
+      server name each arrived in the query log as `kids-tablet`
 
 ### Clients
 - [x] Persistent clients matched by address, subnet, MAC or ClientID, most
@@ -334,7 +348,7 @@ Verification claims below are reproducible with `scripts/verify.sh` and
       config file nobody had put there and wrote a fresh default beside it,
       which from the outside looks exactly like an upgrade that lost every
       setting
-- [x] **`--version` names this build**: `Sift, version v0.5.0 (drop-in for
+- [x] **`--version` names this build**: `Sift, version v0.6.0 (drop-in for
       AdGuard Home v0.107.79)`. Upstream prints `AdGuard Home, version
       v0.107.79`; the first word differs on purpose, because an installer
       looking at a binary both projects call `AdGuardHome` has this line and

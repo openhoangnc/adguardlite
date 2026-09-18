@@ -59,6 +59,13 @@ label directly below the server's own name is read: a name with more labels
 under it, or an unrelated name, yields no identifier rather than having part of
 it taken as one.
 
+### Apple devices
+
+**Setup guide → Encrypted DNS** takes a ClientID beside the host name and
+writes it into the configuration profiles it offers, so an iPhone or a Mac that
+installs one arrives already identified — over DNS-over-HTTPS in the query
+path, and over DNS-over-TLS in the name it asks for.
+
 ### Access control
 
 ClientIDs work in **Settings → DNS settings → Access settings** as well as
