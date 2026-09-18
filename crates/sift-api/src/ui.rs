@@ -1,7 +1,7 @@
 //! Serving the embedded web interface.
 //!
-//! Text assets are stored **brotli-compressed**, which keeps ~9.7 MB of
-//! JavaScript and CSS down to ~2 MB in the binary.  A client that accepts `br`
+//! Text assets are stored **brotli-compressed**, which keeps ~1.3 MB of
+//! JavaScript and CSS down to ~0.4 MB in the binary.  A client that accepts `br`
 //! gets the stored bytes untouched; anything else is decompressed on the way
 //! out.  `scripts/brotli.mjs` does the compressing, at the end of
 //! `scripts/build-frontend.sh`.
@@ -13,11 +13,12 @@
 //!
 //! # Caching
 //!
-//! webpack names every script and stylesheet after a hash of its contents, so
-//! such a file can never change meaning: it is served `immutable` with a
-//! year's `max-age` and is never asked about again.  Everything else — the
-//! three HTML shells, the icons — is served `no-cache`, so the client asks
-//! every time and gets a 304 when nothing changed.  `ETag` makes that cheap:
+//! The build names every script and stylesheet after a hash of its contents
+//! and writes it under `static/`, so such a file can never change meaning: it
+//! is served `immutable` with a year's `max-age` and is never asked about
+//! again.  Everything else — the three HTML shells, the icons — is served
+//! `no-cache`, so the client asks every time and gets a 304 when nothing
+//! changed.  `ETag` makes that cheap:
 //! it is the stored file's SHA-256, which rust-embed computes at build time,
 //! and `If-None-Match` is answered without touching the body.
 
@@ -230,12 +231,13 @@ fn not_modified(etag: &str, caching: &str) -> Response {
 
 /// Reports whether a name holds a hash of the file's own contents.
 ///
-/// `web/client/webpack.common.js` writes every hashed bundle under `static/`
-/// and nothing else there, so this is a fact about the build's layout rather
-/// than a guess about the name.  It used to sniff for a long run of hex, which
-/// was right for webpack's current `[chunkhash]` and would have quietly cached
-/// the wrong thing for a year the first time someone shortened it, or added an
-/// asset whose name happened to read like a digest.
+/// `web/client/vite.config.ts` writes every hashed bundle under `static/` and
+/// nothing else there, so this is a fact about the build's layout rather than
+/// a guess about the name.  It used to sniff for a long run of hex, which was
+/// right for the bundler of the day and would have quietly cached the wrong
+/// thing for a year the first time someone shortened the hash, or added an
+/// asset whose name happened to read like a digest.  Vite's hash is base64url
+/// and would not have matched it at all.
 ///
 /// Such a file can be cached forever, because changing it changes its name.
 fn is_content_addressed(name: &str) -> bool {
@@ -322,7 +324,7 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// The hashed script webpack emitted for this build.
+    /// The hashed dashboard script this build emitted.
     fn hashed_script() -> String {
         Assets::iter()
             .map(|p| p.to_string())

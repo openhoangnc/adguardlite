@@ -195,7 +195,7 @@ async fn serve_ui(State(s): State<Shared>, headers: HeaderMap, req: Request) -> 
 /// `/static/login.4b8e.js` are both the login page's — one the document, one
 /// what it is built from.  Both gates below reason about the name, so both
 /// strip the directory first; matching `/login.` against the raw path missed
-/// the script the moment webpack started writing it somewhere else, and
+/// the script the moment the build started writing it somewhere else, and
 /// locked the login form out of its own JavaScript.
 fn asset_name(path: &str) -> &str {
     path.strip_prefix("/static/")
@@ -328,6 +328,7 @@ fn control_router() -> Router<Shared> {
         .route("/filtering/refresh", post(filtering::refresh))
         .route("/filtering/set_rules", post(filtering::set_rules))
         .route("/filtering/check_host", get(filtering::check_host))
+        .route("/filtering/catalogue", get(filtering::catalogue))
         // Safety toggles.
         .route(
             "/safebrowsing/enable",
@@ -584,9 +585,9 @@ mod tests {
     #[test]
     fn the_login_form_can_reach_everything_it_is_built_from() {
         // Checked against the real build, not against names typed here: when
-        // webpack moved its output under static/, `/login.` stopped matching
-        // the login bundle and a signed-out browser got a blank page with two
-        // 401s in the console.  Nothing in the suite noticed.
+        // the bundler moved its output under static/, `/login.` stopped
+        // matching the login bundle and a signed-out browser got a blank page
+        // with two 401s in the console.  Nothing in the suite noticed.
         let mut seen_script = false;
 
         for name in crate::ui::names() {

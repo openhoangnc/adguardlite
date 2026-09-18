@@ -6,9 +6,8 @@ AdGuard Software Ltd., licensed under the GNU General Public License version 3.
 This project is licensed under the same terms; see [LICENSE](LICENSE).
 
 It is an independent reimplementation of the AdGuard Home backend in Rust,
-built to be interchangeable with release **v0.107.79**, shipping a fork of
-AdGuard Home's own web interface. It is not produced, endorsed or supported by
-AdGuard.
+built to be interchangeable with release **v0.107.79**, with a web interface
+written for it. It is not produced, endorsed or supported by AdGuard.
 
 ## Statement of modification
 
@@ -21,7 +20,7 @@ AdGuard did not make it.
 |---|---|
 | Modified from | AdGuard Home v0.107.79, commit `05ba17b282da1c4393d6a4ba4db0cf519194a362` |
 | Backend | rewritten in Rust; no upstream source carried over |
-| Web interface | forked from that commit's `client/` on **2026-09-17**, modified since — see [The forked web interface](#the-forked-web-interface) |
+| Web interface | written for this project; no AdGuard source, text or design — see [The web interface](#the-web-interface) |
 | Removed | DHCP, DNSCrypt, self-update |
 | Renamed | to "Sift"; see [Trademarks](#trademarks) |
 
@@ -40,11 +39,10 @@ in the system UI font; the icon is a funnel, drawn here. Neither derives from
 anything of AdGuard's, and no AdGuard mark appears in the interface, the icons,
 the repository name or the container image.
 
-AdGuard is named in three places, all of them factual statements about
-provenance rather than branding: this file, the interface footer ("Sift is an
-independent fork of AdGuard Home, not affiliated with or endorsed by
-AdGuard"), and the copyright notice on the interface code, which the GPL
-requires be kept intact.
+AdGuard is named in two places, both factual statements about provenance
+rather than branding: this file, and the interface footer ("Sift is an
+independent reimplementation of AdGuard Home. It is not affiliated with,
+endorsed by, or supported by AdGuard.").
 
 Sift is not produced, endorsed or supported by AdGuard Software Ltd., and it is
 not AdGuard Home.
@@ -63,9 +61,8 @@ These are AdGuard's work, redistributed under the GPL-3.0:
 
 | In this repository | Taken from | What it is |
 |---|---|---|
-| `web/client/` | `client/` at `05ba17b2` | The web interface's **sources**, forked and modified — see below |
-| `web/build/` | `web/client/`, built | The same, compiled and brotli-compressed |
 | `crates/sift-filter/data/blocked-services.json.gz` | `/control/blocked_services/all` | The 139-service catalogue: names, icons and blocking rules |
+| `crates/sift-filter/data/blocklists.json.gz` | `client/src/helpers/filters/filters.ts` at `v0.107.79` | The 64 vetted blocklists AdGuard compiles from their [HostlistsRegistry](https://github.com/AdguardTeam/HostlistsRegistry): names, categories, homepages and addresses. The **tags, notes, country codes, rule counts and any list added here are this project's** — see below |
 | `crates/sift-filter/src/safesearch/*.txt` | `internal/filtering/safesearch/rules/` | The safe-search rules for the seven supported providers, verbatim |
 | `tests/fixtures/` | a running v0.107.79 instance | Reference config, query-log lines, `stats.db`, gob payloads, and the verdicts Go gave for 4,190 domains |
 | `docker/Dockerfile` (runtime stage) | `docker/build.Dockerfile` | The image's runtime contract |
@@ -75,42 +72,51 @@ list, redistributed for testing. The list is maintained by AdGuard and
 published from
 [HostlistsRegistry](https://github.com/AdguardTeam/HostlistsRegistry).
 
-`web/client/src/components/ui/Tabler.css` carries AdGuard's vendored copy of
-[Bootstrap](https://github.com/twbs/bootstrap) 4.0.0, MIT; its copyright notice
-is kept in the file's header, where upstream left it.
-
 `upstream/` is not part of this repository — it is gitignored, and holds a
 checkout of AdGuard Home used as the reference implementation during
 development.
 
-## The forked web interface
+## The web interface
 
-`web/client/` began as AdGuard Home v0.107.79's `client/` directory, copied
-verbatim. It is AdGuard's code under the GPL-3.0, and the modifications are
-this project's, under the same licence. What changed:
+`web/client` is this project's own: React 19, TypeScript, react-router and
+ECharts, written against the same control API. **No AdGuard material is in it
+at all** — no JavaScript, no CSS, no markup, no icons, no wording, and not
+their layout. Every string a user reads was written for this project.
 
-- **DHCP removed** — the settings page, its container, reducer, actions and API
-  calls, and every `dhcp_*` string in all 36 locale files. This build has no
-  DHCP server, and a settings page that saves nothing is worse than none.
-- **DNSCrypt removed** — the `sdns://` upstream example, the DNSCrypt entries in
-  the setup guide, the query-log transport label, and the related strings.
-  There is no DNSCrypt listener.
-- **Rebranded to Sift** — AdGuard's shield replaced by a funnel of this
-  project's own, the icons redrawn to match, and all 36 locales and the page
-  titles renamed. The footer states the fork relationship where users see it.
-- **Links repointed** — `link.adtidy.org` redirectors replaced by the pages
-  they resolve to, repository and issue links pointed at this project, and the
-  AdGuard Home wiki links pointed at [`docs/`](docs/).
-- **A Clear cache button** on the dashboard, beside Refresh statistics.
-- **`.twosky.json` dropped** — upstream reads its language list from AdGuard's
-  translation-service configuration, which lives above `client/`. The fork
-  carries the list in `src/helpers/languages.ts` instead, so nothing outside
-  `web/client/` is needed to build.
-- **Build output** — webpack writes to `web/build/`, and the assets are stored
-  brotli-compressed rather than gzip.
+It did not start that way. The interface was first AdGuard's compiled bundle,
+then a fork of their client sources, and briefly a rewrite that kept their 36
+translation catalogues. Those catalogues are gone too, and the interface is
+English only; [TASK.md](TASK.md) records why.
 
-The upstream original of any file is
-`https://github.com/AdguardTeam/AdGuardHome/blob/v0.107.79/client/<path>`.
+`web/build/` is `web/client/` compiled and brotli-compressed, so it carries
+whatever the sources do — which is nothing of AdGuard's.
+
+Two things of AdGuard's do reach the interface, both through the API rather
+than through its code, and both listed in the table above: the **services
+catalogue** the blocked-services page renders, and the **blocklist catalogue**
+the "Choose blocklists" picker offers. AdGuard Home bundles the second one in
+its own client; carrying it on this side of the API is what keeps
+`web/client` free of their material.
+
+Neither catalogue's *names for its groups* came across: upstream stores those
+as translation keys, so the category and group headings in this interface were
+written for it.
+
+The blocklist catalogue also carries material that is **not** AdGuard's and
+never was. `scripts/blocklist-notes.json` holds, for this project:
+
+- a tag set and a written note for every list — what it blocks, who it suits,
+  and what to expect of it;
+- the ISO 3166-1 country each regional list serves, which the interface draws
+  as a flag;
+- `_add`, lists this project carries that upstream's registry does not.
+  Currently one: [hostsVN](https://github.com/bigdargon/hostsVN), MIT, ©
+  BigDargon — linked and fetched at runtime like every other list, not
+  redistributed here.
+
+The rule count beside each list is measured by downloading it, not copied from
+anywhere. `scripts/import-blocklists.py` merges all of it into the generated
+blob.
 
 ## Rebuilding the included material
 
@@ -121,19 +127,11 @@ blobs:
 scripts/build-frontend.sh          # regenerates web/build/ from web/client/
 ```
 
-To compare the fork against what it came from, or to regenerate the material
-copied verbatim, clone the reference implementation:
+To regenerate the material copied verbatim, clone the reference
+implementation:
 
 ```bash
 git clone --branch v0.107.79 https://github.com/AdguardTeam/AdGuardHome.git upstream
-diff -ru upstream/client web/client   # every modification, as a patch
-```
-
-To take a newer upstream client release into the fork, `scripts/sync-frontend.sh`
-three-way merges upstream's own diff between two tags:
-
-```bash
-scripts/sync-frontend.sh v0.107.80
 ```
 
 The services catalogue is captured from a running instance's
@@ -145,6 +143,24 @@ cp upstream/internal/filtering/safesearch/rules/*.txt \
    crates/sift-filter/src/safesearch/
 ```
 
+The blocklist catalogue is converted from upstream's generated
+`client/src/helpers/filters/filters.ts`, which is itself generated from the
+HostlistsRegistry, and merged with this project's own annotations:
+
+```bash
+# Re-import, downloading every list to count and validate it.
+python3 scripts/import-blocklists.py \
+    upstream/client/src/helpers/filters/filters.ts --measure
+
+# Re-import offline, keeping the counts already committed.  Use this after
+# editing a note or a tag.
+python3 scripts/import-blocklists.py upstream/client/src/helpers/filters/filters.ts
+```
+
+`--measure` refuses to write the catalogue if any list fails to download or
+comes back with no rules in it, so a list that has gone away is caught here
+rather than by a user who picked it.
+
 ## Third-party Rust dependencies
 
 Their licences are those declared in `Cargo.lock`; `cargo tree` lists the tree
@@ -153,6 +169,7 @@ and `cargo license` (if installed) summarises it.
 ## Third-party JavaScript dependencies
 
 `web/client/package.json` declares them and `web/client/package-lock.json`
-pins them. They are build-time dependencies whose compiled output is bundled
-into `web/build/`; the bundler collects their licence notices into the
-`*.LICENSE.txt` files alongside each bundle, which are served with it.
+pins them. Four are bundled into `web/build/`: **React** and **ReactDOM** (MIT,
+Meta), **react-router** (MIT, Remix Software), and **Apache ECharts** (Apache
+2.0, The Apache Software Foundation). The rest — Vite, TypeScript and their
+trees — are build-time only and are not redistributed.

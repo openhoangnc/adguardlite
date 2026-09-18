@@ -147,6 +147,60 @@ impl AppState {
         Ok(())
     }
 
+    /// How long protection stays off, in milliseconds, or zero.
+    ///
+    /// Read from the deadline rather than counted down, so a pause survives a
+    /// restart: one set before the process went down still ends when it was
+    /// meant to, not `duration` milliseconds after it came back.
+    pub fn protection_pause_left(&self) -> i64 {
+        let cfg = self.config.read();
+        if cfg.filtering.protection_enabled {
+            return 0;
+        }
+
+        pause_left(
+            cfg.filtering.protection_disabled_until.as_deref(),
+            jiff::Timestamp::now(),
+        )
+    }
+
+    /// Turns protection back on if its pause has elapsed.
+    ///
+    /// Driven from the maintenance tick rather than from the query path: a
+    /// pause runs to minutes, and checking a deadline on every DNS query to
+    /// notice a second sooner is not a trade worth making.  Returns whether
+    /// anything changed.
+    pub fn expire_protection_pause(&self) -> bool {
+        {
+            let cfg = self.config.read();
+            if cfg.filtering.protection_enabled || cfg.filtering.protection_disabled_until.is_none()
+            {
+                return false;
+            }
+        }
+
+        if self.protection_pause_left() > 0 {
+            return false;
+        }
+
+        {
+            let mut cfg = self.config.write();
+            cfg.filtering.protection_enabled = true;
+            cfg.filtering.protection_disabled_until = None;
+        }
+
+        // Saving pushes the new settings into the resolver; see `save_config`.
+        if let Err(e) = self.save_config() {
+            tracing::warn!(error = %e, "re-enabling protection after its pause");
+
+            return false;
+        }
+
+        tracing::info!("protection re-enabled: its pause elapsed");
+
+        true
+    }
+
     /// Reports whether the installation still needs the setup wizard.
     pub fn needs_install(&self) -> bool {
         self.config.read().users.is_empty()
@@ -155,3 +209,99 @@ impl AppState {
 
 /// A reference-counted state handle, as axum passes it to handlers.
 pub type Shared = Arc<AppState>;
+
+/// How long a pause has left at `now`, in milliseconds.
+///
+/// Zero for a deadline that has passed, is missing, or cannot be parsed: the
+/// caller's question is "how much longer", and every one of those means none.
+pub fn pause_left(until: Option<&str>, now: jiff::Timestamp) -> i64 {
+    let Some(until) = until.and_then(sift_core::gotime::parse_rfc3339) else {
+        return 0;
+    };
+
+    (until.as_millisecond() - now.as_millisecond()).max(0)
+}
+
+/// The deadline to store for a protection change.
+///
+/// `None` for every case that has no end: protection being turned *on*, and
+/// protection being turned off with no duration or a zero one.  Returning a
+/// stale deadline in those cases would turn protection back on by itself.
+pub fn pause_deadline(
+    enabled: bool,
+    duration: Option<u64>,
+    now: jiff::Timestamp,
+) -> Option<String> {
+    match duration {
+        Some(ms) if !enabled && ms > 0 => Some(sift_core::gotime::format_utc(
+            now + std::time::Duration::from_millis(ms),
+        )),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(s: &str) -> jiff::Timestamp {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn a_pause_counts_down_from_its_deadline() {
+        let now = at("2026-01-01T00:00:00Z");
+
+        assert_eq!(pause_left(Some("2026-01-01T00:00:30Z"), now), 30_000);
+        assert_eq!(pause_left(Some("2026-01-01T01:00:00Z"), now), 3_600_000);
+    }
+
+    #[test]
+    fn an_elapsed_pause_has_nothing_left() {
+        // Never negative: the interface renders this as a countdown, and a
+        // negative one would read as time owed.
+        let now = at("2026-01-01T00:00:00Z");
+
+        assert_eq!(pause_left(Some("2025-12-31T23:59:30Z"), now), 0);
+        assert_eq!(pause_left(Some("2026-01-01T00:00:00Z"), now), 0);
+    }
+
+    #[test]
+    fn a_missing_or_broken_deadline_has_nothing_left() {
+        let now = at("2026-01-01T00:00:00Z");
+
+        assert_eq!(pause_left(None, now), 0);
+        assert_eq!(pause_left(Some(""), now), 0);
+        assert_eq!(pause_left(Some("not a time"), now), 0);
+    }
+
+    #[test]
+    fn a_deadline_is_stored_only_for_a_timed_pause() {
+        let now = at("2026-01-01T00:00:00Z");
+
+        // Off for a while: a deadline that far ahead.
+        let until = pause_deadline(false, Some(30_000), now).expect("a timed pause has a deadline");
+        assert_eq!(pause_left(Some(&until), now), 30_000);
+
+        // Off with no end named, and off for no time at all.
+        assert_eq!(pause_deadline(false, None, now), None);
+        assert_eq!(pause_deadline(false, Some(0), now), None);
+
+        // Turning protection *on* clears it, duration or not -- a leftover
+        // deadline would later turn protection on again by itself, which the
+        // user has already done.
+        assert_eq!(pause_deadline(true, None, now), None);
+        assert_eq!(pause_deadline(true, Some(30_000), now), None);
+    }
+
+    #[test]
+    fn a_deadline_survives_being_read_back_later() {
+        // The pause is stored as a moment, not a length, so a restart part
+        // way through resumes rather than starting over.
+        let set_at = at("2026-01-01T00:00:00Z");
+        let until = pause_deadline(false, Some(60_000), set_at).unwrap();
+
+        assert_eq!(pause_left(Some(&until), at("2026-01-01T00:00:45Z")), 15_000);
+        assert_eq!(pause_left(Some(&until), at("2026-01-01T00:01:30Z")), 0);
+    }
+}

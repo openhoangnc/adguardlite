@@ -61,6 +61,19 @@ fn or_null<T>(v: Vec<T>) -> Option<Vec<T>> {
     if v.is_empty() { None } else { Some(v) }
 }
 
+/// `GET /control/filtering/catalogue`
+///
+/// The known blocklists the interface offers to add without typing an
+/// address.  **Not one of upstream's paths**: AdGuard Home bundles this
+/// catalogue in its client instead of serving it, and this build keeps it on
+/// the server so the frontend carries nothing of AdGuard's.  Adding a path is
+/// safe for the drop-in contract -- the two builds are never asked to serve
+/// the same interface -- and the interface degrades to the custom-address form
+/// if it ever answers 404.
+pub async fn catalogue() -> Json<&'static sift_filter::blocklists::Catalogue> {
+    Json(sift_filter::blocklists::catalogue())
+}
+
 /// `GET /control/filtering/status`
 pub async fn status(State(s): State<Shared>) -> Json<FilteringStatus> {
     let filters = s.filters.read();

@@ -1,0 +1,548 @@
+{
+  "_comment": [
+    "Tags, notes and additions for the blocklist catalogue, written for this project.",
+    "",
+    "Most of the catalogue -- names, categories, homepages and addresses -- is",
+    "AdGuard's, imported by scripts/import-blocklists.py. Everything in this",
+    "file is ours: what each list is good for, which country it serves, and any",
+    "list we add that upstream does not carry.",
+    "",
+    "`size` is NOT set here. It is derived from the rule count measured at",
+    "import time, so it cannot drift away from the list it describes.",
+    "",
+    "Tag vocabulary, kept small on purpose -- every tag has to answer a",
+    "question someone actually asks while choosing a list:",
+    "  what it blocks  ads trackers telemetry annoyances malware phishing",
+    "                  scam crypto-mining gambling adult piracy bypass",
+    "  who it is for   starter regional device allowlist",
+    "  what to expect  strict  (known to break some legitimate sites)",
+    "",
+    "A two-letter tag is a country, and must be declared in `_countries`.",
+    "The interface draws it as a flag; the importer rejects an undeclared one,",
+    "because a typo would otherwise become a chip that matches nothing.",
+    "",
+    "`_add` holds lists this project carries and upstream does not. They are",
+    "validated and measured exactly like the imported ones."
+  ],
+  "_countries": {
+    "cn": "China",
+    "hu": "Hungary",
+    "id": "Indonesia",
+    "il": "Israel",
+    "ir": "Iran",
+    "kr": "South Korea",
+    "lt": "Lithuania",
+    "mk": "North Macedonia",
+    "my": "Malaysia",
+    "no": "Norway",
+    "pl": "Poland",
+    "se": "Sweden",
+    "tr": "Turkey",
+    "ua": "Ukraine",
+    "vn": "Vietnam"
+  },
+  "_add": {
+    "hostsvn": {
+      "name": "VNM: hostsVN",
+      "category_id": "regional",
+      "homepage": "https://bigdargon.github.io/hostsVN/",
+      "url": "https://raw.githubusercontent.com/bigdargon/hostsVN/master/hosts"
+    }
+  },
+  "1hosts_lite": {
+    "tags": [
+      "ads",
+      "trackers",
+      "starter"
+    ],
+    "note": "A balanced everyday list from the 1Hosts family. A good first choice if you want more than AdGuard's own filter without inviting breakage."
+  },
+  "1hosts_xtra": {
+    "tags": [
+      "ads",
+      "trackers",
+      "telemetry",
+      "strict"
+    ],
+    "note": "The aggressive end of 1Hosts, and it says so itself: expect to allowlist things. Only worth it if you are willing to debug the occasional broken site."
+  },
+  "adguard_dns_filter": {
+    "tags": [
+      "ads",
+      "trackers",
+      "starter"
+    ],
+    "note": "AdGuard's own general-purpose list, assembled from their base, tracking and mobile filters. The safe default, and the one Sift enables on a fresh install."
+  },
+  "adguard_popup_filter": {
+    "tags": [
+      "annoyances"
+    ],
+    "note": "Just the domains behind pop-ups and pop-unders. Small and additive -- pair it with a general list rather than using it alone."
+  },
+  "awavenue_ads_rule": {
+    "tags": [
+      "ads",
+      "trackers"
+    ],
+    "note": "Targets the advertising SDKs embedded in Android apps rather than websites. Useful on a network with a lot of phones on it."
+  },
+  "dan_pollocks_list": {
+    "tags": [
+      "ads",
+      "trackers"
+    ],
+    "note": "A long-running, conservatively maintained hosts file. Small, stable and unlikely to surprise you."
+  },
+  "hagezi_multinormal": {
+    "tags": [
+      "ads",
+      "trackers",
+      "telemetry",
+      "phishing",
+      "starter"
+    ],
+    "note": "The middle of HaGeZi's three general lists and the one most people should start with. Broad coverage, still tuned to keep sites working."
+  },
+  "hagezi_pro": {
+    "tags": [
+      "ads",
+      "trackers",
+      "telemetry",
+      "phishing"
+    ],
+    "note": "A step up from HaGeZi Normal with noticeably more coverage. A reasonable default if you are comfortable allowlisting now and then."
+  },
+  "hagezi_pro++": {
+    "tags": [
+      "ads",
+      "trackers",
+      "telemetry",
+      "phishing",
+      "strict"
+    ],
+    "note": "Aggressive by design. Blocks a great deal, including things some apps depend on -- pick it only if you will notice and fix the fallout."
+  },
+  "hagezi_ultimate": {
+    "tags": [
+      "ads",
+      "trackers",
+      "telemetry",
+      "phishing",
+      "strict"
+    ],
+    "note": "The strictest HaGeZi list, and not a set-and-forget choice. Overlaps almost everything in Pro++, so run one of them, not both."
+  },
+  "oisd_basic": {
+    "tags": [
+      "ads",
+      "trackers",
+      "starter"
+    ],
+    "note": "OISD's smaller list, built around not breaking things. An excellent first list, and a good companion to a stricter one."
+  },
+  "oisd_full": {
+    "tags": [
+      "ads",
+      "trackers",
+      "telemetry"
+    ],
+    "note": "OISD's big list. Still curated against false positives, but its own authors note the risk is higher than the small version."
+  },
+  "peter_lowe_list": {
+    "tags": [
+      "ads",
+      "trackers"
+    ],
+    "note": "One of the oldest ad and tracker host lists there is. Tiny, careful, and almost never the cause of a problem."
+  },
+  "shadowwhisperer_tracking_list": {
+    "tags": [
+      "trackers",
+      "telemetry"
+    ],
+    "note": "Tracking only -- analytics, diagnostics, metrics and IP-lookup endpoints. Layer it on top of an ad list rather than in place of one."
+  },
+  "steven_blacks_list": {
+    "tags": [
+      "ads",
+      "trackers",
+      "malware",
+      "starter"
+    ],
+    "note": "The widely used unified hosts file, combining adware and malware sources. A dependable single-list setup."
+  },
+  "dandelion_sprouts_anti_push_notifications": {
+    "tags": [
+      "annoyances"
+    ],
+    "note": "Kills the domains behind \"allow notifications?\" prompts. Narrow and safe; add it to whatever general list you run."
+  },
+  "dandelion_sprouts_game_console_adblock_list": {
+    "tags": [
+      "ads"
+    ],
+    "note": "A handful of ad domains used by game consoles. Almost nothing in it, so it only makes sense alongside a general list."
+  },
+  "hagezi_allowlist_referral": {
+    "tags": [
+      "allowlist"
+    ],
+    "note": "An allowlist, not a blocklist: it re-enables affiliate and referral links that stricter lists break. Add it under Allowlists, not here."
+  },
+  "hagezi_antipiracy_blocklist": {
+    "tags": [
+      "piracy"
+    ],
+    "note": "Blocks streaming and download sites used for copyright infringement. A policy choice for your network, not a security measure."
+  },
+  "hagezi_apple_tracker_blocklist": {
+    "tags": [
+      "telemetry",
+      "device"
+    ],
+    "note": "Apple's own device telemetry endpoints. Very targeted; some Apple features expect these to resolve, so watch for side effects."
+  },
+  "hagezi_gambling_blocklist": {
+    "tags": [
+      "gambling"
+    ],
+    "note": "A very large list of gambling and betting sites. Worth it if that is the point; otherwise it is half a million rules you do not need."
+  },
+  "hagezi_oppo_realme_tracker_blocklist": {
+    "tags": [
+      "telemetry",
+      "device"
+    ],
+    "note": "Telemetry endpoints baked into OPPO and Realme phones. Only useful if you own one."
+  },
+  "hagezi_samsung_tracker_blocklist": {
+    "tags": [
+      "telemetry",
+      "device"
+    ],
+    "note": "Samsung's device and TV telemetry. Only useful if you own Samsung hardware."
+  },
+  "hagezi_vivo_tracker_blocklist": {
+    "tags": [
+      "telemetry",
+      "device"
+    ],
+    "note": "Telemetry endpoints baked into Vivo phones. Only useful if you own one."
+  },
+  "hagezi_windows_office_tracker_blocklist": {
+    "tags": [
+      "telemetry",
+      "device"
+    ],
+    "note": "Windows and Office telemetry endpoints. Some Microsoft features quietly depend on these, so introduce it and then watch."
+  },
+  "hagezi_xiaomi_tracking_blocklist": {
+    "tags": [
+      "telemetry",
+      "device"
+    ],
+    "note": "Telemetry endpoints baked into Xiaomi phones. Only useful if you own one."
+  },
+  "no_google": {
+    "tags": [
+      "trackers",
+      "strict"
+    ],
+    "note": "Blocks every Google domain, YouTube included. This breaks a great deal of the web on purpose -- take it literally."
+  },
+  "perflyst_dandelion_sprout_smart_tv_blocklist_for_adguard_home": {
+    "tags": [
+      "ads",
+      "telemetry",
+      "device"
+    ],
+    "note": "Stops smart TVs reporting what you watch, and blocks ads in TV apps. Small and worth having if a TV is on the network."
+  },
+  "shadowwhisperers_dating_list": {
+    "tags": [
+      "adult"
+    ],
+    "note": "Dating sites and apps. A household policy list rather than a privacy or security one."
+  },
+  "ukrainian_security_filter": {
+    "tags": [
+      "malware",
+      "phishing",
+      "regional",
+      "scam",
+      "ua"
+    ],
+    "note": "Phishing and fraud aimed at Ukrainian users. Small, and additive to a general security list."
+  },
+  "CHN_adrules": {
+    "tags": [
+      "ads",
+      "cn",
+      "regional",
+      "trackers"
+    ],
+    "note": "Broad coverage for Chinese sites and apps. Large enough to work as the general list on a China-facing network."
+  },
+  "CHN_anti_ad": {
+    "tags": [
+      "ads",
+      "cn",
+      "regional",
+      "trackers"
+    ],
+    "note": "A privacy-leaning Chinese list. A reasonable alternative to AdRules; running both together is redundant."
+  },
+  "HUN_hufilter": {
+    "tags": [
+      "ads",
+      "hu",
+      "regional"
+    ],
+    "note": "Hungarian sites. Tiny, so treat it as a supplement to an international list."
+  },
+  "IDN_abpindo": {
+    "tags": [
+      "ads",
+      "id",
+      "my",
+      "regional"
+    ],
+    "note": "Indonesian and Malaysian sites. Designed to complement a general list rather than replace one."
+  },
+  "IRN_unwanted_iranian_domains": {
+    "tags": [
+      "ads",
+      "ir",
+      "regional",
+      "trackers"
+    ],
+    "note": "Persian-language sites. Small and additive."
+  },
+  "ISR_easyList_hebrew": {
+    "tags": [
+      "ads",
+      "il",
+      "regional"
+    ],
+    "note": "Hebrew-language sites. Small and additive."
+  },
+  "KOR_list_kr": {
+    "tags": [
+      "ads",
+      "kr",
+      "regional"
+    ],
+    "note": "A DNS-shaped cut of the Korean filter list. Add it beside an international list."
+  },
+  "KOR_youslist": {
+    "tags": [
+      "ads",
+      "kr",
+      "regional"
+    ],
+    "note": "Korean sites, maintained separately from filterslist-KO. Either one works as the regional supplement."
+  },
+  "LIT_easylist_lithuania": {
+    "tags": [
+      "ads",
+      "lt",
+      "regional"
+    ],
+    "note": "Lithuanian sites, and its own authors call it small and lightly tested. Expect little from it."
+  },
+  "MKD_macedonian_pi_hole_blocklist": {
+    "tags": [
+      "ads",
+      "mk",
+      "regional"
+    ],
+    "note": "Macedonian sites. Tiny and additive."
+  },
+  "NOR_dandelion_sprouts_anti_malware_list": {
+    "tags": [
+      "ads",
+      "malware",
+      "no",
+      "regional"
+    ],
+    "note": "Nordic-language sites, covering both ads and malicious domains."
+  },
+  "POL_cert_polska_list_of_malicious_domains": {
+    "tags": [
+      "malware",
+      "phishing",
+      "pl",
+      "regional",
+      "scam"
+    ],
+    "note": "The official CERT Polska warning list, which Polish ISPs block by law. Authoritative, and large for a regional list."
+  },
+  "POL_polish_filters_for_pi_hole": {
+    "tags": [
+      "ads",
+      "pl",
+      "regional"
+    ],
+    "note": "Polish sites. Small; pair it with the CERT Polska list for security cover."
+  },
+  "SWE_frellwit_swedish_hosts_file": {
+    "tags": [
+      "ads",
+      "regional",
+      "scam",
+      "se",
+      "trackers"
+    ],
+    "note": "Swedish sites, covering ads, tracking and scams in one small list."
+  },
+  "TUR_turk_adlist": {
+    "tags": [
+      "ads",
+      "annoyances",
+      "regional",
+      "tr"
+    ],
+    "note": "Turkish sites, including the usual on-page annoyances."
+  },
+  "TUR_turkish_ad_hosts": {
+    "tags": [
+      "ads",
+      "regional",
+      "tr",
+      "trackers"
+    ],
+    "note": "Aimed at Turkish mobile apps rather than websites. Useful beside turk-adlist, not instead of it."
+  },
+  "VNM_abpvn": {
+    "tags": [
+      "ads",
+      "regional",
+      "vn"
+    ],
+    "note": "Vietnamese sites, and substantial for a regional list."
+  },
+  "dandelion_sprouts_anti_malware_list": {
+    "tags": [
+      "malware",
+      "phishing"
+    ],
+    "note": "A general malware and phishing list, actively maintained. A sound second list beside a general ad blocker."
+  },
+  "hagezi_badware_hoster_blocklist": {
+    "tags": [
+      "malware"
+    ],
+    "note": "Free hosting services that get abused to serve malware. Blocking them can also take out legitimate files hosted there."
+  },
+  "hagezi_dns_rebind_protection": {
+    "tags": [
+      "security"
+    ],
+    "note": "A dozen rules that stop public names resolving to private addresses. Cheap protection, but it will break any service that deliberately does this, such as some smart-home bridges."
+  },
+  "hagezi_dyndns_blocklist": {
+    "tags": [
+      "phishing",
+      "security"
+    ],
+    "note": "Dynamic DNS providers, which phishing campaigns lean on heavily. Do not add it if you reach your own machines through one."
+  },
+  "hagezi_encrypted_dns_vpn_tor_proxy_bypass": {
+    "tags": [
+      "bypass",
+      "strict"
+    ],
+    "note": "Stops devices routing around Sift via public DoH, VPNs, Tor and proxies. A control measure, and one that will annoy anyone who uses a VPN legitimately."
+  },
+  "hagezi_the_worlds_most_abused_tlds": {
+    "tags": [
+      "scam",
+      "phishing",
+      "malware",
+      "strict"
+    ],
+    "note": "Blocks whole top-level domains with the worst abuse records. Blunt by nature -- legitimate sites in those TLDs go too."
+  },
+  "hagezi_threat_intelligence_feeds": {
+    "tags": [
+      "malware",
+      "phishing",
+      "scam",
+      "crypto-mining"
+    ],
+    "note": "The broadest security list here by a wide margin, merged from many threat feeds. Costs real memory for the coverage -- see the size before adding it."
+  },
+  "hagezi_url_shortener_blocklist": {
+    "tags": [
+      "security"
+    ],
+    "note": "URL shorteners, which hide where a link really goes. Expect shortened links in mail and chat to stop working -- that is the point."
+  },
+  "urlhaus_filter_online": {
+    "tags": [
+      "malware"
+    ],
+    "note": "Live malware distribution hosts from abuse.ch's URLhaus. Small, current, and a good complement to a broader security list."
+  },
+  "nocoin_filter_list": {
+    "tags": [
+      "crypto-mining"
+    ],
+    "note": "In-browser cryptocurrency miners. Tiny and entirely safe to add."
+  },
+  "phishing_army": {
+    "tags": [
+      "phishing"
+    ],
+    "note": "A large, phishing-only list. One of the better single additions if phishing is your main concern."
+  },
+  "curben_phishing_filter": {
+    "tags": [
+      "phishing"
+    ],
+    "note": "Phishing domains drawn from PhishTank and OpenPhish. Overlaps Phishing Army considerably; one of the two is usually enough."
+  },
+  "scam_blocklist_by_durablenapkin": {
+    "tags": [
+      "scam"
+    ],
+    "note": "Scam and fake-shop domains. Small, and aimed at fraud rather than malware."
+  },
+  "shadowwhisperers_malware_list": {
+    "tags": [
+      "malware",
+      "phishing"
+    ],
+    "note": "Malware, unwanted programs, browser hijackers and phishing in one list. A solid general-purpose security choice."
+  },
+  "staklerware_indicators_list": {
+    "tags": [
+      "malware",
+      "security"
+    ],
+    "note": "Command-and-control domains used by stalkerware on phones. Small, specific, and worth having on a family network."
+  },
+  "the_big_list_of_hacked_malware_web_sites": {
+    "tags": [
+      "malware"
+    ],
+    "note": "Otherwise ordinary sites that are currently compromised. Because it tracks a moving target, keep the update interval short."
+  },
+  "ublock_badware_risks": {
+    "tags": [
+      "malware",
+      "scam"
+    ],
+    "note": "uBlock Origin's own list of sites documented to put users at risk. Small, carefully curated and rarely wrong."
+  },
+  "hostsvn": {
+    "tags": [
+      "ads",
+      "trackers",
+      "regional",
+      "vn"
+    ],
+    "note": "The most widely used Vietnamese blocklist, covering ads and tracking on Vietnamese sites and apps. Larger and more actively maintained than ABPVN; either works, both together is redundant."
+  }
+}

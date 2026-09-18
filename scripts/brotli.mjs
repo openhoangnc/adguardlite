@@ -1,4 +1,4 @@
-// Compresses the built web interface in place, for agl-api/src/ui.rs to embed.
+// Compresses the built web interface in place, for sift-api/src/ui.rs to embed.
 //
 // Every text asset becomes <name>.br and the original is removed, so the
 // binary carries one copy rather than two.  Binary assets are left alone:
@@ -11,7 +11,7 @@ import { join, extname } from 'node:path';
 import { brotliCompressSync, constants } from 'node:zlib';
 
 // The types worth compressing.  Anything else is stored as it came out of
-// webpack.
+// Vite.
 const TEXT = new Set(['.js', '.css', '.html', '.svg', '.txt', '.json', '.map']);
 
 const root = process.argv[2];

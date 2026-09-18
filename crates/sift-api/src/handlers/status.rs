@@ -50,7 +50,7 @@ pub async fn status(State(s): State<Shared>) -> Json<StatusResp> {
         dns_addresses: s.dns_addresses.read().clone(),
         dns_port: cfg.dns.port,
         http_port: cfg.http.address.0.port(),
-        protection_disabled_duration: 0,
+        protection_disabled_duration: s.protection_pause_left(),
         start_time: sift_core::gotime::unix_millis_f64(s.started),
         protection_enabled: cfg.filtering.protection_enabled,
         dhcp_available: false,
@@ -191,7 +191,10 @@ pub async fn dns_info(State(s): State<Shared>) -> Json<DnsConfigJson> {
         local_ptr_upstreams: Some(d.local_ptr_upstreams.clone()),
         blocking_ipv4: Some(cfg.filtering.blocking_ipv4.to_string()),
         blocking_ipv6: Some(cfg.filtering.blocking_ipv6.to_string()),
-        protection_disabled_until: Some(serde_json::Value::Null),
+        protection_disabled_until: Some(match &cfg.filtering.protection_disabled_until {
+            Some(t) => serde_json::Value::String(t.clone()),
+            None => serde_json::Value::Null,
+        }),
         edns_cs_custom_ip: Some(d.edns_client_subnet.custom_ip.to_string()),
         default_local_ptr_upstreams: Some(Vec::new()),
     })
@@ -364,7 +367,17 @@ pub async fn set_protection(
     State(s): State<Shared>,
     Json(req): Json<ProtectionReq>,
 ) -> ApiResult<()> {
-    s.config.write().filtering.protection_enabled = req.enabled;
+    {
+        let mut cfg = s.config.write();
+        cfg.filtering.protection_enabled = req.enabled;
+
+        // A deadline, not a countdown, so the pause means the same thing
+        // across a restart.  Turning protection on -- or off with no duration
+        // -- clears it: "off until I say otherwise" has no deadline, and
+        // leaving a stale one behind would turn protection back on by itself.
+        cfg.filtering.protection_disabled_until =
+            crate::state::pause_deadline(req.enabled, req.duration, jiff::Timestamp::now());
+    }
 
     s.save_config().map_err(ApiError::internal)
 }

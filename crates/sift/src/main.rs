@@ -423,6 +423,12 @@ async fn run(args: Args, paths: Paths, mut config: sift_config::Config) -> anyho
         }
     }
 
+    // Protection can be paused for a set time; this is what ends the pause.
+    tasks.push(tokio::spawn(protection_watch(
+        state.clone(),
+        shutdown_rx.clone(),
+    )));
+
     // Periodic maintenance: flush the log, prune statistics, refresh lists.
     tasks.push(tokio::spawn(maintenance(
         state.clone(),
@@ -692,6 +698,29 @@ impl CertWatch {
 }
 
 /// Runs the periodic upkeep the server needs.
+/// Turns protection back on when a timed pause runs out.
+///
+/// Its own task rather than a line in `maintenance`, because that ticks once a
+/// minute and the shortest pause the interface offers is thirty seconds --
+/// a pause that ends up to a minute late is a pause that lied.  The check
+/// itself is a read lock and a comparison, so a second's tick costs nothing.
+///
+/// The first tick fires immediately, which is also what catches a pause that
+/// elapsed while the process was not running.
+async fn protection_watch(state: Shared, mut shutdown: tokio::sync::watch::Receiver<bool>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    loop {
+        tokio::select! {
+            _ = tick.tick() => {}
+            _ = shutdown.changed() => return,
+        }
+
+        state.expire_protection_pause();
+    }
+}
+
 async fn maintenance(
     state: Shared,
     stats_path: std::path::PathBuf,

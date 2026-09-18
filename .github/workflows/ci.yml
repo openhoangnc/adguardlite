@@ -2,9 +2,10 @@ name: CI
 
 # Deliberately manual. The only workflow that runs on its own is docker.yml,
 # which builds and publishes the image; everything here — formatting, lints,
-# the 706-test suite and the differential against a freshly cloned AdGuard
-# Home — runs locally with `cargo test --workspace` and `scripts/verify.sh`,
-# and needs no Actions minutes to be trusted.
+# the 707-test suite, the frontend, and the differential against a freshly
+# cloned AdGuard Home — runs locally with `cargo test --workspace`,
+# `scripts/build-frontend.sh` and `scripts/verify.sh`, and needs no Actions
+# minutes to be trusted.
 #
 # Run it from the Actions tab when a change is worth checking on a clean
 # machine, or before cutting a release tag.
@@ -44,6 +45,44 @@ jobs:
 
       - name: Release build
         run: cargo build --release --locked -p sift
+
+  frontend:
+    name: Web interface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: web/client/package-lock.json
+
+      - name: Install
+        run: npm ci --no-audit --no-fund
+        working-directory: web/client
+
+      - name: Typecheck
+        run: npm run typecheck
+        working-directory: web/client
+
+      # web/build is committed and is what ships, so a source change nobody
+      # built is a source change nobody sees.
+      - name: Build
+        run: scripts/build-frontend.sh
+
+      # Compares the *names*, not the bytes.  Every bundle is named after a
+      # hash of its own contents, so a source change that was never built
+      # produces a name that is not committed -- while brotli's output can
+      # differ by a byte between zlib versions without meaning anything.
+      - name: The committed build matches the sources
+        run: |
+          added_or_removed="$(git status --porcelain -- web/build | grep -vE '^ M' || true)"
+          if [ -n "$added_or_removed" ]; then
+            echo "web/build is stale -- run scripts/build-frontend.sh and commit it" >&2
+            echo "$added_or_removed" >&2
+            exit 1
+          fi
 
   compatibility:
     name: Differential against AdGuard Home

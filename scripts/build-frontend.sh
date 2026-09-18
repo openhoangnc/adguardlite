@@ -1,10 +1,13 @@
 #!/bin/sh
 # Rebuilds the embedded web interface from this project's own frontend sources.
 #
-# The sources live in web/client: a fork of AdGuard Home's client at v0.107.79,
-# with DHCP and DNSCrypt removed, the branding changed and the outbound links
-# repointed.  The result is committed under web/build, brotli-compressed:
-# roughly 9.7 MB of JavaScript and CSS become ~2 MB in the binary.
+# The sources live in web/client: React 19, TypeScript and react-router, with
+# ECharts for the dashboard and no other runtime dependency.  Vite builds the
+# three documents the server serves -- the app, the login form and the setup
+# wizard -- one build each, because they must not share a chunk; see ENTRIES in
+# web/client/vite.config.ts.
+#
+# The result is committed under web/build, brotli-compressed.
 #
 # Run this after any change under web/client.
 
@@ -21,12 +24,15 @@ fi
 echo "building the frontend from $client"
 cd "$client"
 npm ci --no-audit --no-fund
-npm run build-prod
+npm run typecheck
+npm run build
 
-if [ ! -f "$root/web/build/index.html" ]; then
-	echo "the build produced no $root/web/build/index.html" >&2
-	exit 1
-fi
+for page in index login install; do
+	if [ ! -f "$root/web/build/$page.html" ]; then
+		echo "the build produced no $root/web/build/$page.html" >&2
+		exit 1
+	fi
+done
 
 # Store text assets brotli-compressed; ui.rs serves them as-is to clients that
 # accept br and decompresses for those that do not.

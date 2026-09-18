@@ -7,9 +7,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Sift** is a Rust backend for AdGuard Home, built as a **drop-in
 replacement** for the Go binary of release **v0.107.79**. It reads and writes
 the same config file, the same on-disk data, serves the same HTTP API, and
-ships in a Docker image with the same runtime contract. The web interface is a
-**fork** of AdGuard Home's, under `web/client`, with the excluded features
-taken out of it and the branding changed.
+ships in a Docker image with the same runtime contract. The web interface under
+`web/client` is this project's own: React, TypeScript and ECharts against the
+same control API, with the excluded features left out.
 
 The binary reports its **own** version — `sift_core::VERSION`, from the
 workspace version, starting at v0.2.0. `sift_core::AGH_COMPAT_VERSION` records
@@ -46,7 +46,7 @@ installation.
 | Work dir | `<work>/data/{querylog.json,querylog.json.1,stats.db,sessions.db,filters/,userfilters/}` |
 | Query log | JSON lines, keys `T,QH,QT,QC,CP,IP,Result,Elapsed,Upstream,Answer,…` |
 | Statistics | bbolt file, one bucket per hour named by big-endian `u64`, value a gob `unitDB` under key `[0]` |
-| HTTP API | 81 paths under `/control/*`, all routed |
+| HTTP API | upstream's 81 paths under `/control/*`, all routed, plus one of ours |
 | Sessions | `<work>/data/sessions.db`, bucket `sessions-2`, 16-byte token key |
 | Web interface | single-page app served from the embedded filesystem at `/` |
 | Version | **not** part of the contract: this build reports its own, not v0.107.79 |
@@ -57,7 +57,7 @@ installation.
 ```bash
 cargo build --release            # fast to build and to run
 cargo build --profile dist       # fat LTO, panic=abort, stripped: ~10.7 MB
-cargo test --workspace           # 706 tests, no network or Go build needed
+cargo test --workspace           # 707 tests, no network or Go build needed
 cargo clippy --workspace --all-targets
 ```
 
@@ -86,7 +86,6 @@ Rebuilding the web interface — needs Node:
 
 ```bash
 scripts/build-frontend.sh         # web/client -> web/build, brotli-compressed
-scripts/sync-frontend.sh v0.1.2   # merge a newer upstream client into the fork
 ```
 
 Cross-implementation verification — needs `upstream/` and a Go toolchain:
@@ -235,6 +234,12 @@ toggles, its own blocked services and its own safe search.
   the clock. `sift-core/src/schedule.rs` exposes `blocks_at` for that reason.
 - **Blocked services are a separate engine** from the blocklists, so the
   schedule can pause them per request without rebuilding anything.
+- **A protection pause is a deadline, not a timer.**
+  `filtering.protection_disabled_until` holds the moment protection comes
+  back, so the pause means the same thing across a restart, and
+  `AppState::expire_protection_pause` ends it. That runs on its own
+  one-second task in `main.rs` rather than in `maintenance`, which ticks once
+  a minute — the shortest pause the interface offers is thirty seconds.
 - **`dns.blocked_hosts` holds rules, not names**, and an `@@` exception in it
   *blocks*. Upstream's `isBlockedHost` keeps only "something matched" from its
   engine and throws the match itself away, so an exception rule refuses the
@@ -256,54 +261,123 @@ and the HTTPS fetch in `crates/sift/src/fetch.rs` exist.
 
 ## The web interface
 
-**The sources live in `web/client`** — a fork of AdGuard Home v0.107.79's
-`client/` at commit `05ba17b2`, with DHCP and DNSCrypt removed, the branding
-changed to Sift and every outbound link repointed. `NOTICE.md` lists
-what changed, states the modification for GPL-3.0 §5(a), and records the
-trademark position. Before editing, remember it is someone else's React app:
-match its shape rather than improving it.
+**One path is ours, not upstream's**: `GET /control/filtering/catalogue`
+serves the known-blocklists catalogue that AdGuard Home bundles in its own
+client. Serving it keeps `web/client` free of AdGuard's material, which is what
+`NOTICE.md` claims; the interface falls back to the custom-address form if it
+ever answers 404. Adding a path is safe for the drop-in contract because the
+two builds never serve the same interface.
 
-**Taking a newer upstream client**: `scripts/sync-frontend.sh v0.107.80` three-way
-merges upstream's own diff between the recorded base and that tag. It prints
-the checks to run afterwards — chiefly that DHCP and DNSCrypt have not come
-back and that no `link.adtidy.org` link has. Bump the base in the script and in
-`NOTICE.md` when a sync lands.
+What that catalogue carries is **half AdGuard's and half ours**, and the split
+matters when editing it:
 
-The build is committed under `web/build`, **brotli**-compressed (9.1 MB of
-assets → 1.7 MB in the binary), and embedded by `sift-api/src/ui.rs`. Rebuild it
-with `scripts/build-frontend.sh` after **any** change under `web/client` — the
-committed output is what ships, and a source change nobody built is invisible.
+- theirs — the list names, categories, homepages and addresses, imported from
+  upstream's generated `filters.ts`;
+- ours — `scripts/blocklist-notes.json`: a tag set and a note per list, the
+  country each regional one serves, a rule count **measured** by downloading
+  each list, and `_add` for lists upstream does not carry.
 
-Three things about how assets are served:
+`scripts/import-blocklists.py --measure` merges them and refuses to write the
+blob if a list 404s, comes back empty, has no note, carries a tag outside the
+closed vocabulary, or names a country not declared in `_countries`. A
+two-letter tag *is* a country: the interface derives its flag from the code
+(the two regional-indicator symbols are the flag), so no icon set ships. Four tests in
+`sift-filter/src/blocklists.rs` re-check the committed blob, including that
+each list's size tag agrees with its measured count — the one claim a reader
+cannot verify by eye.
 
+**The sources live in `web/client`**: React 19 and TypeScript, routed with
+react-router, charted with ECharts, built by Vite. Those four are the entire
+runtime dependency list — there is no state library, no component library, no
+CSS framework and no test runner. Nothing of AdGuard's is in it: not their
+code, not their design, and not their wording. It is **English only**, which
+is a decision rather than an omission — see `TASK.md`.
+
+```
+src/api/        types.ts mirrors the control API's shapes; index.ts is one
+                function per endpoint; client.ts is the only place fetch is called
+src/app/        the shell: routes, sidebar, top bar, and the status/profile
+                every page reads
+src/components/ the primitives — Card, Field, Check, Modal, Table, toasts — the
+                icon set, and the ECharts wrapper
+src/lib/        theme, formatting, and the data-loading hooks
+src/pages/      one file per route
+src/entries/    main.tsx, login.tsx, install.tsx: the three documents
+```
+
+There is **no store**. What the whole app needs — the server status, the
+profile, the protection toggle — is in `src/app/context.tsx`; everything else
+belongs to the page that loaded it, through `useAsync` in `src/lib/hooks.ts`.
+A page loads, edits a local draft and saves; it does not synchronise with
+anything.
+
+Five things about how it is built and served:
+
+- **Three documents, three builds.** `index.html`, `login.html` and
+  `install.html` are built one at a time by `build.mjs`, not as one multi-entry
+  build. They must not share a chunk: `sift-api`'s `is_public_page` serves an
+  asset without a session only when its basename starts with `login.`, so a
+  hoisted vendor chunk is answered **401** to exactly the visitor who needs the
+  login form. `ENTRIES` in `vite.config.ts` says so too.
+- **The output names are the contract.** Bundles land in `static/` — which is
+  what `ui.rs` treats as content-addressed and serves `immutable` — under the
+  entry's own name, so `static/login.<hash>.js` and nothing else.
 - **Brotli only, no gzip on the wire.** The stored form is `.br`; a client that
   accepts `br` gets those bytes, and anything else is decompressed on the way
   out. Over plain HTTP most browsers still advertise only gzip, so those
-  clients pay a decompression — which is affordable only because of the
-  caching below.
-- **A name carrying a content hash is cached forever.** `is_content_addressed`
-  spots webpack's `main.<20 hex>.js`, and those get `immutable` with a year's
-  `max-age`. The three HTML shells and the icons get `no-cache`, so a new build
-  is picked up.
+  clients pay a decompression — affordable only because of the caching above.
 - **Every response carries an `ETag`** — the stored file's SHA-256, per
   *representation*: the compressed and decompressed forms must not share one,
-  or a cache hands the wrong bytes to the wrong client. `If-None-Match` is
-  answered with a 304 before the body is touched.
+  or a cache hands the wrong bytes to the wrong client.
+- **Hash routing, deliberately.** Signed out, the server redirects `/` to the
+  login form but answers any other path 401 — so a bookmarked `/settings` under
+  a browser router would be a blank 401 rather than a sign-in prompt. The paths
+  are the old interface's, and `main.tsx` rewrites a bare `#settings` from an
+  older bookmark to `#/settings`.
+
+**Strings are written where they are shown.** There is no catalogue and no
+`t()`: a label is a literal in the component that renders it. Two rules keep
+that from drifting — say what a setting *does* rather than restating its name,
+and do not reach for AdGuard's phrasing, which is theirs.
 
 Working on the frontend:
 
 ```bash
 cd web/client
-npx tsc --noEmit                 # typecheck
-npx eslint --ext .ts,.tsx src    # lint; CI-clean, keep it that way
-npx vitest --run                 # unit tests
+npm install
+npm run dev        # port 5173, proxying /control to 127.0.0.1:3000
+npm run typecheck  # tsc --noEmit; CI-clean, keep it that way
+npm run build      # the three builds, into web/build
 ```
 
-Locale keys live in `src/__locales/*.json`, 36 files, alphabetically sorted.
-`en.json` is the source of truth; a key removed there must be removed from all
-36. All 36 say "Sift" — when renaming across them, check what attaches
-to the name: Korean particles and Finnish vowel harmony both change with it,
-and `TASK.md` records which ones moved.
+`npm run dev` needs a server to talk to; `SIFT_API=http://host:port npm run dev`
+points it somewhere other than the default.
+
+The build is committed under `web/build`, **brotli**-compressed (1.3 MB of
+assets to 0.4 MB in the binary), and embedded by `sift-api/src/ui.rs`. Rebuild it with `scripts/build-frontend.sh` after **any**
+change under `web/client` — the committed output is what ships, and a source
+change nobody built is invisible.
+
+**Responsive down to 375px**, and tested there rather than assumed. Three
+things carry most of it:
+
+- `table.stack` turns the query log's five columns into a card per row, and
+  `table.rows` turns any other table into labelled lines, each cell naming
+  itself from its `data-label`.
+- Both fire below **1000px**, not at a phone width. The constraint is the
+  *content column*, which the sidebar takes 232px out of whenever it is not a
+  drawer — a table that needs 620px is already scrolling sideways in a 900px
+  window.
+- The sidebar becomes a drawer below 860px, with a backdrop that closes it,
+  and `.wide-only` drops a label whose button still reads as an icon.
+
+A page that grows a horizontal scrollbar is a bug, and so is a `.table-wrap`
+that scrolls: check `scrollWidth` against `clientWidth` on both.
+
+One trap worth knowing: **`input[type='text']` does not match `<input>`**. An
+input with no `type` attribute is a text input, and selecting on the attribute
+missed every one of them, leaving half the forms with a field a third of the
+width of the one below it. The stylesheet selects by what a control is *not*.
 
 ## Housekeeping
 

@@ -1,0 +1,1540 @@
+/*
+ * One stylesheet, no framework.
+ *
+ * Every colour is a token on :root so the dark theme is a second set of the
+ * same names rather than a second set of rules.  `data-theme` is written by
+ * lib/theme.ts; it is always `light` or `dark`, because `auto` is resolved
+ * against the system before it is applied.
+ */
+
+/*
+ * `color-scheme` is what native controls follow -- radios, checkboxes, the
+ * select popup, the scrollbars.  Without it they take the *system* scheme, so
+ * a light page on a dark desktop draws black radio buttons on white cards.
+ */
+:root {
+    color-scheme: light;
+
+    --bg: #f4f6f8;
+    --surface: #ffffff;
+    --surface-2: #f8fafb;
+    --surface-3: #eef1f4;
+    --border: #e2e7ec;
+    --border-strong: #cdd5dd;
+
+    --text: #1b2733;
+    --text-muted: #61707f;
+    --text-faint: #8a97a4;
+
+    --accent: #35916a;
+    --accent-hover: #2b7a59;
+    --accent-soft: #e6f4ed;
+    --accent-text: #ffffff;
+
+    --danger: #cf3f3f;
+    --danger-hover: #b33434;
+    --danger-soft: #fdecec;
+    --warn: #c08324;
+    --warn-soft: #fdf4e3;
+    --info: #2f6fb5;
+    --info-soft: #e8f1fb;
+
+    --chart-1: #35916a;
+    --chart-2: #cf3f3f;
+    --chart-3: #c08324;
+    --chart-4: #7a5bbd;
+    --chart-5: #2f6fb5;
+
+    --radius: 10px;
+    --radius-sm: 6px;
+    --shadow: 0 1px 2px rgb(16 24 32 / 6%), 0 2px 8px rgb(16 24 32 / 4%);
+    --shadow-lg: 0 8px 32px rgb(16 24 32 / 16%);
+
+    --sidebar-w: 232px;
+    --header-h: 56px;
+
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+
+:root[data-theme='dark'] {
+    color-scheme: dark;
+
+    --bg: #14181d;
+    --surface: #1c2229;
+    --surface-2: #232a32;
+    --surface-3: #2b333c;
+    --border: #2d353f;
+    --border-strong: #3d4854;
+
+    --text: #e5eaef;
+    --text-muted: #9aa7b4;
+    --text-faint: #71808e;
+
+    --accent: #4bb283;
+    --accent-hover: #5cc494;
+    --accent-soft: #1d3a2e;
+    --accent-text: #0e1417;
+
+    --danger: #e06666;
+    --danger-hover: #ea7a7a;
+    --danger-soft: #3a2222;
+    --warn: #dda54a;
+    --warn-soft: #3a3020;
+    --info: #5c9de0;
+    --info-soft: #1e2c3d;
+
+    --chart-1: #4bb283;
+    --chart-2: #e06666;
+    --chart-3: #dda54a;
+    --chart-4: #a487e0;
+    --chart-5: #5c9de0;
+
+    --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 2px 8px rgb(0 0 0 / 20%);
+    --shadow-lg: 0 8px 32px rgb(0 0 0 / 45%);
+}
+
+*,
+*::before,
+*::after {
+    box-sizing: border-box;
+}
+
+html,
+body {
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+}
+
+a {
+    color: var(--accent);
+    text-decoration: none;
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+h1,
+h2,
+h3,
+h4 {
+    margin: 0;
+    font-weight: 600;
+    line-height: 1.3;
+}
+
+h1 {
+    font-size: 22px;
+}
+
+h2 {
+    font-size: 17px;
+}
+
+h3 {
+    font-size: 15px;
+}
+
+code,
+kbd {
+    font-family: var(--mono);
+    font-size: 0.92em;
+}
+
+/* ---------- Layout ---------- */
+
+.shell {
+    display: grid;
+    grid-template-columns: var(--sidebar-w) 1fr;
+    min-height: 100vh;
+}
+
+.sidebar {
+    position: sticky;
+    top: 0;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+    padding: 14px 10px;
+    overflow-y: auto;
+    background: var(--surface);
+    border-right: 1px solid var(--border);
+}
+
+.brand {
+    display: flex;
+    gap: 9px;
+    align-items: center;
+    padding: 4px 8px 16px;
+    font-size: 17px;
+    font-weight: 650;
+    color: var(--text);
+    letter-spacing: -0.2px;
+}
+
+.brand:hover {
+    text-decoration: none;
+}
+
+.brand svg {
+    flex: none;
+}
+
+.nav-group {
+    margin-bottom: 14px;
+}
+
+.nav-group > span {
+    display: block;
+    padding: 0 10px 5px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.nav-link {
+    display: flex;
+    gap: 9px;
+    align-items: center;
+    padding: 7px 10px;
+    margin-bottom: 1px;
+    font-weight: 500;
+    color: var(--text-muted);
+    border-radius: var(--radius-sm);
+}
+
+.nav-link:hover {
+    color: var(--text);
+    text-decoration: none;
+    background: var(--surface-2);
+}
+
+.nav-link.active {
+    color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.nav-link svg {
+    flex: none;
+    opacity: 0.85;
+}
+
+.main {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.topbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    height: var(--header-h);
+    padding: 0 20px;
+    background: color-mix(in srgb, var(--surface) 88%, transparent);
+    border-bottom: 1px solid var(--border);
+    backdrop-filter: blur(8px);
+}
+
+.topbar .spacer {
+    flex: 1;
+}
+
+.page {
+    max-width: 1180px;
+    width: 100%;
+    padding: 20px;
+}
+
+.page-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    align-items: center;
+    margin-bottom: 16px;
+}
+
+.page-head .spacer {
+    flex: 1;
+}
+
+.page-head p {
+    width: 100%;
+    margin: 0;
+    color: var(--text-muted);
+}
+
+.burger {
+    display: none;
+}
+
+/* ---------- Cards ---------- */
+
+.card {
+    padding: 16px;
+    margin-bottom: 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+}
+
+.card-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 12px;
+}
+
+.card-head .spacer {
+    flex: 1;
+}
+
+.card-head h2,
+.card-head h3 {
+    margin: 0;
+}
+
+.card-desc {
+    margin: -4px 0 14px;
+    color: var(--text-muted);
+}
+
+.grid {
+    display: grid;
+    gap: 16px;
+}
+
+/* A card that takes the whole row of whatever grid it is in. */
+.span {
+    grid-column: 1 / -1;
+}
+
+.grid-2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.grid-3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.grid-4 {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+/* ---------- Stat tiles ---------- */
+
+.tile {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    padding: 14px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--tile-accent, var(--accent));
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+}
+
+.tile .label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-muted);
+}
+
+.tile .value {
+    font-size: 26px;
+    font-weight: 650;
+    line-height: 1.15;
+    letter-spacing: -0.5px;
+    font-variant-numeric: tabular-nums;
+}
+
+.tile .sub {
+    font-size: 12px;
+    color: var(--text-faint);
+    font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Buttons ---------- */
+
+.btn {
+    display: inline-flex;
+    gap: 6px;
+    align-items: center;
+    justify-content: center;
+    padding: 7px 13px;
+    font: inherit;
+    font-weight: 550;
+    color: var(--text);
+    white-space: nowrap;
+    cursor: pointer;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    transition: background 0.12s, border-color 0.12s, opacity 0.12s;
+}
+
+.btn:hover:not(:disabled) {
+    background: var(--surface-3);
+}
+
+.btn:disabled {
+    cursor: default;
+    opacity: 0.55;
+}
+
+.btn.primary {
+    color: var(--accent-text);
+    background: var(--accent);
+    border-color: var(--accent);
+}
+
+.btn.primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+    border-color: var(--accent-hover);
+}
+
+.btn.danger {
+    color: #fff;
+    background: var(--danger);
+    border-color: var(--danger);
+}
+
+.btn.danger:hover:not(:disabled) {
+    background: var(--danger-hover);
+    border-color: var(--danger-hover);
+}
+
+.btn.ghost {
+    background: transparent;
+    border-color: transparent;
+    color: var(--text-muted);
+}
+
+.btn.ghost:hover:not(:disabled) {
+    color: var(--text);
+    background: var(--surface-3);
+}
+
+.btn.sm {
+    padding: 4px 9px;
+    font-size: 13px;
+}
+
+.btn.icon {
+    padding: 6px;
+}
+
+.btn-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+/* ---------- Forms ---------- */
+
+.field {
+    margin-bottom: 14px;
+}
+
+/*
+ * `:not(.check)` matters: a radio group lives inside a .field, and its rows
+ * are labels too.  Without it this rule's higher specificity turns .check's
+ * flex row back into a block and the control sits flush against its text.
+ */
+.field > label:not(.check),
+.field-label {
+    display: block;
+    margin-bottom: 5px;
+    font-weight: 550;
+}
+
+.field .hint {
+    margin-top: 5px;
+    font-size: 12.5px;
+    color: var(--text-muted);
+}
+
+/*
+ * Matched by what a control is *not*, because an <input> with no `type` is a
+ * text input and `input[type='text']` does not match it -- which left half
+ * the forms with a field a third of the width of the one below it.
+ */
+input:not([type='checkbox'], [type='radio'], [type='file'], [type='range'], [type='color']),
+select,
+textarea {
+    width: 100%;
+    padding: 7px 10px;
+    font: inherit;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-sm);
+    transition: border-color 0.12s, box-shadow 0.12s;
+}
+
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+.btn:focus-visible,
+a:focus-visible,
+summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+    border-color: var(--accent);
+    outline: none;
+    box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+input:disabled,
+select:disabled,
+textarea:disabled {
+    color: var(--text-faint);
+    background: var(--surface-3);
+}
+
+textarea {
+    min-height: 110px;
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.55;
+    resize: vertical;
+}
+
+select {
+    cursor: pointer;
+}
+
+.inline-field {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.inline-field input,
+.inline-field select {
+    width: auto;
+    min-width: 90px;
+}
+
+/* An input sized by its own attribute rather than the column it sits in. */
+input[type='time'] {
+    min-width: 110px;
+}
+
+/* A checkbox that reads as a setting rather than a form control. */
+.check {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    padding: 9px 0;
+    cursor: pointer;
+}
+
+.check + .check {
+    border-top: 1px solid var(--border);
+}
+
+.check input {
+    flex: none;
+    width: 16px;
+    height: 16px;
+    margin: 2px 0 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.check .text {
+    min-width: 0;
+}
+
+.check .text b {
+    font-weight: 550;
+}
+
+.check .text .hint {
+    margin-top: 2px;
+    font-size: 12.5px;
+    color: var(--text-muted);
+}
+
+/* The protection switch in the top bar. */
+.switch {
+    position: relative;
+    display: inline-block;
+    flex: none;
+    width: 38px;
+    height: 21px;
+}
+
+.switch input {
+    width: 0;
+    height: 0;
+    opacity: 0;
+}
+
+.switch span {
+    position: absolute;
+    inset: 0;
+    cursor: pointer;
+    background: var(--border-strong);
+    border-radius: 999px;
+    transition: background 0.15s;
+}
+
+.switch span::before {
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 15px;
+    height: 15px;
+    content: '';
+    background: #fff;
+    border-radius: 50%;
+    transition: transform 0.15s;
+}
+
+.switch input:checked + span {
+    background: var(--accent);
+}
+
+.switch input:checked + span::before {
+    transform: translateX(17px);
+}
+
+.switch input:focus-visible + span {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+}
+
+/* ---------- Tables ---------- */
+
+.table-wrap {
+    max-width: 100%;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+/*
+ * A table whose columns are sized on purpose.  The minimum keeps them legible
+ * on a phone: below it the wrapper scrolls sideways, which is better than five
+ * columns squeezed until their contents overlap.
+ */
+table.fixed {
+    /*
+     * Chosen against the *content* width, not the viewport: with the sidebar
+     * and the page padding, a 900px window leaves about 630px here.  Anything
+     * larger and the table scrolls sideways on a laptop, which is the width
+     * this is most often read at.  Below 720px it stops being a table -- see
+     * `table.stack`.
+     */
+    min-width: 620px;
+    table-layout: fixed;
+}
+
+th {
+    padding: 9px 12px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-muted);
+    text-align: left;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    white-space: nowrap;
+    background: var(--surface-2);
+    border-bottom: 1px solid var(--border);
+}
+
+td {
+    padding: 9px 12px;
+    vertical-align: middle;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+}
+
+/* A cell whose own text sits over a bar showing its share of the total. */
+td.ranked {
+    position: relative;
+    max-width: 0;
+    overflow: hidden;
+}
+
+td.ranked .bar {
+    position: absolute;
+    top: 4px;
+    bottom: 4px;
+    left: 0;
+    border-radius: 4px;
+}
+
+td.ranked .bar.green {
+    background: var(--accent-soft);
+}
+
+td.ranked .bar.red {
+    background: var(--danger-soft);
+}
+
+td.ranked .name {
+    position: relative;
+    display: block;
+}
+
+/*
+ * The link takes the row's own colour rather than the accent: half these rows
+ * sit on a red bar, and a green name on a red ground reads as a mistake.
+ */
+td.ranked a {
+    color: var(--text);
+}
+
+td.ranked a:hover {
+    color: var(--accent);
+}
+
+tr:last-child td {
+    border-bottom: none;
+}
+
+tbody tr:hover td {
+    background: var(--surface-2);
+}
+
+td.num,
+th.num {
+    width: 1%;
+    text-align: right;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+}
+
+td.actions {
+    width: 1%;
+    white-space: nowrap;
+}
+
+.empty {
+    padding: 28px;
+    color: var(--text-muted);
+    text-align: center;
+}
+
+/* ---------- Badges and pills ---------- */
+
+.badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 7px;
+    font-size: 12px;
+    font-weight: 550;
+    white-space: nowrap;
+    border-radius: 999px;
+}
+
+.badge.green {
+    color: var(--accent);
+    background: var(--accent-soft);
+}
+
+.badge.red {
+    color: var(--danger);
+    background: var(--danger-soft);
+}
+
+.badge.amber {
+    color: var(--warn);
+    background: var(--warn-soft);
+}
+
+.badge.blue {
+    color: var(--info);
+    background: var(--info-soft);
+}
+
+.badge.grey {
+    color: var(--text-muted);
+    background: var(--surface-3);
+}
+
+.linklike {
+    max-width: 100%;
+    padding: 0;
+    font: inherit;
+    color: var(--accent);
+    text-align: left;
+    cursor: pointer;
+    background: none;
+    border: none;
+}
+
+.linklike:hover {
+    text-decoration: underline;
+}
+
+.mono {
+    font-family: var(--mono);
+    font-size: 12.5px;
+}
+
+.muted {
+    color: var(--text-muted);
+}
+
+/* Lets a table cell ellipsise: without a width it grows instead. */
+td.clip {
+    max-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.truncate {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ---------- Notices ---------- */
+
+.notice {
+    display: flex;
+    gap: 9px;
+    padding: 10px 13px;
+    margin-bottom: 14px;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+}
+
+.notice.error {
+    color: var(--danger);
+    background: var(--danger-soft);
+    border-color: color-mix(in srgb, var(--danger) 25%, transparent);
+}
+
+.notice.warn {
+    color: var(--warn);
+    background: var(--warn-soft);
+    border-color: color-mix(in srgb, var(--warn) 25%, transparent);
+}
+
+.notice.info {
+    color: var(--info);
+    background: var(--info-soft);
+    border-color: color-mix(in srgb, var(--info) 25%, transparent);
+}
+
+.notice.ok {
+    color: var(--accent);
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 25%, transparent);
+}
+
+/* ---------- Toasts ---------- */
+
+.toasts {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    z-index: 100;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-width: min(420px, calc(100vw - 32px));
+}
+
+.toast {
+    display: flex;
+    gap: 10px;
+    align-items: flex-start;
+    padding: 10px 13px;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-left: 3px solid var(--accent);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-lg);
+    animation: toast-in 0.16s ease-out;
+}
+
+.toast.error {
+    border-left-color: var(--danger);
+}
+
+.toast button {
+    padding: 0;
+    margin-left: auto;
+    font: inherit;
+    color: var(--text-faint);
+    cursor: pointer;
+    background: none;
+    border: none;
+}
+
+@keyframes toast-in {
+    from {
+        opacity: 0;
+        transform: translateY(6px);
+    }
+}
+
+/* ---------- Modal ---------- */
+
+.modal-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 90;
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    padding: 5vh 16px;
+    background: rgb(10 15 20 / 45%);
+    animation: fade 0.12s ease-out;
+}
+
+.modal {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-width: 560px;
+    /* Leaves the backdrop's own padding above and below. */
+    max-height: 90vh;
+    background: var(--surface);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+}
+
+.modal.wide {
+    max-width: 860px;
+}
+
+.modal-head {
+    display: flex;
+    flex: none;
+    gap: 10px;
+    align-items: center;
+    padding: 14px 18px;
+    border-bottom: 1px solid var(--border);
+}
+
+.modal-head h2 {
+    flex: 1;
+}
+
+/*
+ * The body scrolls, not the page behind it: the catalogue picker is four
+ * thousand pixels tall, and a dialog whose buttons are off the bottom of a
+ * scrolled backdrop is a dialog you cannot answer.
+ */
+.modal-body {
+    flex: 1;
+    min-height: 0;
+    padding: 18px;
+    overflow-y: auto;
+    overscroll-behavior: contain;
+}
+
+.modal-foot {
+    display: flex;
+    flex: none;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    justify-content: flex-end;
+    padding: 14px 18px;
+    border-top: 1px solid var(--border);
+}
+
+@keyframes fade {
+    from {
+        opacity: 0;
+    }
+}
+
+/* ---------- Menus ---------- */
+
+.menu {
+    position: relative;
+}
+
+.menu-panel {
+    position: absolute;
+    right: 0;
+    z-index: 40;
+    min-width: 190px;
+    max-height: min(60vh, 480px);
+    padding: 5px;
+    margin-top: 6px;
+    overflow-y: auto;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    box-shadow: var(--shadow-lg);
+}
+
+.menu-item {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    width: 100%;
+    padding: 6px 9px;
+    font: inherit;
+    color: var(--text);
+    text-align: left;
+    cursor: pointer;
+    background: none;
+    border: none;
+    border-radius: var(--radius-sm);
+}
+
+.menu-item:hover {
+    text-decoration: none;
+    background: var(--surface-2);
+}
+
+.menu-item.active {
+    color: var(--accent);
+    background: var(--accent-soft);
+}
+
+/* Says what the items under it do, where the items alone would not. */
+.menu-title {
+    padding: 4px 9px 6px;
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--text-faint);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.menu-sep {
+    height: 1px;
+    margin: 5px 0;
+    background: var(--border);
+}
+
+/* ---------- Catalogue tags ---------- */
+
+.tag-filter {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    align-items: center;
+    padding-bottom: 6px;
+}
+
+.tag-filter.countries {
+    padding-bottom: 14px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid var(--border);
+}
+
+/*
+ * Tone and selection are separate: the colour says what a tag means and the
+ * ring says whether it is filtering.  Both ride on one `--tone` pair, so a
+ * selected red tag stays red instead of turning into the accent.
+ */
+.tag {
+    --tone: var(--text-muted);
+    --tone-bg: var(--surface-3);
+
+    padding: 2px 9px;
+    font: inherit;
+    font-size: 12px;
+    color: var(--tone);
+    cursor: pointer;
+    background: var(--tone-bg);
+    border: 1px solid transparent;
+    border-radius: 999px;
+}
+
+.tag.tone-green {
+    --tone: var(--accent);
+    --tone-bg: var(--accent-soft);
+}
+
+.tag.tone-red {
+    --tone: var(--danger);
+    --tone-bg: var(--danger-soft);
+}
+
+.tag.tone-amber {
+    --tone: var(--warn);
+    --tone-bg: var(--warn-soft);
+}
+
+.tag.tone-blue {
+    --tone: var(--info);
+    --tone-bg: var(--info-soft);
+}
+
+.tag:hover {
+    border-color: color-mix(in srgb, var(--tone) 40%, transparent);
+}
+
+.tag.on {
+    font-weight: 600;
+    box-shadow: inset 0 0 0 1.5px var(--tone);
+}
+
+/* The same pill, describing a row rather than filtering by one. */
+.tag.static {
+    cursor: default;
+    font-size: 11.5px;
+    padding: 1px 7px;
+}
+
+.catalogue-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    align-items: center;
+    margin: 5px 0 3px;
+    font-size: 12px;
+}
+
+/* A catalogue row's title line: the name, its homepage, and its status. */
+.catalogue-name {
+    display: flex;
+    gap: 6px;
+    align-items: center;
+}
+
+.catalogue-name a {
+    display: inline-flex;
+    color: var(--text-faint);
+}
+
+.catalogue-name a:hover {
+    color: var(--accent);
+}
+
+/* The address reads as the muted hint it is until it is pointed at. */
+.check a.hint {
+    display: block;
+    color: var(--text-muted);
+}
+
+.check a.hint:hover {
+    color: var(--accent);
+}
+
+/* ---------- Blocked services ---------- */
+
+.service-group + .service-group {
+    margin-top: 22px;
+}
+
+.service-group-head {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 10px;
+    align-items: baseline;
+    padding-bottom: 8px;
+    margin-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+}
+
+.service-group-head .spacer {
+    flex: 1;
+}
+
+.service-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(212px, 1fr));
+    gap: 8px;
+}
+
+.service {
+    display: flex;
+    gap: 9px;
+    align-items: center;
+    padding: 8px 10px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    transition: border-color 0.12s, background 0.12s;
+}
+
+.service .spacer {
+    flex: 1;
+    min-width: 6px;
+}
+
+.service.on {
+    background: var(--accent-soft);
+    border-color: color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+/* A blocked service's icon, painted from its shape.  See Services.tsx. */
+.service-icon {
+    flex: none;
+    width: 18px;
+    height: 18px;
+    background: currentcolor;
+    mask: var(--icon) center / contain no-repeat;
+    -webkit-mask: var(--icon) center / contain no-repeat;
+}
+
+/* ---------- Charts ---------- */
+
+.chart {
+    width: 100%;
+    height: 280px;
+}
+
+.chart.short {
+    height: 210px;
+}
+
+/* ---------- Standalone pages (login, setup) ---------- */
+
+.auth {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    padding: 24px;
+}
+
+.auth-card {
+    width: 100%;
+    max-width: 380px;
+    padding: 28px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow);
+}
+
+.auth-card .brand {
+    justify-content: center;
+    padding: 0 0 6px;
+    font-size: 20px;
+}
+
+.auth-card .sub {
+    margin: 0 0 20px;
+    color: var(--text-muted);
+    text-align: center;
+}
+
+.wizard {
+    max-width: 640px;
+    margin: 0 auto;
+    padding: 32px 20px;
+}
+
+.steps {
+    display: flex;
+    gap: 6px;
+    margin-bottom: 20px;
+}
+
+.steps div {
+    flex: 1;
+    height: 3px;
+    background: var(--border);
+    border-radius: 999px;
+}
+
+.steps div.done {
+    background: var(--accent);
+}
+
+.footer {
+    max-width: 1180px;
+    padding: 20px 0 8px;
+    margin-top: 8px;
+    font-size: 12.5px;
+    color: var(--text-faint);
+    border-top: 1px solid var(--border);
+}
+
+.footer a {
+    color: var(--text-muted);
+}
+
+/* ---------- Utilities ---------- */
+
+.stack {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+}
+
+.row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+}
+
+.spinner {
+    display: inline-block;
+    width: 16px;
+    height: 16px;
+    border: 2px solid var(--border-strong);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+}
+
+.sidebar-backdrop {
+    display: none;
+}
+
+.loading-page {
+    display: flex;
+    gap: 10px;
+    align-items: center;
+    justify-content: center;
+    min-height: 60vh;
+    color: var(--text-muted);
+}
+
+@keyframes spin {
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+/* ---------- Responsive ---------- */
+
+/* Labels that only earn their width on a wide screen. */
+@media (max-width: 720px) {
+    .wide-only {
+        display: none;
+    }
+}
+
+/*
+ * The generic narrow-screen table: each row becomes a block, and each cell a
+ * labelled line.  The label comes from the cell's own `data-label`, because a
+ * value with its header three screens to the right says nothing.
+ *
+ * Cells with no `data-label` -- the actions column -- keep their own layout.
+ */
+@media (max-width: 1000px) {
+    /*
+     * The table itself has to stop being a table, or its box keeps sizing
+     * itself from the widest cell and the row scrolls sideways however the
+     * cells inside it are laid out.
+     */
+    table.rows,
+    table.rows tbody {
+        display: block;
+        width: 100%;
+        min-width: 0;
+    }
+
+    table.rows thead {
+        display: none;
+    }
+
+    table.rows tbody tr {
+        display: block;
+        padding: 10px 12px;
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
+    }
+
+    table.rows tbody td {
+        display: flex;
+        gap: 10px;
+        align-items: baseline;
+        width: auto;
+        padding: 3px 0;
+        text-align: left;
+        background: none;
+        border: none;
+    }
+
+    /* Only a labelled cell gets a label column; the actions cell does not. */
+    table.rows tbody td[data-label]::before {
+        flex: none;
+        width: 88px;
+        font-size: 12px;
+        color: var(--text-faint);
+        content: attr(data-label);
+    }
+
+    /*
+     * A flex item will not shrink below its content unless told to, which is
+     * how a long list URL pushed the whole row off the screen.
+     */
+    table.rows tbody td > * {
+        min-width: 0;
+        max-width: 100%;
+    }
+
+    table.rows tbody td .truncate {
+        display: block;
+    }
+
+    /* A label with nothing beside it is noise; a runtime client often has
+       no name and no source. */
+    table.rows tbody td:empty {
+        display: none;
+    }
+
+    table.rows tbody td.actions {
+        justify-content: flex-end;
+        padding-top: 8px;
+    }
+}
+
+/*
+ * A five-column table does not fit a narrow window, and sideways scrolling to
+ * read a log is miserable.  Each row becomes a small card instead, with the
+ * pieces where a reader looks for them: the name first, the action beside it,
+ * the verdict under it, and the client and the time along the bottom.
+ *
+ * The breakpoint is on the window but the constraint is the content column,
+ * which the sidebar takes 232px out of whenever it is not a drawer -- so it
+ * has to fire well above the width the table itself needs.
+ */
+@media (max-width: 1000px) {
+    table.stack {
+        min-width: 0;
+        table-layout: auto;
+    }
+
+    table.stack thead {
+        display: none;
+    }
+
+    table.stack tbody tr {
+        display: grid;
+        grid-template-areas:
+            "request action"
+            "verdict action"
+            "client  time";
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 2px 10px;
+        align-items: center;
+        padding: 10px 12px;
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
+    }
+
+    table.stack tbody td {
+        min-width: 0;
+        padding: 0;
+        background: none;
+        border: none;
+    }
+
+    table.stack tbody td:nth-child(1) {
+        grid-area: time;
+        font-size: 12px;
+        color: var(--text-faint);
+        text-align: right;
+    }
+
+    table.stack tbody td:nth-child(2) {
+        grid-area: request;
+    }
+
+    table.stack tbody td:nth-child(3) {
+        grid-area: verdict;
+    }
+
+    table.stack tbody td:nth-child(4) {
+        grid-area: client;
+    }
+
+    table.stack tbody td:nth-child(5) {
+        grid-area: action;
+        width: auto;
+    }
+}
+
+@media (max-width: 1100px) {
+    .grid-4 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .grid-3 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+}
+
+@media (max-width: 860px) {
+    .shell {
+        grid-template-columns: 1fr;
+    }
+
+    .sidebar {
+        position: fixed;
+        top: 0;
+        bottom: 0;
+        left: 0;
+        z-index: 60;
+        width: var(--sidebar-w);
+        transform: translateX(-100%);
+        transition: transform 0.18s ease-out;
+    }
+
+    .sidebar.open {
+        transform: none;
+        box-shadow: var(--shadow-lg);
+    }
+
+    .burger {
+        display: inline-flex;
+    }
+
+    .sidebar-backdrop {
+        display: block;
+        position: fixed;
+        inset: 0;
+        z-index: 50;
+        background: rgb(10 15 20 / 40%);
+        animation: fade 0.12s ease-out;
+    }
+
+    .grid-2,
+    .grid-3,
+    .grid-4 {
+        grid-template-columns: minmax(0, 1fr);
+    }
+
+    .page {
+        padding: 14px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    * {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+    }
+}

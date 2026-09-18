@@ -5,7 +5,7 @@ Work status for Sift, against AdGuard Home **v0.107.79**.
 Legend: **[x]** done and verified · **[~]** partial, see the note · **[ ]** not started
 
 Verification claims below are reproducible with `scripts/verify.sh` and
-`cargo test --workspace` (706 tests).
+`cargo test --workspace` (707 tests).
 
 ---
 
@@ -19,8 +19,8 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 | Upstreams | plain UDP/TCP, DoT, DoH, DoH/3, DoQ done · DNSCrypt **out of scope** |
 | Query log | done, byte-identical |
 | Statistics | done, `stats.db` interoperable both ways |
-| HTTP API | all 81 paths routed · 73 implemented, 8 refuse by design |
-| Web interface | forked into `web/client`, built to `web/build`, embedded |
+| HTTP API | all 81 upstream paths routed · 73 implemented, 8 refuse by design · one path added |
+| Web interface | rewritten in `web/client`, built to `web/build`, embedded |
 | Docker | done, same runtime contract |
 | DHCP | **out of scope** — API reports it off and refuses changes |
 | Encrypted inbound listeners | DoT, DoH, HTTP/3 and DoQ done · DNSCrypt **out of scope** |
@@ -215,6 +215,36 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 
 ### HTTP API and interface
 - [x] All 81 upstream paths routed
+- [x] **One path added**: `GET /control/filtering/catalogue`, the 64 vetted
+      blocklists AdGuard bundles in its client. Serving it rather than
+      bundling it keeps `web/client` free of AdGuard's material — see
+      *Deliberate deviations*
+- [x] **Protection can be paused for a set time**, and the pause actually
+      ends: 30 seconds, a minute, ten minutes, an hour, or until tomorrow.
+      Stored as a deadline in `filtering.protection_disabled_until`, so it
+      survives a restart; a one-second task turns protection back on when it
+      passes
+- [x] **Every catalogue list validated**: all 64 downloaded and counted, all
+      answered 200 with rules in them, from 15 rules (Dandelion Sprout's Game
+      Console list) to 2,530,911 (HaGeZi's Threat Intelligence Feeds, 49 MB).
+      `scripts/import-blocklists.py --measure` is the check, and it refuses to
+      write the catalogue when one fails
+- [x] **Tagged and annotated**: a tag set and a written note per list, both
+      this project's, so the picker answers "which one do I want?" rather than
+      listing 65 names. The size tag is derived from the measured count, so it
+      cannot drift; the interface filters by tag
+- [x] **The nine tags that carry a decision are coloured** — `starter` green,
+      `malware`/`phishing`/`scam`/`crypto-mining` red, `strict`/`huge` amber,
+      `security`/`bypass` blue — and sort ahead of the grey ones. Colour is
+      meaning and the ring is selection, on one `--tone` pair, so a selected
+      red chip stays red rather than becoming the accent
+- [x] **Country tags**, drawn as flags: 15 countries across 19 regional lists,
+      in their own row of chips. The flag is derived from the ISO code rather
+      than shipped — the two regional-indicator symbols that spell `vn` *are*
+      the Vietnamese flag — so no icon set is carried
+- [x] **hostsVN added**, the Vietnamese list upstream's registry does not
+      carry. `_add` in the notes file is the mechanism, and such a list is
+      validated and measured on the same terms as an imported one
 - [x] Sessions: `agh_session` cookie, HTTP Basic
 - [x] Login rate limiting, on the form *and* on the Basic credentials
       every endpoint accepts: `auth_attempts` failures from an address
@@ -225,9 +255,13 @@ Verification claims below are reproducible with `scripts/verify.sh` and
       dashboard it cannot load
 - [x] Setup wizard reachable before a user exists
 - [x] **Verified**: response shapes match Go for all 25 endpoints the UI loads
-- [x] Web interface forked into `web/client`, built to `web/build`, embedded
-      brotli-compressed, served with content negotiation, immutable caching
-      for hashed assets and `304` revalidation for the rest
+- [x] Web interface written in `web/client` — React 19, TypeScript,
+      react-router 7 and ECharts 6, built by Vite; four runtime dependencies,
+      no store and no CSS framework. Twelve routes, the login form and the
+      setup wizard. See *The web interface, rewritten*
+- [x] Built to `web/build` and embedded brotli-compressed, served with content
+      negotiation, immutable caching for hashed assets and `304` revalidation
+      for the rest
 - [x] Version check: `/control/version.json` fetches this project's latest
       GitHub release, caches it for eight hours, honours `--no-check-update`,
       and reports `can_autoupdate: false`
@@ -592,7 +626,7 @@ signed out. Two defects met there.
   upstream wraps its whole mux and redirects `/` and `/index.html` to
   `login.html` for a signed-out visitor, which is *the* route to the login
   form. The shipped interface sends itself there only when an API call answers
-  **403** (`client/src/api/Api.ts`), and the gate answers 401 — so a dashboard
+  **403**, and the gate answers 401 — so a dashboard
   handed to a signed-out browser is a dashboard that can never load. `serve_ui`
   now applies upstream's `handlePublicAccess`: `/assets/*`, `/login.*` and
   `/forgot_password.*` are served, `/` and `/index.html` redirect to the form,
@@ -1106,54 +1140,138 @@ older hours keep the keys they were written with.
 
 ---
 
-## The web interface, forked
+## The web interface, rewritten
 
-The interface was AdGuard's compiled output, embedded. It is now **this
-project's fork of their sources**, at `web/client`, built by
-`scripts/build-frontend.sh` into `web/build`. The reason to fork rather than
-keep vendoring the build: two of the three exclusions are visible in the UI as
-settings pages and upstream examples for things that do not exist here, and
-there is no way to take them out of a compiled bundle.
+The interface was AdGuard's compiled output, then a fork of their sources, and
+is now **this project's own**, at `web/client`, built by
+`scripts/build-frontend.sh` into `web/build`.
 
-`web/client` began as a verbatim copy of v0.107.79's `client/`, so
-`diff -ru upstream/client web/client` is the complete list of modifications.
-`NOTICE.md` records the copyright position; the changes themselves:
+Why not stay a fork: it carried a decade of accumulated shape — Redux with
+thunks and `redux-actions`, `react-table` 6, `react-select`, two className
+libraries, `date-fns` 1, a vendored Bootstrap 4 — about forty runtime
+dependencies to render a dozen pages, none of which the exclusions made
+smaller. Rewriting against the same API is a smaller surface to keep true than
+a fork is to keep merged.
 
-- **DHCP is gone.** `components/Settings/Dhcp/`, `containers/Dhcp.ts`,
-  `reducers/dhcp.ts`, the route, the menu entry, the nine API methods, the
-  twenty-odd actions, the `DhcpData`/`DhcpInterface` state, the placeholder
-  helpers, the e2e spec, and 46 keys × 36 locale files. What is left that still
-  mentions DHCP is about the *router's* DHCP, which is a real thing a user
-  configures elsewhere.
-- **DNSCrypt is gone.** The `sdns://` line in the upstream examples, the
-  `dnscrypt` transport label in the query log, `port_dnscrypt` and
-  `dnscrypt_config_file` in the TLS status type, and three setup-guide entries
-  (DNSCloak and its DNS stamp, dnscrypt-proxy, dnscrypt.info's implementation
-  list). Five locale keys × 36 files.
-- **Rebranded to Sift.** AdGuard's shield is gone from `ui/svg/logo.tsx`,
-  replaced by a funnel of this project's own, and the lettering is a `<text>`
-  in the system UI stack rather than traced outlines. The mark and the wordmark
-  are separate elements so the dark theme can flip the lettering without
-  touching the gold; the three `filter: invert(1)` rules that used to flip the
-  whole SVG are gone, because inverting gold gives blue. The icons are
-  rasterised from the same path, filled rather than stroked, because a
-  2.8-unit stroke disappears at 16px. See [Naming](#naming) below.
-- **Links.** Seven `link.adtidy.org` redirectors resolved to their real
-  destinations (recorded in the commit); repository and issue links pointed at
-  this project; six AdGuard Home wiki links pointed at `docs/`, written for
-  this purpose.
-- **A Clear cache button** on the dashboard beside Refresh statistics, behind
-  the same `confirm_dns_cache_clear` the DNS settings page uses.
-- **`.twosky.json` dropped.** `helpers/twosky.ts` imported
-  `../../../.twosky.json` — AdGuard's translation-service configuration, which
-  lives *above* `client/` and so was not part of the fork. Replaced by
-  `helpers/languages.ts`, carrying the same 36-language list.
+### What it is now
+
+React 19, TypeScript 5.9, react-router 7 and ECharts 6, built by Vite 7. Those
+four are the whole runtime dependency list: no store, no component library, no
+CSS framework, no test runner. 1.0 MB embedded, against the fork's 1.7 MB.
+
+| | Before | After |
+|---|---|---|
+| Runtime dependencies | 33 | 4 |
+| `web/build`, brotli | 1.7 MB | 0.4 MB |
+| Files embedded | 46 | 11 |
+| Dashboard's own bundle | 721 KB js + 43 KB css | 234 KB + 3 KB |
+| Login page's bundle | 439 KB | 59 KB |
+| Languages | 36 | 1 |
+| Charts | Recharts | ECharts |
+| State | Redux, thunks, `redux-actions` | `useAsync`, one context |
+| Build | webpack | Vite |
+
+The state question is the one worth stating plainly. Every page here loads what
+it needs, edits a local draft and saves it; nothing is cached across a route
+change and nothing is synchronised. That is right for this application because
+every page reads a different endpoint and none of them shares state with
+another — the three things that *are* shared (server status, profile,
+protection) live in `src/app/context.tsx`, and they are three.
+
+### What carried over
+
+- **The routes**, so a bookmark still lands on the same page — `/logs`,
+  `/settings`, `/dns`, `/filters`, `/blocked_services` and the rest. React
+  Router 7 writes `#/logs` where the old interface wrote `#logs`, so
+  `main.tsx` rewrites the bare form once at boot.
+- **Hash routing itself**, which is not cosmetic: signed out, the server
+  redirects `/` to the login form and answers every other path 401, so a
+  bookmarked `/settings` under a browser router would be a blank 401 rather
+  than a sign-in prompt.
+- **The three documents** — `index.html`, `login.html`, `install.html` — and
+  the asset names the server's gate matches on.
+
+### Three builds, not one
+
+`build.mjs` runs Vite once per document. A single multi-entry build would hoist
+React into a shared chunk under a third name, and `is_public_page` serves an
+asset without a session only when its basename starts with `login.` — so the
+login form would ask for a script that answers 401 to exactly the visitor who
+needs it. The cost is React twice more on disk, ~75 KB brotli per page, which
+is a fair price for a gate that cannot be got wrong by a bundler setting.
+
+### Kept honest
+
+`.github/workflows/ci.yml` grew a **Web interface** job: `npm ci`,
+`npm run typecheck`, then `scripts/build-frontend.sh` and a check that the
+rebuild produced no file name the repository does not already have. Names,
+not bytes — each is a hash of the chunk's own contents, so a source change
+nobody built shows up as a name that was never committed, while brotli output
+that differs by a byte between zlib versions does not fail the build.
+
+### Found building it
+
+- **The profile's theme never applied on a fresh browser.** The theme was
+  restored from `localStorage` at boot and written back when changed, but
+  nothing applied the theme the *profile* reported — so a browser that had
+  never been to that origin ignored the account's choice. Caught by loading the
+  production build on `:3000` after setting light mode on `:5173`: different
+  origin, empty storage, dark page.
+- **`grid.containLabel` is deprecated in ECharts 6** and logs on every chart;
+  `outerBoundsMode: 'same'` with `outerBoundsContain: 'axisLabel'` is the
+  replacement.
+- **A `.field > label` rule silently beat `.check`.** Higher specificity, so a
+  radio row inside a field turned back into a block and the control sat flush
+  against its text. `:not(.check)` on the rule, and a comment saying why.
+- **The service icons are `fill="currentColor"`.** Inside an `<img>` that
+  resolves against the image's own root and comes out black — invisible on the
+  dark theme. Drawn as a CSS mask instead, which paints the shape in the text
+  colour and runs nothing from the file.
+- **`upstream_mode` is `""`, not `"load_balance"`.** That is what the config
+  has always written and what the API echoes; `POST /control/dns_config` takes
+  either. A radio group matching on the name alone shows nothing selected.
+- **`input[type='text']` does not match `<input>`.** An input with no `type`
+  attribute *is* a text input, and the attribute selector does not match it —
+  so the server name, the blocking addresses, the filter URL and half a dozen
+  other fields rendered a third of the width of the ports below them. The
+  stylesheet now selects by what a control is not.
+- **A five-column table is unreadable on a phone**, and scrolling one sideways
+  to read a log is worse. `table.stack` lays each query log row out as a card:
+  name and action first, verdict under it, client and time along the bottom.
+  `table.rows` does the general case for the other tables, each cell naming
+  itself from its `data-label`.
+- **The breakpoint for that is 1000px, not a phone width.** The constraint is
+  the content column, and the sidebar takes 232px out of it whenever it is not
+  a drawer — so a table needing 620px was already scrolling sideways in a
+  900px window. Measured rather than guessed: `scrollWidth` against
+  `clientWidth` on every `.table-wrap`, at 375, 406, 458, 914 and 1051px.
+- **A stacked table has to stop being a table.** With `display: block` only on
+  the rows, the `<table>` box still sized itself from the widest cell and the
+  row scrolled sideways anyway; the element and its `tbody` both need it.
+- **The blocked-services page groups by the catalogue's own `group_id`**, with
+  a Block all and an Unblock all per group and a switch per service, rather
+  than one flat grid of 139 checkboxes. The catalogue names its twelve groups
+  only by identifier — upstream keeps the names in its translation files — so
+  the headings were written here.
+- **A card reading zero and a line flat along the axis were taking the room the
+  numbers that moved needed.** The dashboard now draws a tile and a series only
+  for a category that has counted something; Queries always stays, so the page
+  is never empty, and a period with no queries at all says so instead of
+  drawing a flat chart.
+- **A dialog has to fit the window.** The catalogue picker is 4,300px of
+  content; with the backdrop scrolling rather than the body, its buttons were
+  off the bottom of the screen. The modal is now capped at 90vh with the head
+  and foot pinned and the body scrolling.
+- **The upstream bar chart was the wrong shape** for a half-width card — its
+  axis labels collided, and each bar needed its value spelled out beside it
+  anyway. It is a table now, which also let the bar and pie modules go: the
+  dashboard draws one line chart and nothing else.
 
 ### Assets: brotli, and cached properly
 
 `sift-api/src/ui.rs` used to store gzip and serve it to whoever accepted gzip.
-It now stores **brotli** — 9.1 MB of assets to 1.7 MB, against gzip's 2.5 MB —
-compressed by `scripts/brotli.mjs` at quality 11, run from the build script.
+It now stores **brotli** — 1.3 MB of assets to 0.4 MB — compressed by
+`scripts/brotli.mjs` at quality 11, run from the build script.
 
 The catch is that browsers advertise `br` only over a secure origin. Over plain
 HTTP on a LAN address, a browser sends `gzip, deflate` and is served the
@@ -1161,7 +1279,7 @@ HTTP on a LAN address, a browser sends `gzip, deflate` and is served the
 per request. Two things make that affordable, and they are the rest of the
 change:
 
-- a name carrying a content hash — webpack's `main.<20 hex>.js` —
+- a name carrying a content hash — anything the build wrote under `static/` —
   is served `Cache-Control: public, max-age=31536000, immutable`, so it is
   fetched once per build and never asked about again;
 - everything else is `no-cache` with an `ETag`, and `If-None-Match` is answered
@@ -1182,7 +1300,57 @@ it in the handler does not survive serialisation. RFC 9110 makes the header
 optional there and a truthful value would mean decompressing the very body the
 304 exists to avoid, so it stays.
 
-## Found reviewing the fork, and fixed
+## Found improving the protection control, and fixed
+
+### A timed pause never ended
+
+The interface offered "disable for 30 seconds" and four more like it, and
+`POST /control/protection` **read the duration and threw it away**:
+
+```rust
+s.config.write().filtering.protection_enabled = req.enabled;
+```
+
+`GET /control/status` then reported `protection_disabled_duration: 0`
+unconditionally. So every timed option turned protection off *permanently*,
+and the interface had no way to know: it drew no countdown because the server
+always said there was none. `filtering.protection_disabled_until` existed in
+the config model, was written by the schema-34 migration, and nothing ever set
+or read it.
+
+This is the shape this tree warns about everywhere else — a setting the
+interface accepts and the server discards — and it is worse than most, because
+the thing silently left off is the filtering.
+
+What it took:
+
+- **A deadline, not a countdown.** `protection_disabled_until` holds the
+  moment protection comes back, so a pause means the same thing across a
+  restart. Checked: a 20-second pause restarted at 2 seconds resumed with 17.7
+  left, rather than starting over.
+- **`AppState::expire_protection_pause`**, which re-enables and saves — and
+  saving already pushes settings to the resolver, so nothing else was needed
+  to make it take effect.
+- **Its own one-second task**, not a line in `maintenance`. That ticks once a
+  minute, and the shortest pause offered is thirty seconds: a pause that ends
+  up to a minute late is a pause that lied. Its first tick fires immediately,
+  which is also what catches a pause that elapsed while the process was down.
+- **`pause_left` and `pause_deadline` are pure**, and tested: that a pause
+  counts down from its deadline, that an elapsed or unparseable one reads as
+  zero rather than negative, that turning protection *on* clears the deadline
+  — a leftover one would later turn protection on by itself — and that a
+  deadline read back later resumes instead of restarting.
+
+### The menu did not say what it did
+
+The durations sat under a bare chevron: "For an hour" of what? The menu now
+carries a heading, `Turn protection off`, and ends with `Until I turn it back
+on` for the indefinite case, which the switch does but nothing named. Added
+`Until tomorrow` — the length of which is computed at the moment it is
+clicked, since it depends on when that is — and the badge now reads
+`off for 0:59` rather than a bare countdown.
+
+## Found while first forking the interface, and fixed
 
 Three things the first pass left behind, and one it introduced.
 
@@ -1225,11 +1393,12 @@ with a ClientID, went to `1.1.1.1` and `9.9.9.9` and took a cache entry each.
 ### The caching rule was a guess
 
 `is_content_addressed` called any dotted segment of 16-plus hex characters a
-content hash. Right for webpack's `[chunkhash]` today, and quietly wrong — for
+content hash. Right for the bundler's hash of the day, and quietly wrong — for
 a year, per client — the first time someone shortened the hash or added an
-asset whose name read like a digest.
+asset whose name read like a digest. (Vite's is base64url, and would never have
+matched at all.)
 
-webpack now writes its hashed output under `static/` and nothing else there, so
+The build writes its hashed output under `static/` and nothing else there, so
 the predicate is `starts_with("static/")`: a fact about the build rather than a
 guess about the name. `everything_the_build_emitted_is_classified_the_way_it_was_built`
 walks the real embedded assets and fails if that stops being true.
@@ -1242,6 +1411,10 @@ matching the name, and two tests check them against the assets the build
 actually emitted rather than against names typed into a test.
 
 ### The translations named the wrong product
+
+*Kept for the record: the catalogues this describes were removed when the
+interface went English only. See **The interface is English only** under
+Deliberate deviations.*
 
 All 35 non-English locales said "AdGuard Home" under a LITE logo. The reason to
 hesitate was that a machine substitution can break languages that inflect a
@@ -1337,6 +1510,37 @@ report `v0.107.79`.
 ## Deliberate deviations
 
 
+- **The interface is this project's own, not upstream's.** It reads the same
+  API and keeps the same routes, so a bookmark and a habit both survive; it
+  does not reproduce upstream's layout, and it does not carry their code. See
+  *The web interface, rewritten*.
+- **The blocklist picker says what each list is for, in our words.** Upstream
+  offers 64 names and a URL each. This build adds a tag set and a sentence or
+  two per list — what it blocks, who it suits, what it will break — written
+  here, plus a rule count measured by downloading every list. That last part
+  doubles as validation: `--measure` refuses to publish a catalogue in which
+  anything 404s or comes back empty, so a dead list is caught at import rather
+  than by the user who picked it.
+
+  The tags are a closed vocabulary of eighteen, and the importer rejects
+  anything outside it: a typo would otherwise become a filter chip that
+  matches nothing. Measured at the time of writing, `starter` selects exactly
+  five lists, which is the question most people arrive with.
+- **One API path is added, none changed.** `GET /control/filtering/catalogue`
+  serves the vetted-blocklist catalogue that AdGuard Home bundles in its own
+  client, so the "Choose blocklists" picker can offer 64 known lists without
+  `web/client` carrying anything of AdGuard's. Nothing upstream answers is
+  altered, and the picker degrades to the custom-address form if the path is
+  ever missing. `scripts/import-blocklists.py` regenerates the bundled blob
+  from upstream's generated `filters.ts`, byte for byte.
+- **The interface is English only.** Upstream ships 36 translations and the
+  first version of this rewrite kept their catalogues. They are gone, with
+  them: a translation is someone else's writing, and this interface's wording
+  is now its own — the catalogues could not be kept without keeping AdGuard's
+  sentences. Nothing else changed: `dns.language` in the config still
+  round-trips for a user who switches back to the Go build, and the API's
+  `/control/i18n/*` endpoints still answer. The interface simply no longer
+  offers a language menu, rather than offering one that does nothing.
 - **Upstream connections outlive the query.** dnsproxy pools DoT
   (`upstream/dot.go`), caches one `http.Client` for DoH and keeps a single
   QUIC connection for DoQ, so keeping connections is parity, not invention.

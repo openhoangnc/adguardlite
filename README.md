@@ -7,9 +7,9 @@
 [AdGuard Home](https://github.com/AdguardTeam/AdGuardHome), built as a drop-in
 replacement for the Go binary of release **v0.107.79**: the same config file,
 the same on-disk data, the same HTTP API, and the same Docker contract — in a
-smaller image, with less memory and more throughput. The web interface is a
-fork of AdGuard Home's own, with the features this build does not have taken
-out of it.
+smaller image, with less memory and more throughput. The web interface is this
+project's own — React, TypeScript and ECharts against the same control API,
+English only — with the features this build does not have left out.
 
 The DNS filtering path, the web interface, the storage formats, the encrypted
 listeners and the operational surface are done and verified against the Go
@@ -220,7 +220,7 @@ crates/sift-gob       Go `gob` for the statistics unit
 crates/sift-stats     statistics collection, aggregation and persistence
 crates/sift-api       the control API and the embedded web interface
 crates/sift   the binary
-web/client           the forked web interface, in TypeScript and React
+web/client           the web interface: React, TypeScript, ECharts, Vite
 web/build            the same, built and brotli-compressed for embedding
 docs                 the documentation the web interface links to
 ```
@@ -237,22 +237,23 @@ compiled at `opt-level = 2` even in debug builds so they are paid for once, and
 debug info is line tables only. An incremental rebuild after touching one file
 is about 8 seconds.
 
-The web interface's sources are forked into `web/client`, and the build is
-committed under `web/build`, brotli-compressed: ~9.1 MB of JavaScript and CSS
-become 1.7 MB in the binary. Rebuild it after any change under `web/client`:
+The web interface's sources live in `web/client` — React 19, react-router and
+ECharts, and nothing else at runtime — and the build is committed under
+`web/build`, brotli-compressed: ~1.3 MB of JavaScript and CSS become 0.4 MB in
+the binary. Rebuild it after any change under `web/client`:
 
 ```bash
-scripts/build-frontend.sh
+scripts/build-frontend.sh         # needs Node
 ```
 
 Hashed bundles go under `web/build/static/` and are served `immutable` for a
 year; everything else revalidates and is answered with a `304` when nothing
 moved.
 
-To take a newer upstream client release into the fork:
+To work on it against a running server, with hot reload:
 
 ```bash
-scripts/sync-frontend.sh v0.107.80
+cd web/client && npm install && npm run dev    # port 5173, API on :3000
 ```
 
 ## Running from source
