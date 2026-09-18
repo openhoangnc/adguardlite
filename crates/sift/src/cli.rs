@@ -10,7 +10,11 @@ use clap::Parser;
 
 /// Network-wide ads and trackers blocking DNS server.
 #[derive(Parser, Debug, Clone)]
-#[command(name = "AdGuardHome", version, disable_help_flag = false)]
+#[command(
+    name = "AdGuardHome",
+    disable_version_flag = true,
+    disable_help_flag = false
+)]
 pub struct Args {
     /// Path to the config file.
     #[arg(short = 'c', long = "config")]
@@ -74,21 +78,64 @@ pub struct Args {
     pub no_permcheck: bool,
 
     /// Service control action: status, install, uninstall, start, stop,
-    /// restart, reload.
+    /// restart, reload, or run (in the foreground, as the service does).
     #[arg(short = 's', long = "service")]
     pub service: Option<String>,
+
+    // Spelled out rather than left to clap, so the line printed says which
+    // build this is rather than just a number; see `version_line`.
+    /// Show the version and exit.
+    #[arg(long = "version")]
+    pub version: bool,
 
     /// Update the current binary and restart the service.
     #[arg(long = "update")]
     pub update: bool,
 }
 
+/// The line `--version` prints.
+///
+/// Upstream prints `AdGuard Home, version v0.107.79`.  The first word is
+/// deliberately not the same: the version is not part of the drop-in
+/// contract, and an installer that has to tell the two builds apart in a
+/// directory they both call `AdGuardHome` has only this line to go on.
+pub fn version_line() -> String {
+    format!(
+        "Sift, version {} (drop-in for AdGuard Home {})",
+        sift_core::VERSION,
+        sift_core::AGH_COMPAT_VERSION
+    )
+}
+
+/// The directory holding this executable, with symlinks resolved.
+fn exe_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+
+    // Upstream calls EvalSymlinks on the result; on Linux `current_exe` has
+    // already read it out of /proc/self/exe, so this only matters elsewhere.
+    let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+
+    exe.parent().map(PathBuf::from)
+}
+
 impl Args {
-    /// The working directory, defaulting to the current one.
+    /// The working directory, defaulting to the executable's own directory.
+    ///
+    /// Upstream's `initWorkingDir` uses the directory the binary sits in, not
+    /// the process's current one, and that is load-bearing for a drop-in: the
+    /// unit written by `-s install` passes no `-w`, and an init system runs a
+    /// service from a directory of its own — the installed unit on the machine
+    /// this was tested against sets `WorkingDirectory=/home/hoang`.  Taking
+    /// the current directory instead
+    /// would look for `AdGuardHome.yaml` where nobody put one and write a
+    /// fresh default beside it, which from the outside looks like an upgrade
+    /// that lost every setting.
     pub fn work_dir_or_default(&self) -> PathBuf {
-        self.work_dir
-            .clone()
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        if let Some(w) = &self.work_dir {
+            return w.clone();
+        }
+
+        exe_dir().unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
     }
 
     /// The config path, defaulting to `AdGuardHome.yaml` in the working
@@ -151,6 +198,28 @@ mod tests {
             a.config_or_default().to_str().unwrap(),
             "/srv/agh/AdGuardHome.yaml"
         );
+    }
+
+    #[test]
+    fn the_work_dir_defaults_to_the_binarys_own_directory() {
+        // Not the current directory: the unit `-s install` writes passes no
+        // -w, and an init system runs it from a directory of its own.
+        let a = Args::parse_from(["AdGuardHome"]);
+        let exe = std::env::current_exe().expect("a test binary has a path");
+        let exe = std::fs::canonicalize(&exe).unwrap_or(exe);
+
+        assert_eq!(a.work_dir_or_default(), exe.parent().unwrap());
+    }
+
+    #[test]
+    fn the_version_line_names_this_build_and_the_one_it_matches() {
+        // An installer looking at a binary called AdGuardHome has this line
+        // and nothing else to tell the two apart.
+        let line = version_line();
+
+        assert!(line.starts_with("Sift, version v"), "{line}");
+        assert!(line.contains(sift_core::AGH_COMPAT_VERSION), "{line}");
+        assert!(!line.starts_with("AdGuard Home"), "{line}");
     }
 
     #[test]

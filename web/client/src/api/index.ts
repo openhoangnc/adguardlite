@@ -40,6 +40,8 @@ export const getStatus = () => get<ServerStatus>('/status');
 export const getProfile = () => get<Profile>('/profile');
 export const updateProfile = (p: { language?: string; theme?: Theme }) => put<void>('/profile/update', p);
 export const getVersion = (recheck = false) => post<VersionInfo>('/version.json', { recheck_now: recheck });
+/** Installs the release the last check found, and restarts into it. */
+export const installUpdate = () => post<{ new_version: string }>('/update', {});
 export const login = (name: string, password: string) => post<void>('/login', { name, password });
 export const logout = () => get<void>('/logout');
 

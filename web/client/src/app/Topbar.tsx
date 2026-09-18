@@ -31,6 +31,32 @@ function untilTomorrow(): number {
     return midnight.getTime() - Date.now();
 }
 
+/**
+ * Whether one release is later than another.
+ *
+ * The announcement is the newest *published* release, which a build from
+ * `main` is ahead of, so comparing for inequality announces a downgrade as if
+ * it were an update. The server applies the same rule to `can_autoupdate`,
+ * and anything unreadable is not newer.
+ */
+function isNewer(candidate: string, running: string): boolean {
+    const parts = (v: string) => /^v?(\d+)\.(\d+)\.(\d+)/.exec(v.trim())?.slice(1, 4).map(Number);
+    const c = parts(candidate);
+    const r = parts(running);
+    if (!c || !r) {
+        return false;
+    }
+
+    for (const [i, n] of c.entries()) {
+        const other = r[i] ?? 0;
+        if (n !== other) {
+            return n > other;
+        }
+    }
+
+    return false;
+}
+
 const THEMES: { value: Theme; label: string }[] = [
     { value: 'auto', label: 'Match the system' },
     { value: 'light', label: 'Light' },
@@ -41,6 +67,7 @@ export default function Topbar({ onBurger }: { onBurger: () => void }) {
     const { status, profile, version, setProtection, setTheme } = useServer();
     const toast = useToast();
     const [left, setLeft] = useState(status.protection_disabled_duration);
+    const [installing, setInstalling] = useState(false);
 
     // The server reports how long protection stays off; the countdown here is
     // only the display of it, and is re-seeded every time the status reloads.
@@ -78,9 +105,55 @@ export default function Topbar({ onBurger }: { onBurger: () => void }) {
     };
 
     const newVersion =
-        version && !version.disabled && version.new_version && version.new_version !== status.version
+        version && !version.disabled && version.new_version && isNewer(version.new_version, status.version)
             ? version.new_version
             : undefined;
+
+    const install = async () => {
+        if (
+            !window.confirm(
+                `Install ${newVersion}? The server replaces its own binary and restarts. ` +
+                    'Your settings and data are untouched, and the version you are running now is kept.',
+            )
+        ) {
+            return;
+        }
+
+        setInstalling(true);
+        try {
+            await api.installUpdate();
+        } catch (e) {
+            setInstalling(false);
+            toast.fail(message(e));
+
+            return;
+        }
+
+        toast.ok(`Installing ${newVersion}; the server is restarting`);
+
+        // The server answers this request and then hands its process over to
+        // the new binary, so the page has to wait for a server that is not
+        // there yet rather than reload into a connection error.
+        const until = Date.now() + 120_000;
+        const wait = async (): Promise<void> => {
+            if (Date.now() > until) {
+                setInstalling(false);
+                toast.fail('The server has not come back; check its logs');
+
+                return;
+            }
+
+            await new Promise((r) => setTimeout(r, 2000));
+            try {
+                await api.getStatus();
+                window.location.reload();
+            } catch {
+                await wait();
+            }
+        };
+
+        void wait();
+    };
 
     return (
         <header className="topbar">
@@ -139,6 +212,15 @@ export default function Topbar({ onBurger }: { onBurger: () => void }) {
                     rel="noreferrer">
                     {newVersion} is available
                 </a>
+            )}
+
+            {/* Offered only where the server says it could actually do it: not
+                in a container, where the image is what gets updated, and not
+                where a restart could not bind the ports it has now. */}
+            {newVersion && version?.can_autoupdate && (
+                <button type="button" className="btn sm" onClick={() => void install()} disabled={installing}>
+                    {installing ? 'Installing…' : 'Install'}
+                </button>
             )}
 
             <Menu label="Theme" button={profile.theme === 'dark' ? <IconMoon /> : <IconSun />}>

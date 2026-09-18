@@ -868,6 +868,23 @@ mod tests {
     }
 
     #[test]
+    fn a_list_beginning_with_a_byte_order_mark_still_builds() {
+        // Two of one server's twenty-nine subscribed lists start with a UTF-8
+        // byte-order mark before their `[Adblock Plus 3.13]` header, and
+        // building the engine used to abort the process on the first of them.
+        let e = engine("\u{feff}[Adblock Plus 3.13]\n||ads.example.com^\n");
+
+        assert_eq!(
+            matches(&e, "ads.example.com").reason,
+            Reason::FilteredBlockList
+        );
+        assert_eq!(
+            matches(&e, "example.org").reason,
+            Reason::NotFilteredNotFound
+        );
+    }
+
+    #[test]
     fn blocks_via_the_domain_anchor_fast_path() {
         let e = engine("||ads.example.com^\n");
         assert_eq!(

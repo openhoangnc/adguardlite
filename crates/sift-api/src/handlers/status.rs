@@ -470,11 +470,31 @@ pub struct VersionReq {
     pub recheck_now: bool,
 }
 
+/// The highest port number that needs privileges to bind.
+const MAX_PRIVILEGED_PORT: u16 = 1024;
+
+/// Reports whether the running configuration binds a privileged port.
+///
+/// Upstream's `setAllowedToAutoUpdate` asks the same question, for the same
+/// reason: a process that cannot bind port 53 after a restart must not be
+/// offered a button that restarts it.
+pub fn needs_privileged_ports(cfg: &sift_config::Config) -> bool {
+    let low = |p: u16| p < MAX_PRIVILEGED_PORT;
+
+    low(cfg.dns.port)
+        || low(cfg.http.address.0.port())
+        || (cfg.tls.enabled
+            && (low(cfg.tls.port_https)
+                || low(cfg.tls.port_dns_over_tls)
+                || low(cfg.tls.port_dns_over_quic)))
+}
+
 /// `GET /control/version.json` and `POST /control/version.json`
 ///
-/// `can_autoupdate` is always false: this build cannot replace its own binary,
-/// so the interface must not offer the button.  See the updates section of
-/// TASK.md.
+/// `can_autoupdate` is answered by the binary, which is the only part that
+/// knows whether it can write over itself here: it is false inside a
+/// container, false when the executable's directory is read-only, and false
+/// when a restart could not bind the ports this configuration uses.
 pub async fn version(
     State(s): State<Shared>,
     body: Option<Json<VersionReq>>,
@@ -493,7 +513,7 @@ pub async fn version(
     }
 
     let fetched = s.version.fetch().await.ok().and_then(parse_version);
-    let Some(info) = fetched else {
+    let Some(mut info) = fetched else {
         // Upstream answers 502 here; reporting the running version keeps the
         // interface usable when the announcement server is unreachable, and
         // reads as "nothing newer" rather than as an update banner.
@@ -504,9 +524,112 @@ pub async fn version(
         }));
     };
 
+    // The interface reads `can_autoupdate` as "offer the button", so it is
+    // only ever true for a release worth pressing it for.
+    let can = pending_update(Some(&info)).is_some()
+        && s.updater
+            .can_update(needs_privileged_ports(&s.config.read()));
+    info["can_autoupdate"] = json!(can);
+
     *s.version_cache.write() = Some((jiff::Timestamp::now(), info.clone()));
 
     Json(info)
+}
+
+/// The release to install, if the last check found one worth installing.
+///
+/// Split out from the handler because it is the guard that keeps this
+/// endpoint from installing whatever a caller asks for: the only version it
+/// will ever install is the one the announcement named, and only when that is
+/// strictly newer than the one running.
+pub fn pending_update(cached: Option<&serde_json::Value>) -> Option<String> {
+    cached?
+        .get("new_version")
+        .and_then(serde_json::Value::as_str)
+        .filter(|v| is_newer(v, sift_core::VERSION))
+        .map(str::to_string)
+}
+
+/// Reports whether `candidate` is a later release than `running`.
+///
+/// Simple inequality is not enough once there is a button behind this: the
+/// announcement is whatever the newest *published* release is, so a build
+/// running ahead of it -- anything built from `main` -- would be offered a
+/// downgrade, and would take it.  A version this cannot read is not newer,
+/// because the safe answer to "should this replace itself" is no.
+pub fn is_newer(candidate: &str, running: &str) -> bool {
+    let parts = |v: &str| -> Option<(u64, u64, u64)> {
+        let v = v.trim().trim_start_matches('v');
+        // A pre-release or build suffix is ignored rather than ordered; the
+        // releases this reads are plain `vX.Y.Z`.
+        let v = v.split(['-', '+']).next().unwrap_or("");
+        let mut it = v.split('.');
+        let mut next = || it.next()?.parse::<u64>().ok();
+
+        Some((next()?, next()?, next()?))
+    };
+
+    match (parts(candidate), parts(running)) {
+        (Some(c), Some(r)) => c > r,
+        _ => false,
+    }
+}
+
+/// How long the response is given to reach the browser before this process
+/// hands itself over to the new binary.
+///
+/// Upstream flushes the response and restarts from a goroutine.  The same
+/// thing is done here with a pause instead of a flush, because the restart
+/// replaces the process image and there is nothing left afterwards to notice
+/// that the write had not finished.
+const RESTART_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// `POST /control/update`
+///
+/// Downloads the release `/control/version.json` last reported, checks it,
+/// puts it in place of the running binary, and restarts into it.  What is
+/// replaced is only the binary: the config file and the data directory are
+/// read by the new one exactly where they are, and the previous binary and a
+/// copy of the config are left in `<work>/agh-backup`.
+pub async fn update(State(s): State<Shared>) -> ApiResult<Json<serde_json::Value>> {
+    // Upstream refuses unless a check has already found something newer: the
+    // button is the end of that conversation rather than the start of one.
+    let cached = s.version_cache.read().clone().map(|(_, v)| v);
+
+    let Some(version) = pending_update(cached.as_ref()) else {
+        return Err(ApiError::bad_request(
+            "no newer release has been found; check for one first",
+        ));
+    };
+
+    if !s
+        .updater
+        .can_update(needs_privileged_ports(&s.config.read()))
+    {
+        return Err(ApiError::bad_request(
+            "this installation cannot replace its own binary;              update the image, or run the installer",
+        ));
+    }
+
+    s.updater
+        .update(version.clone())
+        .await
+        .map_err(ApiError::internal)?;
+
+    let updater = s.updater.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(RESTART_DELAY).await;
+
+        // Only returns if the hand-over failed, in which case this process is
+        // running a binary that is no longer on disk.  Exiting is what gets a
+        // supervised service back onto the new one.
+        let err = updater.restart();
+        tracing::error!(error = %err, "restarting into the new binary");
+
+        std::process::exit(1);
+    });
+
+    Ok(Json(json!({ "new_version": version })))
 }
 
 /// Parses the announcement document into the API's response shape.
@@ -537,8 +660,8 @@ pub fn parse_version(body: String) -> Option<serde_json::Value> {
         "new_version": new_version,
         "announcement": first(&["announcement", "name"]),
         "announcement_url": first(&["announcement_url", "html_url"]),
-        // Nothing here replaces the running binary, so the interface is told
-        // not to offer the update button.
+        // The announcement does not know whether this machine can replace
+        // its binary; `version` decides that and overwrites this.
         "can_autoupdate": false,
         "disabled": false,
     }))
@@ -666,6 +789,79 @@ mod tests {
     #[test]
     fn upstream_validation_rejects_nonsense() {
         assert!(validate_upstreams(&["ftp://example.com".into()]).is_err());
+    }
+
+    #[test]
+    fn a_privileged_port_is_one_below_1024() {
+        let mut c = sift_config::Config::default();
+        c.dns.port = 5353;
+        c.http.address = sift_config::types::AddrPort("127.0.0.1:3000".parse().unwrap());
+        c.tls.enabled = false;
+        c.tls.port_https = 443;
+
+        assert!(!needs_privileged_ports(&c), "nothing privileged is bound");
+
+        c.dns.port = 53;
+        assert!(needs_privileged_ports(&c), "the DNS port");
+
+        c.dns.port = 5353;
+        c.http.address = sift_config::types::AddrPort("127.0.0.1:80".parse().unwrap());
+        assert!(needs_privileged_ports(&c), "the web interface port");
+
+        c.http.address = sift_config::types::AddrPort("127.0.0.1:3000".parse().unwrap());
+        assert!(
+            !needs_privileged_ports(&c),
+            "an encrypted port that is not served does not count"
+        );
+
+        c.tls.enabled = true;
+        assert!(needs_privileged_ports(&c), "and does once it is");
+    }
+
+    #[test]
+    fn only_a_strictly_newer_release_is_installed() {
+        // The endpoint takes no version from the caller: it installs what the
+        // announcement named, and only when that is later than this build.
+        assert_eq!(pending_update(None), None);
+        assert_eq!(pending_update(Some(&json!({}))), None);
+        assert_eq!(pending_update(Some(&json!({ "new_version": "" }))), None);
+        assert_eq!(
+            pending_update(Some(&json!({ "new_version": sift_core::VERSION }))),
+            None,
+            "the running version is not an update"
+        );
+        assert_eq!(
+            pending_update(Some(&json!({ "new_version": "v0.0.1" }))),
+            None,
+            "an older release is not an update"
+        );
+        assert_eq!(
+            pending_update(Some(&json!({ "new_version": "v9.9.9" }))).as_deref(),
+            Some("v9.9.9")
+        );
+    }
+
+    #[test]
+    fn a_build_running_ahead_of_the_newest_release_is_not_downgraded() {
+        // Every build from `main` is ahead of the newest published release,
+        // and the announcement is that release.  Inequality alone would offer
+        // it, and the button would take it.
+        assert!(is_newer("v0.5.1", "v0.5.0"));
+        assert!(is_newer("v0.6.0", "v0.5.9"));
+        assert!(is_newer("v1.0.0", "v0.99.99"));
+        assert!(!is_newer("v0.5.0", "v0.5.0"));
+        assert!(!is_newer("v0.4.9", "v0.5.0"));
+        assert!(!is_newer("v0.5.0", "v0.5.1"));
+
+        // A suffix is ignored rather than ordered.
+        assert!(is_newer("v0.6.0-rc1", "v0.5.0"));
+        assert!(!is_newer("v0.5.0-rc1", "v0.5.0"));
+
+        // Anything unreadable is not newer, in either position.
+        assert!(!is_newer("latest", "v0.5.0"));
+        assert!(!is_newer("v0.5", "v0.5.0"));
+        assert!(!is_newer("", "v0.5.0"));
+        assert!(!is_newer("v9.9.9", "nightly"));
     }
 
     #[test]

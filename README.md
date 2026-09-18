@@ -13,9 +13,9 @@ English only — with the features this build does not have left out.
 
 The DNS filtering path, the web interface, the storage formats, the encrypted
 listeners and the operational surface are done and verified against the Go
-build. Three things are **deliberately excluded** rather than pending —
-DHCP, DNSCrypt, and replacing this binary with a release — and each refuses
-clearly at the point a user would notice. [What is excluded, and
+build. Two things are **deliberately excluded** rather than pending —
+DHCP and DNSCrypt — and each refuses clearly at the point a user would
+notice. [What is excluded, and
 why](#what-is-excluded-and-why) explains each one.
 
 It is not produced, endorsed or supported by AdGuard; see
@@ -89,6 +89,59 @@ Guards: `rules_needing_an_expression_load_as_cheaply_as_plain_ones` in
 being built at load. `cargo run --release -p sift-filter --example loadprofile
 <dir of lists>` prints the phase timings, a footprint breakdown and per-query
 costs, which is how all of the above was measured.
+
+## Installing on a machine
+
+```bash
+curl -s -S -L https://raw.githubusercontent.com/openhoangnc/sift/main/scripts/install.sh | sh -s -- -v
+```
+
+That installs sift into `/opt/AdGuardHome`, registers it with systemd (or
+launchd on macOS) under the name `AdGuardHome`, and starts it. Run the same
+line again later and it upgrades in place; run it on a machine that is already
+up to date and it does nothing.
+
+**Run it on a machine already running AdGuard Home and it takes that
+installation over.** The binary is replaced and nothing else is: the config
+file, the whole data directory and the unit file stay exactly as they are,
+because both builds read and write them in the same formats under the same
+names. The Go binary is kept beside the new one as `AdGuardHome.bak`, so going
+back is three commands, which the script prints when it finishes.
+
+The archives are statically linked against musl, so one build per architecture
+runs on any distribution however old its glibc, and are published with a
+`checksums.txt` the script verifies before it replaces anything. It also runs
+the downloaded binary once, before the running server is touched: an archive
+for the wrong architecture fails then rather than after the swap.
+
+| | |
+|---|---|
+| `-v`, `-V` | turn progress messages on or off |
+| `-u` | remove the binary and the service, and keep the config file and the data directory |
+| `-r` | install again even when the version on offer is the one already installed |
+| `-t v0.5.0` | install a particular release rather than the newest |
+| `-o /srv` | install into `/srv/AdGuardHome`; the default is wherever the installed service already runs from, or `/opt` |
+| `-C`, `-O` | build the archive name for another cpu or operating system |
+
+Published archives: `linux_amd64`, `linux_arm64`, `linux_armv7`,
+`darwin_amd64` and `darwin_arm64`. Anything else builds from source —
+[Building](#building).
+
+### Updating from the web interface
+
+When a newer release exists, the top bar says so and offers **Install**. That
+downloads the archive for this machine, checks it against the published
+`checksums.txt`, runs the new binary — once for its version and once over your
+real configuration with `--check-config` — and only then moves it into place
+and restarts into it. The binary it replaced and a copy of your config file are
+left in `<work>/agh-backup`, which is where AdGuard Home's own updater puts
+them.
+
+The button is offered only where it would work. It is **not** offered inside a
+container, where the image is what gets updated and a replaced binary is
+discarded by the next `docker run`; nor where the executable's directory is
+read-only; nor where a restart could not bind the ports the server uses now.
+`--no-check-update` switches the whole thing off, check included.
 
 ## The published image
 
@@ -175,7 +228,7 @@ Reproduce it with `scripts/verify.sh` (see [Verifying](#verifying)).
 
 ## What is excluded, and why
 
-Three features are decisions rather than gaps. Nothing else in the Go build's
+Two features are decisions rather than gaps. Nothing else in the Go build's
 surface is missing; `TASK.md` records the full state and the smaller deviations
 (cited rule on ties, `gob` byte-equality, ipset through the command rather than
 netlink, and a few more).
@@ -197,15 +250,6 @@ netlink, and a few more).
   DNSCrypt itself is still in use — AdGuard's own provider list publishes
   stamps for it — so front sift with `dnscrypt-proxy` if you need it.
   The web interface no longer offers it anywhere.
-
-- **Replacing its own binary.** `POST /control/update` answers **501**.
-  Rewriting a running executable in place is the job of whatever installed it,
-  and this ships as an image and as archives. The version check itself works:
-  `/control/version.json` reads
-  [this project's releases](https://github.com/openhoangnc/sift/releases),
-  caches the answer for eight hours and reports `can_autoupdate: false`, so the
-  interface can tell you a new version exists without offering to install it.
-  See [the FAQ](docs/faq.md#manual-update).
 
 ## Layout
 

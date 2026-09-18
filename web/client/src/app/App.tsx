@@ -30,7 +30,7 @@ import Clients from '../pages/settings/Clients';
 import Dns from '../pages/settings/Dns';
 import Encryption from '../pages/settings/Encryption';
 import General from '../pages/settings/General';
-import { ServerProvider, useBootstrap } from './context';
+import { ServerProvider, useBootstrap, useServer } from './context';
 import Topbar from './Topbar';
 
 /**
@@ -116,6 +116,7 @@ export default function App() {
 function Shell() {
     const [open, setOpen] = useState(false);
     const { pathname } = useLocation();
+    const { status } = useServer();
 
     // Navigating closes it, because at this width the menu covers the page it
     // just moved to.
@@ -159,6 +160,12 @@ function Shell() {
                         ))}
                     </div>
                 ))}
+
+                {/* At the foot, so the answer to "what is this running" is
+                    on the screen rather than behind the profile menu.  That a
+                    newer one exists is the top bar's to say, and saying it
+                    twice on one screen is worse than saying it once. */}
+                <div className="sidebar-foot">Sift {status.version}</div>
             </nav>
 
             <div className="main">

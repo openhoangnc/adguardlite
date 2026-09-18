@@ -69,10 +69,13 @@ AdGuard operates that endpoint and their [privacy policy][agpp] governs it.
 Once every eight hours, a request to
 `api.github.com/repos/openhoangnc/sift/releases/latest` to learn whether
 a newer release exists. GitHub sees your IP address and the request. Nothing
-about your configuration or your queries is sent, and nothing is installed —
-`can_autoupdate` is always false.
+about your configuration or your queries is sent.
 
-Start the server with `--no-check-update` to switch this off. The Docker image
+Nothing is downloaded by the check itself. The release archive is fetched only
+when somebody presses **Install** in the interface, and then from
+`github.com`, which sees the same.
+
+Start the server with `--no-check-update` to switch both off. The Docker image
 does, by default.
 
 ### Nothing else

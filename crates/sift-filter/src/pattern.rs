@@ -110,21 +110,31 @@ fn escape_special_chars(p: &str) -> String {
 
 /// Escapes `|` characters that are neither the leading anchor nor the final
 /// character, matching upstream's `escapePipes`.
+///
+/// Upstream takes the first and last *bytes*, which in Go cannot fail.  Here
+/// the same indices split a multi-byte character and abort the process, and a
+/// filter list whose first line carries a UTF-8 byte-order mark is enough to
+/// do it — one such list among twenty-nine took a server down at startup.
+/// Walking characters instead gives the same answer for every input: `|` is
+/// ASCII, so it is never a byte inside a character, and the head and tail left
+/// unescaped hold the same pipes either way.
 fn escape_inner_pipes(s: &str) -> String {
-    if s.len() <= 1 {
+    let (Some(first), Some(last)) = (s.chars().next(), s.chars().next_back()) else {
         return s.to_string();
-    }
+    };
 
-    let prefix_len = if s.starts_with("||") { 2 } else { 1 };
-    if prefix_len >= s.len() {
+    let prefix_len = if s.starts_with("||") {
+        2
+    } else {
+        first.len_utf8()
+    };
+    let tail_start = s.len() - last.len_utf8();
+
+    if prefix_len >= tail_start {
         return s.to_string();
     }
 
     let head = &s[..prefix_len];
-    let tail_start = s.len() - 1;
-    if prefix_len > tail_start {
-        return s.to_string();
-    }
     let middle = &s[prefix_len..tail_start];
     let tail = &s[tail_start..];
 
@@ -205,6 +215,32 @@ mod tests {
             Target::Url => re.is_match(&format!("http://{hostname}")),
             Target::Hostname => re.is_match(hostname),
         }
+    }
+
+    #[test]
+    fn a_byte_order_mark_on_the_first_line_is_not_fatal() {
+        // The first line of a real subscribed list, as it sits on disk:
+        // `\u{feff}[Adblock Plus 3.13]`.  It is a header rather than a rule,
+        // and neither build recognises it as one through the mark -- but Go
+        // turns it into a pattern that matches nothing, while this used to
+        // split the mark on a byte index and abort the process while loading
+        // the list.
+        let line = "\u{feff}[Adblock Plus 3.13]";
+        let re = Regex::new(&to_regex(line)).expect("it must compile");
+
+        assert!(!re.is_match("example.org"));
+        assert!(!re.is_match("http://example.org"));
+    }
+
+    #[test]
+    fn a_multibyte_first_character_escapes_the_same_pipes_as_go() {
+        // A pipe is ASCII, so it is never a byte inside a character: picking
+        // the head and tail by character leaves exactly the pipes upstream's
+        // byte indices leave.
+        assert_eq!(to_regex("\u{e9}|x"), "(?i)\u{e9}\\|x");
+        assert_eq!(to_regex("a|b|c"), r"(?i)a\|b\|c");
+        assert_eq!(to_regex("|x|"), r"(?i)^x$");
+        assert_eq!(to_regex("\u{feff}"), "(?i)\u{feff}");
     }
 
     #[test]

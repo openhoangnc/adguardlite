@@ -259,6 +259,21 @@ impl ListFetcher for Downloader {
 /// first release is published, which the handler treats as "nothing newer".
 const VERSION_URL: &str = "https://api.github.com/repos/openhoangnc/sift/releases/latest";
 
+/// The environment variable that points the check at another announcement.
+///
+/// The counterpart of [`crate::update::RELEASES_ENV`]: together they let the
+/// whole update path run against a mirror, or against a release that is not
+/// published yet.
+pub const VERSION_ENV: &str = "SIFT_VERSION_URL";
+
+/// Where the announcement is fetched from.
+fn version_url() -> String {
+    std::env::var(VERSION_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| VERSION_URL.to_string())
+}
+
 /// How large an announcement may be.
 const VERSION_MAX_BYTES: u64 = 64 * 1024;
 
@@ -278,7 +293,7 @@ pub struct ReleaseChecker {
 impl sift_api::state::VersionChecker for ReleaseChecker {
     fn fetch(&self) -> sift_api::state::VersionFuture {
         Box::pin(async move {
-            let body = crate::fetch::get(VERSION_URL, VERSION_MAX_BYTES, VERSION_TIMEOUT)
+            let body = crate::fetch::get(&version_url(), VERSION_MAX_BYTES, VERSION_TIMEOUT)
                 .await
                 .map_err(|e| e.to_string())?;
 

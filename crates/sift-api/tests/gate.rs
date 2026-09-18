@@ -93,6 +93,7 @@ fn state(user: Option<(&str, &str)>) -> Shared {
         reloader: Arc::new(NoReloader),
         dns_addresses: parking_lot::RwLock::new(vec![]),
         version: Arc::new(sift_api::state::NoVersionCheck),
+        updater: Arc::new(sift_api::state::NoSelfUpdate),
         version_cache: parking_lot::RwLock::new(None),
     })
 }

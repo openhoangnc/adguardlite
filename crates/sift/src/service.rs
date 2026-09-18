@@ -49,7 +49,16 @@ pub enum Error {
     },
 }
 
-/// The actions the flag accepts, as upstream documents them.
+/// The action an init system passes to run the server in the foreground.
+///
+/// Upstream's own generated unit runs `AdGuardHome "-s" "run"`, so a build
+/// that refuses it cannot be dropped into an existing installation: systemd
+/// would restart it for ever against a unit the operator never wrote.  It is
+/// deliberately not in [`ACTIONS`], because it is not something [`run`]
+/// performs — `main` recognises it and simply starts the server.
+pub const RUN: &str = "run";
+
+/// The control actions the flag accepts, as upstream documents them.
 pub const ACTIONS: [&str; 7] = [
     "install",
     "uninstall",
@@ -133,8 +142,18 @@ pub fn run(action: &str, args: &Args) -> Result<String, Error> {
 ///
 /// The paths are made absolute, because a unit file runs with no working
 /// directory of its own.
+///
+/// `--no-check-update` is passed on only when this invocation had it, as
+/// upstream's generated unit does.  Writing it in unconditionally switched
+/// the release check off for every natively installed server -- and with it
+/// the update button, which has nothing to offer without a check.  The Docker
+/// `CMD` still passes it, because there the image is what gets updated.
 pub fn service_args(args: &Args) -> Vec<String> {
-    let mut out = vec!["--no-check-update".to_string()];
+    let mut out = Vec::new();
+
+    if args.no_check_update {
+        out.push("--no-check-update".to_string());
+    }
 
     out.push("-c".to_string());
     out.push(absolute(&args.config_or_default()));
@@ -389,6 +408,7 @@ mod tests {
     fn the_service_runs_with_the_same_paths_this_invocation_used() {
         let args = Args::parse_from([
             "AdGuardHome",
+            "--no-check-update",
             "-c",
             "/opt/adguardhome/conf/AdGuardHome.yaml",
             "-w",
@@ -396,12 +416,25 @@ mod tests {
         ]);
         let got = service_args(&args);
 
-        assert!(got.contains(&"--no-check-update".to_string()));
+        assert!(
+            got.contains(&"--no-check-update".to_string()),
+            "it was given, so it is passed on"
+        );
         assert!(
             got.windows(2)
                 .any(|w| w[0] == "-c" && w[1].ends_with("AdGuardHome.yaml"))
         );
         assert!(got.windows(2).any(|w| w[0] == "-w"));
+    }
+
+    #[test]
+    fn the_unit_only_switches_the_release_check_off_if_asked_to() {
+        // Writing --no-check-update into every generated unit switched the
+        // check off for every natively installed server, and with it the
+        // update button, which has nothing to offer without a check.
+        let args = Args::parse_from(["AdGuardHome", "-w", "/srv/agh"]);
+
+        assert!(!service_args(&args).contains(&"--no-check-update".to_string()));
     }
 
     #[test]

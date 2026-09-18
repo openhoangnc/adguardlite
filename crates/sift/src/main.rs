@@ -9,6 +9,7 @@ mod lists;
 mod logging;
 mod osconf;
 mod service;
+mod update;
 mod wiring;
 
 use std::sync::Arc;
@@ -24,6 +25,15 @@ use crate::cli::Args;
 
 fn main() -> std::process::ExitCode {
     let args = Args::parse();
+
+    // Before anything reads or writes a file: an installer asks a binary what
+    // it is, and creating a config as a side effect of the question would be
+    // rude to the directory it was asked in.
+    if args.version {
+        println!("{}", cli::version_line());
+
+        return std::process::ExitCode::SUCCESS;
+    }
 
     let paths = Paths::new(args.work_dir_or_default(), args.config_or_default());
 
@@ -41,8 +51,12 @@ fn main() -> std::process::ExitCode {
 
     init_logging(&args, &config.log);
 
-    // A service action neither starts the server nor needs the runtime.
-    if let Some(action) = args.service.as_deref() {
+    // A service action neither starts the server nor needs the runtime —
+    // except `run`, which is how an init system starts it in the foreground,
+    // and which upstream's own unit file passes.
+    if let Some(action) = args.service.as_deref()
+        && action != service::RUN
+    {
         return match service::run(action, &args) {
             Ok(message) => {
                 println!("{message}");
@@ -258,6 +272,11 @@ async fn run(args: Args, paths: Paths, mut config: sift_config::Config) -> anyho
         dns_addresses: parking_lot::RwLock::new(dns_addrs),
         version: Arc::new(wiring::ReleaseChecker {
             disabled: args.no_check_update,
+        }),
+        updater: Arc::new(update::Updater {
+            disabled: args.no_check_update,
+            work: application.paths.work.clone(),
+            config: application.paths.config.clone(),
         }),
         version_cache: parking_lot::RwLock::new(None),
     });

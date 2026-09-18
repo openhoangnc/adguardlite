@@ -7,21 +7,33 @@ ships.
 
 [kb]: https://adguard-dns.io/kb/adguard-home/
 
-## Manual update
+## Updating
 
-Sift does not replace its own binary. `POST /control/update` answers
-`501`, and the interface is told `can_autoupdate: false` so it never offers an
-update button. Rewriting a running executable in place is the job of whatever
-installed it, and this build ships as a container image and as archives rather
-than as a self-updating binary.
+`/control/version.json` reads
+[this repository's releases](https://github.com/openhoangnc/sift/releases) and
+caches the answer for eight hours, so the interface can tell you a newer one
+exists. `--no-check-update` turns the check off entirely, and the Docker image
+passes it.
 
-`/control/version.json` still reports the latest release, so the interface can
-say one exists. It reads
-[this repository's releases](https://github.com/openhoangnc/sift/releases)
-and caches the answer for eight hours. `--no-check-update` turns the check off
-entirely.
+**From the web interface.** When the top bar says a release is available, it
+offers **Install**. The server downloads the archive for its own machine,
+checks it against the published `checksums.txt`, runs the new binary — once
+for its version and once over your real configuration with `--check-config` —
+and only then moves it into place and restarts into it. The binary it replaced
+and a copy of your config file are left in `<work>/agh-backup`, which is where
+AdGuard Home's updater puts them, so going back is a stop, a `mv` and a start.
 
-To update:
+The button appears only where it would work. It is **not** offered inside a
+container, where the image is what gets updated and a replaced binary is
+thrown away by the next `docker run`; nor where the executable's directory is
+read-only; nor where a restart could not bind the ports the server uses now —
+which on Unix means running as root when anything below port 1024 is bound.
+
+`SIFT_VERSION_URL` and `SIFT_RELEASES_URL` point the check and the download at
+a private mirror instead. The checksum still has to match, so neither is a way
+to install something else.
+
+The other ways to update:
 
 **Docker.** Pull the new image and recreate the container against the same
 volume. Nothing on the volume has to change between versions.
@@ -32,16 +44,25 @@ docker rm -f sift
 docker run -d --name sift ...   # your usual run arguments
 ```
 
-**An archive.** Stop the service, replace the binary, start it again.
+**The installer.** Run the same line that installed it. It compares the
+installed version against the newest release, replaces only the binary, and
+puts the old one back if the service does not stay up.
+
+```bash
+curl -s -S -L https://raw.githubusercontent.com/openhoangnc/sift/main/scripts/install.sh | sh -s -- -v
+```
+
+**An archive, by hand.** Stop the service, replace the binary, start it again.
 
 ```bash
 sudo systemctl stop AdGuardHome
-sudo install -m 0755 ./AdGuardHome /opt/adguardhome/AdGuardHome
+sudo install -m 0755 ./AdGuardHome /opt/AdGuardHome/AdGuardHome
 sudo systemctl start AdGuardHome
 ```
 
 The configuration file and the work directory are read in place and are not
-rewritten by an upgrade, so a downgrade works the same way.
+rewritten by an upgrade, so a downgrade works the same way — including a
+downgrade to AdGuard Home itself.
 
 ## Address already in use
 
@@ -93,8 +114,8 @@ from it. Run the DNS listener on another port and point your clients at that.
 
 ## Which AdGuard Home features are missing
 
-Three, all deliberate, all of which report themselves rather than pretending to
-work:
+Two, both deliberate, and both of which report themselves rather than
+pretending to work:
 
 - **DHCP.** No server. The API reports the feature off and refuses every change,
   so the interface cannot store settings nothing acts on. Your existing DHCP
@@ -102,7 +123,6 @@ work:
   AdGuard Home keeps them.
 - **DNSCrypt.** No listener, and an `sdns://` upstream is reported at startup
   and skipped.
-- **Self-update.** See [Manual update](#manual-update) above.
 
 Everything else — filtering, blocked services, safe search, safe browsing,
 parental control, rewrites, clients, the query log, statistics, DoT, DoH, DoQ

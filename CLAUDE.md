@@ -57,7 +57,7 @@ installation.
 ```bash
 cargo build --release            # fast to build and to run
 cargo build --profile dist       # fat LTO, panic=abort, stripped: ~10.7 MB
-cargo test --workspace           # 707 tests, no network or Go build needed
+cargo test --workspace           # 733 tests, no network or Go build needed
 cargo clippy --workspace --all-targets
 ```
 
@@ -86,6 +86,13 @@ Rebuilding the web interface — needs Node:
 
 ```bash
 scripts/build-frontend.sh         # web/client -> web/build, brotli-compressed
+```
+
+Packaging a built binary the way a release does, and installing it:
+
+```bash
+scripts/package.sh target/dist/AdGuardHome linux arm64 dist
+scripts/install.sh -v -b <base-url>     # -b points at an unpublished build
 ```
 
 Cross-implementation verification — needs `upstream/` and a Go toolchain:
@@ -245,6 +252,27 @@ toggles, its own blocked services and its own safe search.
   engine and throws the match itself away, so an exception rule refuses the
   query like any other. `sift-dns/src/blocked.rs` reproduces that deliberately,
   and its tests record what a running Go build answered for each form.
+- **`-s run` is not a control action.** Upstream's own generated unit is
+  `ExecStart=/opt/AdGuardHome/AdGuardHome "-s" "run"`, so `main` recognises
+  `service::RUN` and starts the server instead of handing it to
+  `service::run`. A build that refused it could not take over an existing
+  installation at all.
+- **The working directory defaults to the binary's directory**, not the
+  process's current one — upstream's `initWorkingDir`. The unit `-s install`
+  writes passes no `-w`, and an init system runs a service from a directory of
+  its own. Reading the current directory instead wrote a fresh default config
+  next to wherever systemd happened to start it, which looks exactly like an
+  upgrade that lost every setting.
+- **`--version` starts with `Sift,` and not `AdGuard Home,`.** It is the only
+  thing that tells an installer which of the two binaries is sitting in
+  `/opt/AdGuardHome/AdGuardHome`, and the version is explicitly not part of
+  the drop-in contract.
+- **Patterns are sliced by character, not by byte.** Upstream's `escapePipes`
+  takes the first and last bytes, which in Go cannot fail; here the same
+  indices split a multi-byte character and abort the process. A real
+  subscribed list whose first line carries a UTF-8 byte-order mark was enough
+  to do it. `escape_inner_pipes` walks characters, which gives the same answer
+  for every input because `|` is ASCII.
 - **The config is read before the tokio runtime starts.** Two of the things it
   decides — where the log goes and which user to run as — must be settled while
   the process is still single-threaded, because `setuid` acts on the calling
@@ -420,11 +448,10 @@ about how they fit:
 dnsproxy client against a listener, with the certificate verified rather than
 skipped.
 
-## Three exclusions, all deliberate
+## Two exclusions, both deliberate
 
-DHCP, DNSCrypt and replacing the binary with an AdGuard Home release are
-decisions, not gaps. Each refuses clearly where a user would notice, and
-`TASK.md` records the reasoning for each.
+DHCP and DNSCrypt are decisions, not gaps. Each refuses clearly where a user
+would notice, and `TASK.md` records the reasoning for each.
 
 **DHCP.** The API reports the feature off and refuses every change, so the
 interface cannot store settings nothing acts on. Two things follow that are
@@ -440,10 +467,44 @@ easy to get wrong:
 skipped. It is the only protocol left that needs cryptography the tree does not
 already carry, and a mistake in it fails silently.
 
-**`POST /control/update`.** The published releases are AdGuard Home's own Go
-binaries, so installing one would swap in a different implementation. The
-version *check* works, caches for eight hours, and reports
-`can_autoupdate: false` so the interface does not offer the button.
+## Replacing the binary
+
+Two things do it, and they are the same steps in two places.
+
+**`scripts/install.sh`**, the `curl | sh` installer, when a machine is being
+set up or the operator is at a shell. It finds the directory from the
+installed unit rather than assuming `/opt`, takes over an installed AdGuard
+Home in place, never rewrites an existing unit file, and puts the old binary
+back if the service does not stay up for eight seconds.
+
+**`POST /control/update`**, from the web interface, implemented by
+`crates/sift/src/update.rs`. The directories are upstream's — the release is
+unpacked into `<work>/agh-update-<version>` and the previous binary and config
+land in `<work>/agh-backup` — so a user who has pressed AdGuard Home's button
+finds the same files. Two steps are ours, and both exist because the failure
+they prevent is a resolver that no longer starts: the archive is checked
+against the published `checksums.txt`, and the downloaded binary is run twice
+before anything moves, once for its version and once over the real config with
+`--check-config`. The binary is replaced by renaming, never by writing over
+the running file.
+
+`can_autoupdate` is answered by the binary, not by the announcement: false
+inside a container (the image is the unit of update there), false when the
+executable's directory is read-only, and false when a restart could not bind
+the ports the configuration uses — upstream asks the same question in
+`setAllowedToAutoUpdate`. `status::pending_update` is the guard on what gets
+installed: the version the announcement named, and only when it is **strictly
+newer**, because every build from `main` is ahead of the newest release and
+inequality alone would offer a downgrade and take it.
+
+`--no-check-update` switches the whole thing off. The Docker `CMD` passes it;
+the unit `-s install` writes does **not**, as upstream's does not — writing it
+in unconditionally switched the check off for every natively installed server,
+and with it the button.
+
+`SIFT_VERSION_URL` and `SIFT_RELEASES_URL` move the announcement and the
+archives somewhere else, for a mirror or for testing an unpublished build.
+The checksum still has to match, so neither is a way to install other bytes.
 
 ## Scope, and keeping it honest
 

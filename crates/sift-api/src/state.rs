@@ -59,6 +59,54 @@ impl VersionChecker for NoVersionCheck {
     }
 }
 
+/// A future returned by a self-update.
+pub type UpdateFuture =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), String>> + Send>>;
+
+/// Replaces this binary with a published release.
+///
+/// Implemented by the binary, which is the only part of the tree that knows
+/// where it lives on disk, can download an archive, and can hand its process
+/// over to what it downloaded.
+pub trait SelfUpdater: Send + Sync + 'static {
+    /// Reports whether replacing the binary could work on this machine.
+    ///
+    /// `needs_privileged_ports` says whether the running configuration binds
+    /// anything below 1024; the answer is no if a restart could not bind them
+    /// again, because an update that leaves the resolver unable to start is
+    /// worse than no update.
+    fn can_update(&self, needs_privileged_ports: bool) -> bool;
+
+    /// Downloads `version` and puts it in place of the running binary.
+    ///
+    /// Returns once the file has been replaced.  The process is still the old
+    /// one until [`SelfUpdater::restart`] is called.
+    fn update(&self, version: String) -> UpdateFuture;
+
+    /// Hands this process over to the new binary.
+    ///
+    /// Returns only on failure, with what went wrong: on success this image no
+    /// longer exists.
+    fn restart(&self) -> String;
+}
+
+/// An updater that refuses, for tests and for builds that cannot update.
+pub struct NoSelfUpdate;
+
+impl SelfUpdater for NoSelfUpdate {
+    fn can_update(&self, _needs_privileged_ports: bool) -> bool {
+        false
+    }
+
+    fn update(&self, _version: String) -> UpdateFuture {
+        Box::pin(async { Err("updating is not available in this build".to_string()) })
+    }
+
+    fn restart(&self) -> String {
+        "updating is not available in this build".to_string()
+    }
+}
+
 /// Applies configuration changes to the running server.
 ///
 /// The API mutates the config; something has to push those changes into the
@@ -111,6 +159,8 @@ pub struct AppState {
     pub dns_addresses: RwLock<Vec<String>>,
     /// Checks for a newer release.
     pub version: Arc<dyn VersionChecker>,
+    /// Replaces this binary with one.
+    pub updater: Arc<dyn SelfUpdater>,
     /// The last announcement seen, and when it was fetched.
     ///
     /// Upstream rechecks at most every eight hours; asking the announcement

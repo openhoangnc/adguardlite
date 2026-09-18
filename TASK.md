@@ -5,7 +5,7 @@ Work status for Sift, against AdGuard Home **v0.107.79**.
 Legend: **[x]** done and verified · **[~]** partial, see the note · **[ ]** not started
 
 Verification claims below are reproducible with `scripts/verify.sh` and
-`cargo test --workspace` (707 tests).
+`cargo test --workspace` (740 tests).
 
 ---
 
@@ -27,7 +27,8 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 | Safe browsing / parental / safe search | done |
 | Clients | persistent settings, ClientID, ARP/rDNS/WHOIS/hosts discovery |
 | Operations | logging, rotation, pidfile, privileges, service install |
-| Self-update | **out of scope** — the check reports releases, the install refuses |
+| Installer | `scripts/install.sh`: installs, upgrades, and takes over AdGuard Home |
+| Self-update | done — `POST /control/update` replaces the binary and restarts |
 | Version reported | this project's own, from the workspace version — v0.3.0 |
 
 ---
@@ -280,7 +281,9 @@ Verification claims below are reproducible with `scripts/verify.sh` and
       for the rest
 - [x] Version check: `/control/version.json` fetches this project's latest
       GitHub release, caches it for eight hours, honours `--no-check-update`,
-      and reports `can_autoupdate: false`
+      and reports `can_autoupdate` truthfully — see *Replacing its own binary*
+- [x] The update banner offers **Install** where the server says it would
+      work, and waits for the restarted server before reloading the page
 
 ### Packaging and operations
 - [x] CLI accepting every flag the Go binary documents
@@ -316,6 +319,123 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 - [x] **`-s install|uninstall|start|stop|restart|reload|status`**: a systemd
       unit on Linux, a launchd property list on macOS, naming this binary and
       the paths this invocation used
+- [x] **`-s run`**: what an init system passes to run the server in the
+      foreground. Upstream's own generated unit is
+      `ExecStart=/opt/AdGuardHome/AdGuardHome "-s" "run"`, so a build that
+      refused it could not be dropped into an existing installation at all —
+      systemd would restart it for ever. Found by reading a real installed
+      unit, not the flag list
+- [x] **The working directory defaults to the binary's own directory**, as
+      upstream's `initWorkingDir` does, rather than to the process's current
+      one. The unit `-s install` writes passes no `-w`, and an init system
+      runs a service from a directory of its own — the one on the machine this
+      was tested against sets `WorkingDirectory=/home/hoang`. Taking the
+      current directory instead read a
+      config file nobody had put there and wrote a fresh default beside it,
+      which from the outside looks exactly like an upgrade that lost every
+      setting
+- [x] **`--version` names this build**: `Sift, version v0.5.0 (drop-in for
+      AdGuard Home v0.107.79)`. Upstream prints `AdGuard Home, version
+      v0.107.79`; the first word differs on purpose, because an installer
+      looking at a binary both projects call `AdGuardHome` has this line and
+      nothing else to tell them apart
+- [x] **Release archives**: `.github/workflows/release.yml` builds
+      `linux_amd64`, `linux_arm64`, `linux_armv7`, `darwin_amd64` and
+      `darwin_arm64` on a tag push and attaches them to the release with a
+      `checksums.txt` and a `version.txt`. Every Linux build is statically
+      linked against musl, so one archive per architecture runs on any
+      distribution however old its glibc. `scripts/package.sh` builds the
+      archive, in CI and by hand alike, in AdGuard Home's own layout —
+      `AdGuardHome/AdGuardHome` — so unpacking one with `tar -C /opt` lands
+      the binary where their installer would have put it
+- [x] **`scripts/install.sh`**, the `curl | sh` installer, modelled on
+      upstream's and differing in the three places where being a drop-in
+      changes the right thing to do:
+      - an existing installation is **upgraded**, not refused. Upstream's
+        script demands `-r` and then deletes the directory; this one replaces
+        the binary and touches nothing else
+      - an existing **AdGuard Home is taken over in place**, since both builds
+        read and write the same files under the same names. The Go binary is
+        kept as `AdGuardHome.bak` and the rollback is printed
+      - the installed version is compared against the release on offer, so
+        running it twice does nothing the second time
+      It also finds the directory from the installed unit rather than assuming
+      `/opt`, verifies the archive against `checksums.txt`, and runs the
+      downloaded binary once before the running server is touched — an
+      archive for the wrong architecture fails then rather than after the swap.
+      An existing unit file is never rewritten: it is the operator's, and both
+      builds take the same arguments
+
+---
+
+### Replacing its own binary
+
+**Done.** `POST /control/update` downloads the release
+`/control/version.json` last reported, checks it, puts it in place of the
+running binary and restarts into it. `crates/sift/src/update.rs` is the
+implementation; `crates/sift-api` holds no HTTP client and no knowledge of
+where the binary lives, so the work is injected through `SelfUpdater` the way
+`ListFetcher` and `Reloader` already were.
+
+The directories are upstream's, because the files it leaves behind are ones a
+user may already have: `<work>/agh-update-<version>` for the download, removed
+afterwards, and `<work>/agh-backup` holding the binary it replaced and a copy
+of `AdGuardHome.yaml`.
+
+Two steps are ours, and both exist because the failure they prevent is a
+resolver that no longer starts:
+
+- the archive is checked against the `checksums.txt` published beside it;
+- the unpacked binary is **run twice** before anything moves — once for its
+  version, and once over the real configuration with `--check-config`.
+
+The binary is replaced by renaming, never by writing over the running file: an
+executable cannot be written to while it is running, and a half-written one is
+worse than an old one. If the second rename fails the first is undone.
+
+`can_autoupdate` is answered by the binary rather than by the announcement,
+and is **false**:
+
+- inside a container — the image is the unit of update there, and a binary
+  replaced inside a running one is discarded by the next `docker run`;
+- when the executable's directory cannot be written to, which is checked by
+  writing to it rather than by reading mode bits;
+- when the configuration binds a port below 1024 and the process is not root.
+  Upstream asks the same question in `setAllowedToAutoUpdate`, for the same
+  reason: an update that leaves the resolver unable to bind 53 is worse than
+  no update.
+
+**Only a strictly newer release is installed.** `status::pending_update` is
+the guard, and it is the reason `is_newer` exists: the announcement is the
+newest *published* release, so every build from `main` is ahead of it, and
+comparing for inequality would offer a downgrade and take it. The endpoint
+takes no version from its caller at all.
+
+- `GET`/`POST /control/version.json` fetches
+  `https://api.github.com/repos/openhoangnc/sift/releases/latest`,
+  caches the answer for eight hours, and re-fetches on `recheck_now`.
+- `--no-check-update` reports the feature as `disabled`, nothing is fetched,
+  and the update endpoint refuses. The Docker `CMD` passes it, because there
+  the image is what gets updated. The unit `-s install` writes **does not**,
+  as upstream's does not: writing it in unconditionally switched the check off
+  for every natively installed server, and with it the button, which has
+  nothing to offer without a check.
+- `SIFT_VERSION_URL` and `SIFT_RELEASES_URL` move the announcement and the
+  archives, for a private mirror or for testing a build that is not published
+  yet. Neither is a way to install other bytes: the checksum still has to
+  match.
+
+`parse_version` accepts **two** documents: GitHub's, which names the version
+`tag_name` and the page `html_url`, and the flat `version`/`announcement_url`
+shape AdGuard's own announcement server serves — so pointing the checker at a
+hand-written `version.json` keeps working. A repository with no release yet
+answers 404, the fetch fails, and the handler reports the running version as
+`new_version`, which the interface reads as "nothing newer".
+
+**Why not AdGuard's announcement server any more.** It was the source while
+this build reported `v0.107.79`. Now that it reports its own version, that
+server would announce an AdGuard Home release as an update to Sift —
+permanently, and naming something this binary could not become.
 
 ---
 
@@ -376,37 +496,6 @@ addresses and `sdns://` stamps for AdGuard DNS, Quad9, OpenDNS, CleanBrowsing
 and others. The exclusion is about the cost and risk of implementing it here,
 not about nobody using it. If that trade changes, this is a session on its own,
 with the Go implementation as an oracle throughout.
-
-### Replacing its own binary
-
-**`POST /control/update` answers 501.** Rewriting a running executable in place
-is the job of whatever installed it; this ships as a container image and as
-archives, and doing it silently from inside the process would be worse than
-refusing.
-
-What does work:
-
-- `GET`/`POST /control/version.json` fetches
-  `https://api.github.com/repos/openhoangnc/sift/releases/latest`,
-  caches the answer for eight hours, and re-fetches on `recheck_now`.
-- `can_autoupdate` is always `false`, which is how the interface is told not to
-  offer the button.
-- `--no-check-update` reports the feature as `disabled`, and nothing is
-  fetched. The Docker `CMD` passes it.
-
-`parse_version` accepts **two** documents: GitHub's, which names the version
-`tag_name` and the page `html_url`, and the flat `version`/`announcement_url`
-shape AdGuard's own announcement server serves — so pointing the checker at a
-hand-written `version.json` keeps working. A repository with no release yet
-answers 404, the fetch fails, and the handler reports the running version as
-`new_version`, which the interface reads as "nothing newer".
-
-**Why not AdGuard's announcement server any more.** It was the source while
-this build reported `v0.107.79`. Now that it reports its own version, that
-server would announce an AdGuard Home release as an update to Sift —
-permanently, and naming something this binary could not become.
-
----
 
 ## Found by running the image, and fixed
 

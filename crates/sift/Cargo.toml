@@ -32,6 +32,7 @@ hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "tokio
 jiff = { version = "0.2.37", features = ["serde"] }
 parking_lot = "0.12.5"
 rand = "0.10.2"
+ring = "0.17.14"
 rustix = { version = "1.1.4", features = ["process", "thread"] }
 rustls = { version = "0.23.44", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = "1.15.1"

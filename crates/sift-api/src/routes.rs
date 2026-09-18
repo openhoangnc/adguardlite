@@ -319,7 +319,7 @@ fn control_router() -> Router<Shared> {
         .route("/cache_clear", post(status::cache_clear))
         .route("/test_upstream_dns", post(status::test_upstream))
         .route("/version.json", get(status::version).post(status::version))
-        .route("/update", post(update_unsupported))
+        .route("/update", post(status::update))
         // Filtering.
         .route("/filtering/status", get(filtering::status))
         .route("/filtering/config", post(filtering::set_config))
@@ -433,24 +433,6 @@ fn control_router() -> Router<Shared> {
         // Apple profiles.
         .route("/apple/doh.mobileconfig", get(mobileconfig_doh))
         .route("/apple/dot.mobileconfig", get(mobileconfig_dot))
-}
-
-/// Answers `POST /control/update`.
-///
-/// This build deliberately does not replace its own binary: it ships as a
-/// container image and as archives, and rewriting a running executable in
-/// place is the job of whatever installed it.
-///
-/// `/control/version.json` still reports the latest release so the interface
-/// can say one exists, with `can_autoupdate` false so the button is not
-/// offered.  See the updates section of TASK.md.
-async fn update_unsupported() -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        "this build of sift does not replace its own binary; \
-         pull the new image or archive through whatever installed it",
-    )
-        .into_response()
 }
 
 /// Answers every DHCP endpoint that would change something.
@@ -649,14 +631,6 @@ mod tests {
 
         assert!(!is_dns_name(&"a".repeat(64)), "a label caps at 63 bytes");
         assert!(is_dns_name(&"a".repeat(63)));
-    }
-
-    #[tokio::test]
-    async fn self_update_is_refused_rather_than_pretending_to_work() {
-        // Accepting it would have to download an AdGuard Home release and
-        // write it over this binary, which replaces the implementation.
-        let r = update_unsupported().await;
-        assert_eq!(r.status(), StatusCode::NOT_IMPLEMENTED);
     }
 
     #[tokio::test]
