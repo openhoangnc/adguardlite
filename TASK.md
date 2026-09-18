@@ -393,6 +393,22 @@ The binary is replaced by renaming, never by writing over the running file: an
 executable cannot be written to while it is running, and a half-written one is
 worse than an old one. If the second rename fails the first is undone.
 
+**The path to restart into is captured at startup**, not asked for afterwards.
+On Linux `current_exe` reads `/proc/self/exe`, which names the *inode* that is
+running — and the update has just moved that inode into `agh-backup`. Asking
+after the swap therefore answers the backup's path, and starting it puts the
+old binary straight back: the version on disk changes, the process keeps its
+id, systemd counts no restart, and `/control/status` still reports the old
+version. It was found by watching exactly that happen. Upstream keeps the path
+for the same reason; see AdGuard Home issue 4735.
+
+Verified in a systemd container: `can_autoupdate` is **false** inside Docker
+and the endpoint refuses with 400; with the container marker removed it
+answers 200, and the server comes back on the new version under the **same
+process id with no restart counted** — which is what an `execve` in place
+looks like — with the previous binary and an identical copy of the config in
+`agh-backup` and the update directory gone.
+
 `can_autoupdate` is answered by the binary rather than by the announcement,
 and is **false**:
 
