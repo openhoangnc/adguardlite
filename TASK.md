@@ -1714,7 +1714,7 @@ report `v0.107.79`.
   anything 404s or comes back empty, so a dead list is caught at import rather
   than by the user who picked it.
 
-  The tags are a closed vocabulary of eighteen, and the importer rejects
+  The tags are a closed vocabulary of 23, and the importer rejects
   anything outside it: a typo would otherwise become a filter chip that
   matches nothing. Measured at the time of writing, `starter` selects exactly
   five lists, which is the question most people arrive with.

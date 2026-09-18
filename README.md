@@ -211,6 +211,97 @@ netlink, and a few more).
   DNSCrypt itself is still in use — AdGuard's own provider list publishes
   stamps for it — so front sift with `dnscrypt-proxy` if you need it.
 
+## Where it goes further
+
+Compatibility is the constraint, not the ceiling. These are the places this
+build does something the Go one does not, each with the reason it was worth
+diverging for — and where a thing is parity with AdGuard's own libraries
+rather than an invention, it says so.
+
+- **Upstream connections outlive the query.** Every encrypted transport pays
+  for a handshake before it can carry anything, and paying it per query cost,
+  measured against a public resolver, 103 ms on DoT, 108 on DoH, 110 on DoQ
+  and 112 on HTTP/3 above the one-round-trip floor — against roughly 40 µs
+  of local processing for the same query. Connections are kept instead:
+  HTTP/2, HTTP/3 and QUIC multiplex, so one serves every query at once;
+  DoT and plain TCP are checked out
+  exclusively and returned once a complete, validated reply has been read.
+  Dialling is single-flight, so a burst against a cold upstream opens one
+  connection rather than one each, and a *failed* dial is remembered for a
+  moment so a dead upstream fails fast instead of queueing every query behind
+  a ten-second timeout.
+
+  Keeping them is parity, not invention: dnsproxy pools DoT, caches an
+  `http.Client` for DoH and keeps one QUIC connection for DoQ. Two things here
+  go past it — **plain TCP is pooled too**, which dnsproxy dials per query,
+  and the HTTP/2-versus-HTTP/3 choice is **remembered per upstream** with a
+  timed retry rather than re-raced on every query.
+
+- **A popular name is refreshed before it expires.** An entry in the last
+  tenth of its TTL that has been asked for more than once is fetched again out
+  of band, so a name under constant query is never served stale at all. Not an
+  AdGuard Home feature, and given no config key of its own on purpose: it is
+  gated on `cache_optimistic`, the setting that already says a stale answer is
+  acceptable, so with optimistic caching off the cache behaves exactly as the
+  Go build's. A refresh has no client, so it is not rate limited, not counted
+  in the statistics and not written to the query log.
+
+- **A renewed certificate is picked up without being told.** The Go build
+  reads `certificate_path` and `private_key_path` at startup and when the
+  config is saved, so a certbot renewal is served only after the next restart
+  — a deployment that never restarts serves an expired certificate. Here the
+  maintenance tick digests what the files hold and installs a pair that
+  differs from the one being served, after it has proved itself against
+  rustls. Comparison is of contents rather than mtime, so a script that
+  rewrites both files nightly costs a digest and nothing else.
+
+- **The blocklist picker says what each list is for.** Upstream's picker
+  offers 64 names and a URL each. This one carries 66 lists, and for every one
+  of them a sentence or two written here — what it blocks, who it suits, what
+  it will break — a closed vocabulary of 23 tags, a flag for the country a
+  regional list serves, and a rule count **measured by downloading the list**,
+  6.47 million rules across the catalogue. The measurement doubles as
+  validation: the importer refuses to publish a catalogue in which anything
+  404s, comes back empty, carries a tag outside the vocabulary or has no note,
+  so a dead list is caught at import rather than by whoever picked it. The tag
+  `starter` selects exactly five, which is the question most people arrive
+  with.
+
+- **The web interface is this project's own.** React 19, TypeScript, ECharts
+  and Vite — the entire runtime dependency list, with no state library, no
+  component library and no CSS framework. It is built as three separate
+  documents, brotli-compressed at quality 11 (1.3 MB of assets to 0.4 MB
+  embedded in the binary), and served with content-hashed names under
+  `static/` marked `immutable` for a year while everything else revalidates
+  against an `ETag` and gets a **304** without the body being touched. It is
+  responsive down to 375 px and tested there, and it is English only, which is
+  a decision rather than an omission — a translation is someone else's
+  writing, and the wording here is now its own.
+
+- **The query log can be filtered by the list that blocked.** `filter_id` on
+  `/control/querylog` keeps only the entries a rule from that list matched,
+  across the whole log rather than the page in hand — so "what is this list
+  actually doing to me?" is one click from the Filters page. It is parsed
+  leniently, so a request upstream would have answered never becomes a 400.
+
+- **An update is checked before it is installed, and reversible after.** The
+  archive is verified against the published `checksums.txt`, and the new
+  binary is then run twice before anything moves — once for its version, once
+  over your real configuration with `--check-config` — because the failure
+  being prevented is a resolver that no longer starts. The binary is replaced
+  by renaming, never by writing over the running file, and the one it replaced
+  is kept beside it. The shell installer goes further still: it watches the
+  service for eight seconds afterwards and puts the old binary back if it does
+  not stay up, because on the machine whose resolver this is, that difference
+  is the whole network.
+
+- **The interface says why a button is missing.** `/control/version.json`
+  carries two fields upstream has no use for: `check_failed` and
+  `autoupdate_blocked_by`. Without them, "you are up to date", "nobody
+  answered when we asked" and "there is a new version and this machine cannot
+  install it" all look identical — a missing Install button. The profile menu
+  names which one it is instead.
+
 ## Measured against the Go build
 
 Both running the same config and the same 179,334-rule AdGuard DNS filter, on
