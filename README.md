@@ -1,3 +1,5 @@
+![sift: network-wide ad and tracker blocker](.github/social-preview.png)
+
 # sift
 
 [![Docker](https://github.com/openhoangnc/sift/actions/workflows/docker.yml/badge.svg)](https://github.com/openhoangnc/sift/actions/workflows/docker.yml)

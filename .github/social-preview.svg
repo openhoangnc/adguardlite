@@ -1,0 +1,83 @@
+<!--
+  The repository's social preview, 1280x640: uploaded under Settings -> Social
+  preview, and shown at the top of README.md.
+
+  This file is the source and .github/social-preview.png is what GitHub serves,
+  so re-render it after any change here.  The funnel is the mark from
+  web/client/public/assets/favicon.svg, and the colours are the web interface's
+  dark theme, from web/client/src/styles/app.css.  The text is set in Helvetica
+  Neue: a renderer without that family substitutes another face, which moves
+  the pill boxes off their labels.  The committed PNG came from @resvg/resvg-js.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#171d24"/>
+      <stop offset="1" stop-color="#0f1317"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#d4a017" stop-opacity="0.16"/>
+      <stop offset="1" stop-color="#d4a017" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="mark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e5b423"/>
+      <stop offset="1" stop-color="#b8860d"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <ellipse cx="986" cy="290" rx="400" ry="340" fill="url(#glow)"/>
+  <rect width="1280" height="1" fill="#ffffff" opacity="0.06"/>
+
+  <g transform="translate(0 14)">
+  <circle cx="832.0" cy="62" r="5.5" fill="#8d9aa8" opacity="0.32"/>
+  <circle cx="899.0" cy="53" r="5.5" fill="#8d9aa8" opacity="0.32"/>
+  <circle cx="961.0" cy="60" r="5.5" fill="#e06666" opacity="0.32"/>
+  <circle cx="1013.0" cy="64" r="5.5" fill="#8d9aa8" opacity="0.32"/>
+  <circle cx="1080.0" cy="55" r="5.5" fill="#8d9aa8" opacity="0.32"/>
+  <circle cx="1131.0" cy="63" r="5.5" fill="#8d9aa8" opacity="0.32"/>
+  <circle cx="859.0" cy="92" r="6.5" fill="#8d9aa8" opacity="0.5"/>
+  <circle cx="917.0" cy="100" r="6.5" fill="#e06666" opacity="0.5"/>
+  <circle cx="991.0" cy="95" r="6.5" fill="#8d9aa8" opacity="0.5"/>
+  <circle cx="1048.0" cy="102" r="6.5" fill="#8d9aa8" opacity="0.5"/>
+  <circle cx="1120.0" cy="93" r="6.5" fill="#e06666" opacity="0.5"/>
+  <circle cx="874.0" cy="139" r="7.5" fill="#8d9aa8" opacity="0.72"/>
+  <circle cx="954.0" cy="132" r="7.5" fill="#8d9aa8" opacity="0.72"/>
+  <circle cx="1020.0" cy="140" r="7.5" fill="#e06666" opacity="0.72"/>
+  <circle cx="1099.0" cy="131" r="7.5" fill="#8d9aa8" opacity="0.72"/>
+  <circle cx="910.0" cy="167" r="8.5" fill="#e06666" opacity="0.92"/>
+  <circle cx="983.0" cy="174" r="8.5" fill="#8d9aa8" opacity="0.92"/>
+  <circle cx="1070.0" cy="168" r="8.5" fill="#8d9aa8" opacity="0.92"/>
+  <circle cx="944" cy="243" r="7" fill="#e06666" opacity="0.9"/>
+  <circle cx="1006" cy="252" r="6" fill="#e06666" opacity="0.75"/>
+  <circle cx="1048" cy="236" r="5.5" fill="#e06666" opacity="0.6"/>
+  <circle cx="978" cy="272" r="5" fill="#e06666" opacity="0.5"/>
+  <circle cx="986" cy="434" r="8.5" fill="#4bb283" opacity="1"/>
+  <circle cx="993" cy="474" r="7" fill="#4bb283" opacity="0.78"/>
+  <circle cx="981" cy="510" r="5.5" fill="#4bb283" opacity="0.5"/>
+    <path d="M3 7h35L24.5 22v14l-8-4.6V22z" transform="translate(840.45 146.30) scale(7.1)"
+        fill="url(#mark)" fill-opacity="0.15" stroke="#e0ae1f" stroke-width="0.507"
+          stroke-linejoin="round"/>
+  </g>
+
+  <text x="88" y="296" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="168" font-weight="700"
+        letter-spacing="-5" fill="#f1f5f8">sift</text>
+  <text x="88" y="366" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="35" font-weight="400"
+        letter-spacing="0.1" fill="#c2ccd6">Network-wide ad and tracker blocker</text>
+
+  <rect x="88" y="424" width="78" height="40" rx="20" fill="#1b222a" stroke="#303a45" stroke-width="1"/>
+  <text x="127" y="451" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="21" font-weight="500" letter-spacing="0.2" fill="#9aa7b4" text-anchor="middle">Rust</text>
+  <rect x="177" y="424" width="206" height="40" rx="20" fill="#1b222a" stroke="#303a45" stroke-width="1"/>
+  <text x="280" y="451" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="21" font-weight="500" letter-spacing="0.2" fill="#9aa7b4" text-anchor="middle">One 10 MB binary</text>
+  <rect x="394" y="424" width="166" height="40" rx="20" fill="#1b222a" stroke="#303a45" stroke-width="1"/>
+  <text x="477" y="451" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="21" font-weight="500" letter-spacing="0.2" fill="#9aa7b4" text-anchor="middle">Web interface</text>
+
+  <rect x="88" y="476" width="289" height="40" rx="20" fill="#1b222a" stroke="#303a45" stroke-width="1"/>
+  <text x="232.5" y="503" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="21" font-weight="500" letter-spacing="0.2" fill="#9aa7b4" text-anchor="middle">DoT · DoH · DoQ · HTTP/3</text>
+  <rect x="388" y="476" width="290" height="40" rx="20" fill="#1b222a" stroke="#303a45" stroke-width="1"/>
+  <text x="533" y="503" font-family="Helvetica Neue, Helvetica, Arial, sans-serif" font-size="21" font-weight="500" letter-spacing="0.2" fill="#9aa7b4" text-anchor="middle">Drop-in for AdGuard Home</text>
+
+
+  <text x="88" y="576" font-family="Menlo, monospace" font-size="23"
+        fill="#6c7b89">github.com/openhoangnc/sift</text>
+</svg>
