@@ -114,7 +114,7 @@ from it. Run the DNS listener on another port and point your clients at that.
 
 ## Which AdGuard Home features are missing
 
-Two, both deliberate, and both of which report themselves rather than
+Three, all deliberate, and all of which report themselves rather than
 pretending to work:
 
 - **DHCP.** No server. The API reports the feature off and refuses every change,
@@ -123,10 +123,14 @@ pretending to work:
   AdGuard Home keeps them.
 - **DNSCrypt.** No listener, and an `sdns://` upstream is reported at startup
   and skipped.
+- **Safe browsing and parental control.** No hash-prefix lookups. Both report
+  themselves off and refuse every change, and no query leaves this machine to
+  ask AdGuard about a name. Block malware, phishing or adult content with a
+  filter list instead — the catalogue under **Filters** carries lists for
+  each. Your stored settings are preserved untouched, as the DHCP ones are.
 
-Everything else — filtering, blocked services, safe search, safe browsing,
-parental control, rewrites, clients, the query log, statistics, DoT, DoH, DoQ
-and HTTP/3 — is implemented.
+Everything else — filtering, blocked services, safe search, rewrites, clients,
+the query log, statistics, DoT, DoH, DoQ and HTTP/3 — is implemented.
 
 ## Where is my data
 

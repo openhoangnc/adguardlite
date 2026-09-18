@@ -89,7 +89,7 @@ itself.
 A persistent client with **Use global settings** cleared overrides, for its own
 queries only:
 
-- the filtering, safe browsing, parental control and safe search toggles.
+- the filtering and safe search toggles.
 
 Independently of that switch, clearing **Use global blocked services** gives the
 client its own blocked-services list and its own schedule.

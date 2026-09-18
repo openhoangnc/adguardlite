@@ -273,8 +273,6 @@ export interface Client {
     ids: string[];
     use_global_settings: boolean;
     filtering_enabled: boolean;
-    parental_enabled: boolean;
-    safebrowsing_enabled: boolean;
     use_global_blocked_services: boolean;
     blocked_services: string[];
     blocked_services_schedule?: Schedule;

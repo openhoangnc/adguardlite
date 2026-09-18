@@ -311,10 +311,6 @@ pub struct Persistent {
     pub use_global_settings: bool,
     /// Whether blocklists are consulted.
     pub filtering_enabled: bool,
-    /// Whether parental control applies.
-    pub parental_enabled: bool,
-    /// Whether safe browsing applies.
-    pub safebrowsing_enabled: bool,
     /// Whether the global blocked-services settings apply.
     pub use_global_blocked_services: bool,
     /// When this client's blocked services are paused.
@@ -379,10 +375,6 @@ pub struct PersistentSpec {
     pub use_global_settings: bool,
     /// Whether blocklists are consulted.
     pub filtering_enabled: bool,
-    /// Whether parental control applies.
-    pub parental_enabled: bool,
-    /// Whether safe browsing applies.
-    pub safebrowsing_enabled: bool,
     /// Whether the global blocked-services settings apply.
     pub use_global_blocked_services: bool,
     /// The client's own blocked services.
@@ -422,8 +414,6 @@ impl Persistent {
             upstreams: spec.upstreams.clone(),
             use_global_settings: spec.use_global_settings,
             filtering_enabled: spec.filtering_enabled,
-            parental_enabled: spec.parental_enabled,
-            safebrowsing_enabled: spec.safebrowsing_enabled,
             use_global_blocked_services: spec.use_global_blocked_services,
             schedule: spec.schedule.clone(),
             ignore_querylog: spec.ignore_querylog,

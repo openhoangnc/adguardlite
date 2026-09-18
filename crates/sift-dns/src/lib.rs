@@ -10,7 +10,6 @@ pub mod ddr;
 pub mod dns64;
 pub mod doq;
 pub mod edns;
-pub mod hashprefix;
 pub mod msg;
 pub mod pending;
 pub mod pool;

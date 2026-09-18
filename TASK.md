@@ -19,12 +19,13 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 | Upstreams | plain UDP/TCP, DoT, DoH, DoH/3, DoQ done · DNSCrypt **out of scope** |
 | Query log | done, byte-identical |
 | Statistics | done, `stats.db` interoperable both ways |
-| HTTP API | all 81 upstream paths routed · 73 implemented, 8 refuse by design · one path added |
+| HTTP API | all 81 upstream paths routed · 69 implemented, 12 refuse by design · one path and one parameter added |
 | Web interface | rewritten in `web/client`, built to `web/build`, embedded |
 | Docker | done, same runtime contract |
 | DHCP | **out of scope** — API reports it off and refuses changes |
+| Safe browsing / parental control | **out of scope** — API reports them off and refuses changes |
 | Encrypted inbound listeners | DoT, DoH, HTTP/3 and DoQ done · DNSCrypt **out of scope** |
-| Safe browsing / parental / safe search | done |
+| Safe search | done |
 | Clients | persistent settings, ClientID, ARP/rDNS/WHOIS/hosts discovery |
 | Operations | logging, rotation, pidfile, privileges, service install |
 | Installer | `scripts/install.sh`: installs, upgrades, and takes over AdGuard Home |
@@ -74,9 +75,6 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 - [x] Filter list storage in `data/filters/<id>.txt`, download and refresh
 - [x] **Safe search**, from AdGuard's own rule files for Bing, DuckDuckGo,
       Ecosia, Google, Pixabay, Yandex and YouTube, global and per client
-- [x] **Safe browsing** and **parental control** over the hash-prefix protocol:
-      SHA-256 prefixes in a `TXT` question to AdGuard's family resolver, with
-      the bucket cache upstream keeps
 
 ### DNS
 - [x] Plain DNS over UDP and TCP, with TCP connection reuse and idle timeout
@@ -210,9 +208,9 @@ Verification claims below are reproducible with `scripts/verify.sh` and
 ### Clients
 - [x] Persistent clients matched by address, subnet, MAC or ClientID, most
       specific first
-- [x] Per-client settings actually applied: filtering, safe browsing, parental
-      control, safe search, blocked services and their schedule, and exclusion
-      from the query log or the statistics
+- [x] Per-client settings actually applied: filtering, safe search, blocked
+      services and their schedule, and exclusion from the query log or the
+      statistics
 - [x] **ClientID** from the DoH path segment and from the name a DoT or DoQ
       client asks for — only the label directly below the server's own name, so
       an unrelated name cannot claim an identifier
@@ -250,6 +248,18 @@ Verification claims below are reproducible with `scripts/verify.sh` and
       blocklists AdGuard bundles in its client. Serving it rather than
       bundling it keeps `web/client` free of AdGuard's material — see
       *Deliberate deviations*
+- [x] **One parameter added**: `filter_id` on `GET /control/querylog`, keeping
+      only the entries a rule from that list matched, so the query log's list
+      filter works across the whole log rather than the page in hand. Parsed
+      leniently, so a value that is not a number is ignored rather than
+      answered 400
+- [x] **The query log says which list matched, and filters by it.** The
+      details modal names the list under each matched rule, and a second
+      dropdown beside the verdict one narrows the log to a single list —
+      custom rules, any subscribed blocklist or allowlist, blocked services or
+      the hosts file. Reserved identifiers are named from `rulelist.APIID`;
+      anything else falls back to `List <id>`, so a rule from a list that has
+      since been removed still reads
 - [x] **Protection can be paused for a set time**, and the pause actually
       ends: 30 seconds, a minute, ten minutes, an hour, or until tomorrow.
       Stored as a deadline in `filtering.protection_disabled_until`, so it
@@ -527,6 +537,54 @@ and others. The exclusion is about the cost and risk of implementing it here,
 not about nobody using it. If that trade changes, this is a session on its own,
 with the Go implementation as an oracle throughout.
 
+### Safe browsing and parental control
+
+**This build makes no hash-prefix lookups.** Both were implemented, verified
+against the reference vectors and against a running family resolver, and have
+now been removed along with `sift-dns/src/hashprefix.rs`. Block malware,
+phishing or adult content with a filter list instead; the catalogue under
+**Filters** carries lists for each.
+
+Why they went rather than stayed:
+
+- They were the only thing in the tree that sent anything derived from a user's
+  query to a third party. The hostname itself never left — that is the point of
+  the protocol — but a two-byte prefix of each parent label's SHA-256 went to
+  AdGuard for every name that reached that step, which made a resolver that
+  otherwise talks only to the upstreams its operator chose depend on somebody
+  else's policy for every unblocked query.
+- Both sat on the hot path. A bucket the cache did not hold cost a round trip
+  to `family.adguard-dns.com` **before** the query could be answered, and that
+  resolver is neither this project's to run nor its to test against.
+- What they blocked is data this project does not control and cannot pin. Two
+  of the three defects ever found in the module were AdGuard's set changing
+  under a test, not a bug in the code.
+- The same verdicts are available locally, from lists the operator subscribes
+  to and can see the contents of.
+
+What the removal deliberately did **not** touch:
+
+- `GET /control/safebrowsing/status` and `/control/parental/status` stay
+  routed and answer `enabled: false` whatever the config file holds, for the
+  same reason `dhcp_status` does not echo its stored section. `enable` and
+  `disable` answer **501** with a message saying what to use instead.
+- The six config fields — `safebrowsing_enabled`, `parental_enabled`, the two
+  block hosts and the two cache sizes — are still read and written unchanged,
+  and so is each persistent client's pair. `POST /control/clients/update`
+  carries a client's two toggles across rather than clearing them, because the
+  API no longer carries the fields and the replacement would otherwise drop
+  what an AdGuard Home operator had set. Someone switching back keeps
+  everything.
+- `Reason::FilteredSafeBrowsing`, `Reason::FilteredParental` and their
+  statistics counterparts stay. They are on-disk formats: a `querylog.json` and
+  a `stats.db` written by the Go build still have to read, the query log still
+  labels such an entry, and `/control/querylog`'s `blocked_safebrowsing` and
+  `blocked_parental` filters still select them.
+
+The dashboard lost two of its four series with them, and the statistics
+response kept all four fields — the shape is upstream's, and the counters can
+still be non-zero for hours the Go build recorded.
+
 ## Found by running the image, and fixed
 
 The first end-to-end pass over the published container — the setup wizard in a
@@ -718,25 +776,6 @@ gate, a long hostname cost 838 ns against 364 with it.
 **What did not improve.** A short clean hostname still costs ~530 ns, much as
 it did under Aho-Corasick; the shortcut phase dominates it and neither
 structure fixed that. It is the obvious place for the next person to look.
-
-## Found by running the live tests, and fixed
-
-- **Safe browsing and parental control could never start.** The family
-  resolver's own name is bootstrapped over plain DNS, and `hashprefix` asked
-  for it on **port 443** — where those hosts serve DoH, and where a plain
-  query is answered by nothing. Every lookup timed out, `Checker::connect`
-  failed, and both features stayed off with an error in the log while the
-  interface reported them on. Port 53, and the unit test that asserted 443
-  now asserts 53 and says why. Found because `cargo test -p sift-dns --test
-  live -- --ignored` was run; nothing offline could have caught it, since the
-  port only matters against a real resolver.
-- **A live test asserted AdGuard's data rather than this build's behaviour.**
-  `testsafebrowsing.adguard.com` was asserted to be reported unsafe; it is no
-  longer in the set and no longer resolves at all. Which hosts are listed is
-  not ours to pin, so the test now asserts what does break in practice — that
-  the family resolver can be reached — and the matching itself stays pinned
-  offline by `a_matching_hash_in_the_cache_blocks` and
-  `hashing_matches_the_reference_vectors`.
 
 ## Found signing in from a second hostname, and fixed
 
@@ -1727,11 +1766,6 @@ Not bugs; recorded so nobody "fixes" them.
   directly. This runs `ipset add … -exist`, which needs no netlink
   implementation, and remembers what it has already added so the cost is one
   process per new address rather than one per query.
-- **Safe browsing stops at the last label, not the public suffix.** Upstream
-  consults a public suffix list so a name under `co.uk` is not hashed at the
-  suffix itself. This build stops before the final label instead, which adds at
-  most one hash prefix to the question for such a name. No entry can match it,
-  so the verdict is the same.
 - **Privilege dropping is Linux-only.** `os.user` and `os.group` use the
   thread-scoped `setuid`/`setgid` the safe wrapper exposes, applied before the
   runtime spawns a second thread. On other Unixes the setting is reported as

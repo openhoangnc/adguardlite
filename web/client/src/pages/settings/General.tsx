@@ -40,16 +40,14 @@ export default function General() {
     const toast = useToast();
 
     const all = useAsync(async () => {
-        const [filtering, safeBrowsing, parental, safeSearch, log, stats] = await Promise.all([
+        const [filtering, safeSearch, log, stats] = await Promise.all([
             api.getFilteringStatus(),
-            api.getSafeBrowsing(),
-            api.getParental(),
             api.getSafeSearch(),
             api.getQueryLogConfig(),
             api.getStatsConfig(),
         ]);
 
-        return { filtering, safeBrowsing, parental, safeSearch, log, stats };
+        return { filtering, safeSearch, log, stats };
     });
 
     if (!all.data) {
@@ -103,25 +101,6 @@ export default function General() {
                         ))}
                     </select>
                 </Field>
-            </Card>
-
-            <Card title="Security">
-                <Check
-                    checked={d.safeBrowsing.enabled}
-                    label="Block malware and phishing"
-                    hint="Each name is checked against AdGuard's hash-prefix service: only a short prefix of its SHA-256 leaves this machine, never the name itself."
-                    onChange={(v) =>
-                        void guard(() => api.setSafeBrowsing(v), v ? 'Security filtering is on' : 'Security filtering is off')
-                    }
-                />
-                <Check
-                    checked={d.parental.enabled}
-                    label="Block adult content"
-                    hint="Uses the same hash-prefix service, and tells you as little about a query as the check above."
-                    onChange={(v) =>
-                        void guard(() => api.setParental(v), v ? 'Parental control is on' : 'Parental control is off')
-                    }
-                />
             </Card>
 
             <SafeSearch value={d.safeSearch} onSaved={all.reload} />

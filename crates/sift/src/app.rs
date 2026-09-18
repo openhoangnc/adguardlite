@@ -306,8 +306,6 @@ pub fn clients(c: &Config) -> sift_dns::clients::Registry {
             upstreams: p.upstreams.clone(),
             use_global_settings: p.use_global_settings,
             filtering_enabled: p.filtering_enabled,
-            parental_enabled: p.parental_enabled,
-            safebrowsing_enabled: p.safebrowsing_enabled,
             use_global_blocked_services: p.use_global_blocked_services,
             blocked_services: p.blocked_services.ids.clone(),
             schedule: schedule(&p.blocked_services.schedule),
@@ -369,8 +367,6 @@ pub fn settings(c: &Config) -> Settings {
         protection_enabled: c.filtering.protection_enabled,
         filtering_enabled: c.filtering.filtering_enabled,
         rewrites_enabled: c.filtering.rewrites_enabled,
-        safebrowsing_enabled: c.filtering.safebrowsing_enabled,
-        parental_enabled: c.filtering.parental_enabled,
         blocking: BlockingConfig {
             mode: match c.filtering.blocking_mode {
                 CfgBlockingMode::Default => BlockingMode::Default,

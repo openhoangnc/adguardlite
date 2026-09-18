@@ -19,8 +19,12 @@ pub enum Reason {
     /// The host matched a blocklist rule.
     FilteredBlockList = 3,
     /// The host was found to be malicious or phishing.
+    ///
+    /// This build never produces it -- it makes no hash-prefix lookups -- but
+    /// the number is the query log's on-disk format, so a log AdGuard Home
+    /// wrote still reads.  Same for [`Reason::FilteredParental`].
     FilteredSafeBrowsing = 4,
-    /// The host is outside of parental control settings.
+    /// The host is outside of parental control settings.  Never produced here.
     FilteredParental = 5,
     /// The request was invalid and was not processed.
     FilteredInvalid = 6,
@@ -173,11 +177,12 @@ pub enum StatsResult {
     NotFiltered = 1,
     /// Filtered by a blocklist.
     FilteredBlack = 2,
-    /// Filtered by safe browsing.
+    /// Filtered by safe browsing.  Never produced here; see
+    /// [`Reason::FilteredSafeBrowsing`].
     SafeBrowsing = 3,
     /// Rewritten by safe search.
     SafeSearch = 4,
-    /// Filtered by parental control.
+    /// Filtered by parental control.  Never produced here.
     Parental = 5,
 }
 

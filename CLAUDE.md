@@ -57,7 +57,7 @@ installation.
 ```bash
 cargo build --release            # fast to build and to run
 cargo build --profile dist       # fat LTO, panic=abort, stripped: ~10.7 MB
-cargo test --workspace           # 745 tests, no network or Go build needed
+cargo test --workspace           # 741 tests, no network or Go build needed
 cargo clippy --workspace --all-targets
 ```
 
@@ -169,8 +169,8 @@ sift-config    -> core           AdGuardHome.yaml, schema 34, a YAML emitter tha
 sift-filter    -> core, config   rule parser and matcher, list storage,
                                 blocked-services catalogue, safe-search rules
 sift-dns       -> core, filter   wire codec, cache, upstreams, listeners, EDNS,
-                                DNS64, DDR, client registry, the hash-prefix
-                                checker, and the resolver that orders every step
+                                DNS64, DDR, client registry, and the resolver
+                                that orders every step
 sift-querylog  -> core           querylog.json
 sift-bolt                        a minimal bbolt reader and writer
 sift-gob                         Go `gob` for the statistics unit
@@ -201,9 +201,10 @@ is observable behaviour copied from `internal/dnsforward`:
    amplification;
 4. DDR (`_dns.resolver.arpa`) is answered locally;
 5. rewrites apply *even when protection is off*;
-6. filtering, in upstream's order: blocklists, then blocked services, then safe
-   browsing, then parental control, then safe search. An allowlist match sets
-   the verdict but still resolves, and short-circuits everything after it;
+6. filtering, in upstream's order: blocklists, then blocked services, then
+   safe search — upstream checks safe browsing and parental control between
+   the last two, and this build does neither. An allowlist match sets the
+   verdict but still resolves, and short-circuits everything after it;
 7. `AAAA` suppression;
 8. a private `PTR` is routed to the local resolvers or answered `NXDOMAIN`;
 9. cache;
@@ -295,6 +296,12 @@ client. Serving it keeps `web/client` free of AdGuard's material, which is what
 `NOTICE.md` claims; the interface falls back to the custom-address form if it
 ever answers 404. Adding a path is safe for the drop-in contract because the
 two builds never serve the same interface.
+
+**One query parameter is ours too**: `/control/querylog` takes `filter_id`,
+which keeps only the entries a rule from that list matched, so the query log's
+list filter works across the whole log rather than the page in hand. It is
+parsed leniently — a value that is not a number is ignored — so a request
+upstream would have answered never becomes a 400.
 
 What that catalogue carries is **half AdGuard's and half ours**, and the split
 matters when editing it:
@@ -448,10 +455,11 @@ about how they fit:
 dnsproxy client against a listener, with the certificate verified rather than
 skipped.
 
-## Two exclusions, both deliberate
+## Three exclusions, all deliberate
 
-DHCP and DNSCrypt are decisions, not gaps. Each refuses clearly where a user
-would notice, and `TASK.md` records the reasoning for each.
+DHCP, DNSCrypt, and safe browsing with parental control are decisions, not
+gaps. Each refuses clearly where a user would notice, and `TASK.md` records the
+reasoning for each.
 
 **DHCP.** The API reports the feature off and refuses every change, so the
 interface cannot store settings nothing acts on. Two things follow that are
@@ -466,6 +474,24 @@ easy to get wrong:
 **DNSCrypt.** No listener, and an `sdns://` upstream is reported at startup and
 skipped. It is the only protocol left that needs cryptography the tree does not
 already carry, and a mistake in it fails silently.
+
+**Safe browsing and parental control.** No hash-prefix lookups, and no
+`hashprefix` module: the only thing in the tree that sent anything derived from
+a user's query to a third party is gone. `/control/safebrowsing/status` and
+`/control/parental/status` answer `enabled: false` whatever the config holds,
+and `enable`/`disable` answer 501 — the DHCP shape, for the DHCP reason. Three
+things follow:
+
+- **The six config fields stay**, for the reason `DhcpConfig` does; they are
+  marked "Kept, not acted on" in `sift-config/src/model.rs`.
+- **`Reason::FilteredSafeBrowsing`, `FilteredParental` and their statistics
+  counterparts stay too.** They are on-disk formats: a query log and a
+  `stats.db` written by the Go build still have to read, and
+  `/control/querylog`'s `blocked_safebrowsing` and `blocked_parental` filters
+  still select those entries.
+- **`clients_update` carries the two per-client toggles across.** They are no
+  longer in `ClientJson`, so replacing the stored client wholesale would clear
+  a value the operator set under AdGuard Home.
 
 ## Replacing the binary
 

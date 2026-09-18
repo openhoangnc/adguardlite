@@ -103,6 +103,14 @@ pub struct QueryLogParams {
     /// Return entries older than this timestamp.
     #[serde(default)]
     pub older_than: Option<String>,
+    /// Keep only entries a rule from this filter list matched.
+    ///
+    /// Ours, not upstream's: `/control/querylog` has no such parameter, and
+    /// the two builds never serve the same interface.  A string rather than
+    /// an integer so a select that submits an empty value is ignored instead
+    /// of failing the whole request.
+    #[serde(default)]
+    pub filter_id: Option<String>,
 }
 
 /// `GET /control/querylog`
@@ -125,6 +133,7 @@ pub async fn querylog(
 
     let search = p.search.as_deref().and_then(Search::parse);
     let status = p.response_status.as_deref().unwrap_or("all");
+    let list = p.filter_id.as_deref().and_then(|v| v.parse::<i64>().ok());
 
     // A configured client's name before a discovered one, as upstream's
     // `clientOrArtificial` does: it asks the persistent store first and only
@@ -150,6 +159,7 @@ pub async fn querylog(
         .filter(|e| is_older_than(e, cutoff))
         .filter(|e| matches_search(e, search.as_ref(), &name_of(e)))
         .filter(|e| matches_status(e, status))
+        .filter(|e| matches_filter_list(e, list))
         .take(limit)
         .collect();
 
@@ -276,6 +286,8 @@ fn matches_status(e: &Entry, status: &str) -> bool {
         "all" | "" => true,
         "filtered" => r.matched() && r != R::NotFilteredNotFound,
         "blocked" => r.is_filtered(),
+        // This build makes no hash-prefix lookups, but the log it reads may
+        // have been written by one that did, so both filters still select.
         "blocked_safebrowsing" => r == R::FilteredSafeBrowsing,
         "blocked_parental" => r == R::FilteredParental,
         "whitelisted" => r == R::NotFilteredAllowList,
@@ -284,6 +296,19 @@ fn matches_status(e: &Entry, status: &str) -> bool {
         "processed" => !r.is_filtered(),
         _ => true,
     }
+}
+
+/// Reports whether a rule from the given filter list matched the entry.
+///
+/// Every rule is considered, not just the first: a query can be recorded with
+/// an allowlist rule beside the blocklist one it overrode, and an operator
+/// asking which queries a list touched means either.
+fn matches_filter_list(e: &Entry, list: Option<i64>) -> bool {
+    let Some(id) = list else {
+        return true;
+    };
+
+    e.result.rules.iter().any(|r| r.filter_list_id == id)
 }
 
 /// Describes the client an entry came from, as the interface reads it.
@@ -809,6 +834,28 @@ mod tests {
 
         for e in [&blocked, &allowed, &plain] {
             assert!(matches_status(e, "all"));
+        }
+    }
+
+    #[test]
+    fn the_list_filter_selects_by_rule_and_ignores_nonsense() {
+        let mut blocked = entry("a.com", Reason::FilteredBlockList);
+        blocked.result.rules = vec![sift_querylog::entry::ResultRule {
+            text: "||a.com^".into(),
+            ip: None,
+            filter_list_id: 7,
+        }];
+        let plain = entry("b.com", Reason::NotFilteredNotFound);
+
+        assert!(matches_filter_list(&blocked, Some(7)));
+        assert!(!matches_filter_list(&blocked, Some(8)));
+        // An entry no rule matched belongs to no list.
+        assert!(!matches_filter_list(&plain, Some(7)));
+        // Custom rules are list 0, which must not read as "no filter".
+        assert!(!matches_filter_list(&blocked, Some(0)));
+
+        for e in [&blocked, &plain] {
+            assert!(matches_filter_list(e, None), "no list asked for keeps all");
         }
     }
 

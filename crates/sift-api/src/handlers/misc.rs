@@ -55,10 +55,6 @@ pub struct ClientJson {
     pub use_global_settings: bool,
     /// Whether filtering applies.
     pub filtering_enabled: bool,
-    /// Whether parental control applies.
-    pub parental_enabled: bool,
-    /// Whether safe browsing applies.
-    pub safebrowsing_enabled: bool,
     /// Whether global blocked-service settings apply.
     pub use_global_blocked_services: bool,
     /// Services blocked for this client.
@@ -123,8 +119,6 @@ pub async fn clients(State(s): State<Shared>) -> Json<serde_json::Value> {
             ids: c.ids.clone(),
             use_global_settings: c.use_global_settings,
             filtering_enabled: c.filtering_enabled,
-            parental_enabled: c.parental_enabled,
-            safebrowsing_enabled: c.safebrowsing_enabled,
             use_global_blocked_services: c.use_global_blocked_services,
             blocked_services: c.blocked_services.ids.clone(),
             upstreams: c.upstreams.clone(),
@@ -151,8 +145,6 @@ fn to_persistent(c: &ClientJson) -> sift_config::model::PersistentClient {
         upstreams: c.upstreams.clone(),
         use_global_settings: c.use_global_settings,
         filtering_enabled: c.filtering_enabled,
-        parental_enabled: c.parental_enabled,
-        safebrowsing_enabled: c.safebrowsing_enabled,
         use_global_blocked_services: c.use_global_blocked_services,
         ignore_querylog: c.ignore_querylog,
         ignore_statistics: c.ignore_statistics,
@@ -244,7 +236,15 @@ pub async fn clients_update(
         else {
             return Err(ApiError::not_found("no client with that name"));
         };
+
+        // The safe browsing and parental control toggles are not part of this
+        // build's client API, but they are part of the config file, so they
+        // are carried across rather than reset: an operator who edits a client
+        // here and later switches back to AdGuard Home finds them as they left
+        // them.  See the safe browsing and parental control section of TASK.md.
+        let carried = (slot.safebrowsing_enabled, slot.parental_enabled);
         *slot = to_persistent(&req.data);
+        (slot.safebrowsing_enabled, slot.parental_enabled) = carried;
     }
 
     s.save_config().map_err(ApiError::internal)
@@ -362,8 +362,6 @@ fn find_client(s: &Shared, id: &str) -> serde_json::Value {
             "use_global_settings": c.use_global_settings,
             "use_global_blocked_services": c.use_global_blocked_services,
             "filtering_enabled": c.filtering_enabled,
-            "parental_enabled": c.parental_enabled,
-            "safebrowsing_enabled": c.safebrowsing_enabled,
             "ignore_querylog": c.ignore_querylog,
             "ignore_statistics": c.ignore_statistics,
             "disallowed": addr

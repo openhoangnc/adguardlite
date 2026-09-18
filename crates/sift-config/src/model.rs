@@ -661,8 +661,15 @@ pub struct FilteringConfig {
     /// How blocked queries are answered.
     pub blocking_mode: BlockingMode,
     /// Host used for parental-control block pages.
+    ///
+    /// One of six fields this build reads and writes but never acts on --
+    /// with `safebrowsing_block_host`, the two cache sizes and the two
+    /// `_enabled` flags below.  Neither feature is served here, and the
+    /// section is kept for the same reason `dhcp` is: the file must
+    /// round-trip byte for byte, and a user switching back to the Go build
+    /// would otherwise lose their settings.  Do not remove them.
     pub parental_block_host: String,
-    /// Host used for safe-browsing block pages.
+    /// Host used for safe-browsing block pages.  Kept, not acted on.
     pub safebrowsing_block_host: String,
     /// DNS rewrite rules.
     pub rewrites: Vec<Rewrite>,
@@ -670,11 +677,11 @@ pub struct FilteringConfig {
     pub safe_fs_patterns: Vec<String>,
     /// Maximum size of a downloaded filter list.
     pub max_http_size: ByteSize,
-    /// Safe-browsing cache size in bytes.
+    /// Safe-browsing cache size in bytes.  Kept, not acted on.
     pub safebrowsing_cache_size: u64,
     /// Safe-search cache size in bytes.
     pub safesearch_cache_size: u64,
-    /// Parental-control cache size in bytes.
+    /// Parental-control cache size in bytes.  Kept, not acted on.
     pub parental_cache_size: u64,
     /// Cache entry lifetime in minutes.
     pub cache_time: u32,
@@ -686,9 +693,9 @@ pub struct FilteringConfig {
     pub filtering_enabled: bool,
     /// Whether DNS rewrites are applied.
     pub rewrites_enabled: bool,
-    /// Whether parental control is on.
+    /// Whether parental control is on.  Kept, not acted on.
     pub parental_enabled: bool,
-    /// Whether safe browsing is on.
+    /// Whether safe browsing is on.  Kept, not acted on.
     pub safebrowsing_enabled: bool,
     /// The master protection switch.
     pub protection_enabled: bool,
@@ -939,9 +946,9 @@ pub struct PersistentClient {
     pub use_global_settings: bool,
     /// Whether global filtering settings apply.
     pub filtering_enabled: bool,
-    /// Whether parental control applies.
+    /// Whether parental control applies.  Kept, not acted on.
     pub parental_enabled: bool,
-    /// Whether safe browsing applies.
+    /// Whether safe browsing applies.  Kept, not acted on.
     pub safebrowsing_enabled: bool,
     /// Whether the client's queries are kept **out** of the query log.
     ///

@@ -50,20 +50,6 @@ refreshed. Each server learns your IP address and that you use Sift —
 the request carries `User-Agent: AdGuardLite/<version>` — but nothing about
 what you resolved.
 
-### Safe browsing and parental control, if you enable them
-
-Both are off by default. When on, the hostname itself is **never sent**. Each
-of the name's parent labels is hashed with SHA-256, the first two bytes of each
-hash become labels of a `TXT` query, and the server answers with every full
-hash it knows in those buckets; the match is then made locally. The server
-learns a two-byte bucket, which many names share, not the name.
-
-Those queries go to `family.adguard-dns.com` over DNS-over-HTTPS, whose
-addresses are built in so the lookup cannot depend on this very server.
-AdGuard operates that endpoint and their [privacy policy][agpp] governs it.
-
-[agpp]: https://adguard.com/en/privacy/dns.html
-
 ### The update check
 
 Once every eight hours, a request to
@@ -98,6 +84,11 @@ out.
 This project is not affiliated with AdGuard Software Limited. It is an
 independent reimplementation of AdGuard Home, which is theirs and is licensed
 GPL-3.0; see [NOTICE.md](../NOTICE.md). The AdGuard services it can be
-configured to talk to — the family resolver above, and AdGuard's DNS resolvers
-if you choose them as upstreams — are operated by AdGuard under their own
-policies, not by this project.
+configured to talk to — AdGuard's DNS resolvers, if you choose them as
+upstreams, and their filter lists, if you subscribe to them — are operated by
+AdGuard under their own policies, not by this project.
+
+This build makes no safe browsing or parental control lookups. AdGuard Home
+checks each name against AdGuard's hash-prefix service when those are on; there
+is no such check here, and nothing about a name you resolve is sent to AdGuard
+unless you chose one of their resolvers as an upstream.

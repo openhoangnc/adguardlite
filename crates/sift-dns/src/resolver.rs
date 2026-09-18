@@ -22,7 +22,6 @@ use crate::clients::{Persistent, Registry, Runtime};
 use crate::ddr;
 use crate::dns64;
 use crate::edns;
-use crate::hashprefix::{self, Checker};
 use crate::msg::{self, BlockingConfig};
 use crate::pending::{Entry as PendingEntry, Pending, PendingKey};
 use crate::pool::{Pool, SharedPool};
@@ -94,10 +93,6 @@ pub struct Settings {
     pub filtering_enabled: bool,
     /// Whether rewrites are applied.
     pub rewrites_enabled: bool,
-    /// Whether safe browsing lookups are made.
-    pub safebrowsing_enabled: bool,
-    /// Whether parental control lookups are made.
-    pub parental_enabled: bool,
     /// How blocked queries are answered.
     pub blocking: BlockingConfig,
     /// Hosts refused before any other processing.
@@ -138,8 +133,6 @@ impl Default for Settings {
             protection_enabled: true,
             filtering_enabled: true,
             rewrites_enabled: true,
-            safebrowsing_enabled: false,
-            parental_enabled: false,
             blocking: BlockingConfig::default(),
             blocked_hosts: crate::blocked::BlockedHosts::shared(&[
                 "version.bind".into(),
@@ -251,10 +244,6 @@ pub struct ClientInfo {
 struct Effective {
     /// Whether blocklists are consulted.
     filtering_enabled: bool,
-    /// Whether safe browsing applies.
-    safebrowsing_enabled: bool,
-    /// Whether parental control applies.
-    parental_enabled: bool,
     /// The blocked-services engine to use, if any.
     services: Option<Arc<Engine>>,
     /// The safe-search engine to use, if any.
@@ -283,10 +272,6 @@ pub struct Resolver {
     clients: RwLock<Arc<Registry>>,
     /// Clients discovered while running, shared with the API.
     pub runtime: Arc<Runtime>,
-    /// The safe browsing checker, when the feature is configured.
-    safebrowsing: RwLock<Option<Arc<Checker>>>,
-    /// The parental control checker, when the feature is configured.
-    parental: RwLock<Option<Arc<Checker>>>,
     /// The response cache.
     pub cache: Cache,
     /// The upstream pool.
@@ -328,8 +313,6 @@ impl Resolver {
             rewrites: RwLock::new(Arc::new(rewrites)),
             clients: RwLock::new(Arc::new(Registry::default())),
             runtime: Arc::new(Runtime::new()),
-            safebrowsing: RwLock::new(None),
-            parental: RwLock::new(None),
             cache,
             pool,
             client_pools: RwLock::new(Arc::new(HashMap::new())),
@@ -363,16 +346,6 @@ impl Resolver {
     /// Replaces the persistent client registry.
     pub fn set_clients(&self, r: Registry) {
         *self.clients.write() = Arc::new(r);
-    }
-
-    /// Replaces the safe browsing checker.
-    pub fn set_safebrowsing(&self, c: Option<Arc<Checker>>) {
-        *self.safebrowsing.write() = c;
-    }
-
-    /// Replaces the parental control checker.
-    pub fn set_parental(&self, c: Option<Arc<Checker>>) {
-        *self.parental.write() = c;
     }
 
     /// Replaces the resolvers used for private reverse lookups.
@@ -469,8 +442,6 @@ impl Resolver {
         let Some(c) = client else {
             return Effective {
                 filtering_enabled: settings.filtering_enabled,
-                safebrowsing_enabled: settings.safebrowsing_enabled,
-                parental_enabled: settings.parental_enabled,
                 services: global_services,
                 safe_search: self.safe_search.read().clone(),
                 upstreams: None,
@@ -488,26 +459,14 @@ impl Resolver {
                 .filter(|_| c.schedule.blocks_at(jiff::Timestamp::now()))
         };
 
-        let (filtering, safebrowsing, parental, safe_search) = if c.use_global_settings {
-            (
-                settings.filtering_enabled,
-                settings.safebrowsing_enabled,
-                settings.parental_enabled,
-                self.safe_search.read().clone(),
-            )
+        let (filtering, safe_search) = if c.use_global_settings {
+            (settings.filtering_enabled, self.safe_search.read().clone())
         } else {
-            (
-                c.filtering_enabled,
-                c.safebrowsing_enabled,
-                c.parental_enabled,
-                c.safe_search.clone(),
-            )
+            (c.filtering_enabled, c.safe_search.clone())
         };
 
         Effective {
             filtering_enabled: filtering,
-            safebrowsing_enabled: safebrowsing,
-            parental_enabled: parental,
             services,
             safe_search,
             // Independent of `use_global_settings`: upstream treats a client's
@@ -642,10 +601,7 @@ impl Resolver {
                 let m = engine.match_request(&filter_req);
 
                 match m.reason {
-                    Reason::FilteredBlockList
-                    | Reason::FilteredSafeBrowsing
-                    | Reason::FilteredParental
-                    | Reason::FilteredBlockedService => {
+                    Reason::FilteredBlockList | Reason::FilteredBlockedService => {
                         return finish(self.blocked(req, &settings, m.reason, m.rules, base()));
                     }
                     Reason::RewrittenRule => {
@@ -684,46 +640,6 @@ impl Resolver {
                     out.service_name = service_name_of(&out.rules);
 
                     return finish(out);
-                }
-            }
-
-            // Safe browsing and parental control, which are network lookups
-            // and so come after everything local.
-            if allowed.is_none() && eff.safebrowsing_enabled {
-                let checker = self.safebrowsing.read().clone();
-                if let Some(c) = checker
-                    && c.check(&host).await
-                {
-                    return finish(self.blocked(
-                        req,
-                        &settings,
-                        Reason::FilteredSafeBrowsing,
-                        vec![MatchedRule {
-                            text: hashprefix::SAFE_BROWSING_RULE.into(),
-                            list_id: hashprefix::SAFE_BROWSING_LIST_ID,
-                            ip: None,
-                        }],
-                        base(),
-                    ));
-                }
-            }
-
-            if allowed.is_none() && eff.parental_enabled {
-                let checker = self.parental.read().clone();
-                if let Some(c) = checker
-                    && c.check(&host).await
-                {
-                    return finish(self.blocked(
-                        req,
-                        &settings,
-                        Reason::FilteredParental,
-                        vec![MatchedRule {
-                            text: hashprefix::PARENTAL_RULE.into(),
-                            list_id: hashprefix::PARENTAL_LIST_ID,
-                            ip: None,
-                        }],
-                        base(),
-                    ));
                 }
             }
 

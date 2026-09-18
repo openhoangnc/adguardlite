@@ -18,17 +18,10 @@ const RANGES = [
     { ms: 90 * DAY_MS, label: 'Last 90 days' },
 ];
 
-/** The four series the timeline draws, and the totals above it. */
+/** The series the timeline draws, and the totals above it. */
 const SERIES = [
     { key: 'dns_queries', total: 'num_dns_queries', label: 'Queries', colour: '--chart-5' },
     { key: 'blocked_filtering', total: 'num_blocked_filtering', label: 'Blocked by filters', colour: '--chart-2' },
-    {
-        key: 'replaced_safebrowsing',
-        total: 'num_replaced_safebrowsing',
-        label: 'Malware and phishing',
-        colour: '--chart-4',
-    },
-    { key: 'replaced_parental', total: 'num_replaced_parental', label: 'Adult sites', colour: '--chart-3' },
 ] as const;
 
 export default function Dashboard() {

@@ -12,8 +12,6 @@ const BLANK: Client = {
     ids: [],
     use_global_settings: true,
     filtering_enabled: true,
-    parental_enabled: false,
-    safebrowsing_enabled: false,
     use_global_blocked_services: true,
     blocked_services: [],
     upstreams: [],
@@ -144,13 +142,9 @@ function Summary({ client }: { client: Client }) {
         return <span className="muted">Global settings</span>;
     }
 
-    const on = [
-        client.filtering_enabled && 'filters',
-        client.safebrowsing_enabled && 'security',
-        client.parental_enabled && 'adult content',
-    ].filter(Boolean);
-
-    return <span className="muted">{on.length ? on.join(', ') : 'nothing blocked'}</span>;
+    return (
+        <span className="muted">{client.filtering_enabled ? 'filters' : 'nothing blocked'}</span>
+    );
 }
 
 function Runtime({ data }: { data: ClientsResponse }) {
@@ -279,23 +273,11 @@ function Editor({
                 onChange={(v) => set('use_global_settings', v)}
             />
             {!d.use_global_settings && (
-                <>
-                    <Check
-                        checked={d.filtering_enabled}
-                        label="Block with filter lists and rules"
-                        onChange={(v) => set('filtering_enabled', v)}
-                    />
-                    <Check
-                        checked={d.safebrowsing_enabled}
-                        label="Block malware and phishing"
-                        onChange={(v) => set('safebrowsing_enabled', v)}
-                    />
-                    <Check
-                        checked={d.parental_enabled}
-                        label="Block adult content"
-                        onChange={(v) => set('parental_enabled', v)}
-                    />
-                </>
+                <Check
+                    checked={d.filtering_enabled}
+                    label="Block with filter lists and rules"
+                    onChange={(v) => set('filtering_enabled', v)}
+                />
             )}
 
             <Check

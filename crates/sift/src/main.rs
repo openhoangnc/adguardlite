@@ -306,18 +306,6 @@ async fn run(args: Args, paths: Paths, mut config: sift_config::Config) -> anyho
     recorder_handle.set_discovery(queue, application.resolver.runtime.clone());
     tasks.push(discovery_task);
 
-    // Safe browsing and parental control, whose lookups go to AdGuard's own
-    // family resolver.  Resolving it can block, so it happens in the
-    // background: a slow network must not hold up the DNS listeners.
-    tasks.push(tokio::spawn(start_hashprefix_checkers(
-        application.resolver.clone(),
-        application.config.filtering.safebrowsing_enabled,
-        application.config.filtering.parental_enabled,
-        application.config.filtering.cache_time,
-        application.config.filtering.safebrowsing_cache_size as usize,
-        application.config.filtering.parental_cache_size as usize,
-    )));
-
     for addr in application.dns_addrs() {
         tracing::info!(%addr, "serving dns");
     }
@@ -481,49 +469,6 @@ async fn run(args: Args, paths: Paths, mut config: sift_config::Config) -> anyho
     }
 
     Ok(())
-}
-
-/// Builds the safe browsing and parental control checkers.
-///
-/// Each is a DNS-over-HTTPS client to AdGuard's family resolver; a failure to
-/// reach it leaves the feature off for this run rather than stopping the
-/// server, and is logged so the operator can see why nothing is being
-/// blocked.
-async fn start_hashprefix_checkers(
-    resolver: Arc<sift_dns::resolver::Resolver>,
-    safebrowsing: bool,
-    parental: bool,
-    cache_minutes: u32,
-    sb_cache: usize,
-    pc_cache: usize,
-) {
-    use sift_dns::hashprefix::{Checker, PARENTAL_SUFFIX, SAFE_BROWSING_SUFFIX};
-
-    if !safebrowsing && !parental {
-        return;
-    }
-
-    let ttl = Duration::from_secs(u64::from(cache_minutes.max(1)) * 60);
-
-    if safebrowsing {
-        match Checker::connect(SAFE_BROWSING_SUFFIX, ttl, sb_cache).await {
-            Ok(c) => {
-                tracing::info!("safe browsing enabled");
-                resolver.set_safebrowsing(Some(Arc::new(c)));
-            }
-            Err(e) => tracing::error!(error = %e, "safe browsing is on but unreachable"),
-        }
-    }
-
-    if parental {
-        match Checker::connect(PARENTAL_SUFFIX, ttl, pc_cache).await {
-            Ok(c) => {
-                tracing::info!("parental control enabled");
-                resolver.set_parental(Some(Arc::new(c)));
-            }
-            Err(e) => tracing::error!(error = %e, "parental control is on but unreachable"),
-        }
-    }
 }
 
 /// Builds the login throttle, saying so when the config switches it off.

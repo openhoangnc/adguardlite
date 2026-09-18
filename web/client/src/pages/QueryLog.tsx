@@ -6,7 +6,7 @@ import type { FilterReason, LogEntry } from '../api';
 import { Loading, Modal, Notice, useToast } from '../components/ui';
 import { IconRefresh, IconSearch } from '../components/icons';
 import { formatTime } from '../lib/format';
-import { message } from '../lib/hooks';
+import { message, useAsync } from '../lib/hooks';
 
 /** One page of entries; the server caps what it will return anyway. */
 const PAGE = 100;
@@ -16,18 +16,31 @@ const STATUSES = [
     { value: 'all', label: 'Everything' },
     { value: 'processed', label: 'Answered' },
     { value: 'blocked', label: 'Blocked' },
-    { value: 'blocked_safebrowsing', label: 'Malware and phishing' },
-    { value: 'blocked_parental', label: 'Adult sites' },
     { value: 'whitelisted', label: 'Allowed by a rule' },
     { value: 'rewritten', label: 'Rewritten' },
     { value: 'safe_search', label: 'Safe search' },
 ];
+
+/**
+ * The lists that have no entry under Filters, by the identifier the resolver
+ * records against a rule.  These are upstream's `rulelist.APIID` values.
+ */
+const RESERVED: Record<number, string> = {
+    0: 'Custom rules',
+    [-1]: 'System hosts file',
+    [-2]: 'Blocked services',
+    // Neither is produced any more; a log written by AdGuard Home has them.
+    [-3]: 'Parental control',
+    [-4]: 'Safe browsing',
+};
 
 /** How a verdict reads, and the colour it is shown in. */
 function verdict(reason: FilterReason): { text: string; tone: string } {
     switch (reason) {
         case 'FilteredBlackList':
             return { text: 'Blocked by a filter', tone: 'red' };
+        // Neither is produced any more, but a log written by AdGuard Home
+        // still carries them.
         case 'FilteredSafeBrowsing':
             return { text: 'Malware or phishing', tone: 'red' };
         case 'FilteredParental':
@@ -55,6 +68,20 @@ export default function QueryLog() {
 
     const search = params.get('search') ?? '';
     const status = params.get('response_status') ?? 'all';
+    const list = params.get('filter_id') ?? '';
+
+    // The lists, for the filter below and for naming the rule that matched.
+    // A failure here leaves both falling back to the identifier, which is
+    // worse than a name but better than an empty log page.
+    const lists = useAsync(() => api.getFilteringStatus());
+    const listName = useCallback(
+        (id: number) => {
+            const all = [...(lists.data?.filters ?? []), ...(lists.data?.whitelist_filters ?? [])];
+
+            return RESERVED[id] ?? all.find((f) => f.id === id)?.name ?? `List ${id}`;
+        },
+        [lists.data],
+    );
 
     const [term, setTerm] = useState(search);
     const [rows, setRows] = useState<LogEntry[]>([]);
@@ -85,6 +112,7 @@ export default function QueryLog() {
                     older_than: olderThan,
                     search: search || undefined,
                     response_status: status === 'all' ? undefined : status,
+                    filter_id: list || undefined,
                 });
                 const data = r.data ?? [];
                 setRows((prev) => (replace ? data : [...prev, ...data]));
@@ -99,7 +127,7 @@ export default function QueryLog() {
                 setLoading(false);
             }
         },
-        [search, status],
+        [search, status, list],
     );
 
     useEffect(() => {
@@ -129,7 +157,7 @@ export default function QueryLog() {
         return () => io.disconnect();
     }, [cursor, done, loading, fetchPage]);
 
-    const apply = (next: { search?: string; response_status?: string }) => {
+    const apply = (next: { search?: string; response_status?: string; filter_id?: string }) => {
         const p = new URLSearchParams(params);
         for (const [k, v] of Object.entries(next)) {
             if (v) {
@@ -239,10 +267,40 @@ export default function QueryLog() {
                             </option>
                         ))}
                     </select>
+                    <select
+                        value={list}
+                        aria-label="Filter list"
+                        style={{ width: 'auto' }}
+                        onChange={(e) => apply({ filter_id: e.target.value })}>
+                        <option value="">Any list</option>
+                        <option value="0">{RESERVED[0]}</option>
+                        {(lists.data?.filters ?? []).length > 0 && (
+                            <optgroup label="Blocklists">
+                                {(lists.data?.filters ?? []).map((f) => (
+                                    <option key={f.id} value={f.id}>
+                                        {f.name}
+                                    </option>
+                                ))}
+                            </optgroup>
+                        )}
+                        {(lists.data?.whitelist_filters ?? []).length > 0 && (
+                            <optgroup label="Allowlists">
+                                {(lists.data?.whitelist_filters ?? []).map((f) => (
+                                    <option key={f.id} value={f.id}>
+                                        {f.name}
+                                    </option>
+                                ))}
+                            </optgroup>
+                        )}
+                        <optgroup label="Built in">
+                            <option value="-2">{RESERVED[-2]}</option>
+                            <option value="-1">{RESERVED[-1]}</option>
+                        </optgroup>
+                    </select>
                     <button type="submit" className="btn primary">
                         Search
                     </button>
-                    {(search || status !== 'all') && (
+                    {(search || status !== 'all' || list) && (
                         <button
                             type="button"
                             className="btn ghost"
@@ -286,7 +344,7 @@ export default function QueryLog() {
                 <div ref={sentinel} style={{ height: 1 }} />
             </div>
 
-            {detail && <Details entry={detail} onClose={() => setDetail(undefined)} />}
+            {detail && <Details entry={detail} listName={listName} onClose={() => setDetail(undefined)} />}
         </>
     );
 }
@@ -334,7 +392,15 @@ function Row({ entry, onOpen, onRule }: { entry: LogEntry; onOpen: () => void; o
     );
 }
 
-function Details({ entry, onClose }: { entry: LogEntry; onClose: () => void }) {
+function Details({
+    entry,
+    listName,
+    onClose,
+}: {
+    entry: LogEntry;
+    listName: (id: number) => string;
+    onClose: () => void;
+}) {
     const { text } = verdict(entry.reason);
     const rows: [string, React.ReactNode][] = [
         ['Time', formatTime(entry.time, true)],
@@ -364,7 +430,12 @@ function Details({ entry, onClose }: { entry: LogEntry; onClose: () => void }) {
                             <td style={{ color: 'var(--text-muted)' }}>Matched</td>
                             <td className="mono">
                                 {entry.rules.map((r, i) => (
-                                    <div key={i}>{r.text}</div>
+                                    <div key={i}>
+                                        {r.text}
+                                        <div className="muted" style={{ fontSize: 12 }}>
+                                            {listName(r.filter_list_id)}
+                                        </div>
+                                    </div>
                                 ))}
                             </td>
                         </tr>

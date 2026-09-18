@@ -76,10 +76,6 @@ export const getBlocklistCatalogue = () => get<BlocklistCatalogue>('/filtering/c
 
 /* Safety toggles. */
 
-export const getSafeBrowsing = () => get<{ enabled: boolean }>('/safebrowsing/status');
-export const setSafeBrowsing = (on: boolean) => post<void>(`/safebrowsing/${on ? 'enable' : 'disable'}`);
-export const getParental = () => get<{ enabled: boolean }>('/parental/status');
-export const setParental = (on: boolean) => post<void>(`/parental/${on ? 'enable' : 'disable'}`);
 export const getSafeSearch = () => get<SafeSearchConfig>('/safesearch/status');
 export const setSafeSearch = (c: SafeSearchConfig) => put<void>('/safesearch/settings', c);
 
@@ -98,6 +94,7 @@ export const getQueryLog = (params: {
     offset?: number;
     search?: string;
     response_status?: string;
+    filter_id?: string;
 }) => get<QueryLog>('/querylog', params);
 export const getQueryLogConfig = () => get<QueryLogConfig>('/querylog/config');
 export const updateQueryLogConfig = (c: Partial<QueryLogConfig>) => put<void>('/querylog/config/update', c);

@@ -330,25 +330,16 @@ fn control_router() -> Router<Shared> {
         .route("/filtering/set_rules", post(filtering::set_rules))
         .route("/filtering/check_host", get(filtering::check_host))
         .route("/filtering/catalogue", get(filtering::catalogue))
-        // Safety toggles.
-        .route(
-            "/safebrowsing/enable",
-            post(|State(s): State<Shared>| filtering::safebrowsing_set(s, true)),
-        )
-        .route(
-            "/safebrowsing/disable",
-            post(|State(s): State<Shared>| filtering::safebrowsing_set(s, false)),
-        )
-        .route("/safebrowsing/status", get(filtering::safebrowsing_status))
-        .route(
-            "/parental/enable",
-            post(|State(s): State<Shared>| filtering::parental_set(s, true)),
-        )
-        .route(
-            "/parental/disable",
-            post(|State(s): State<Shared>| filtering::parental_set(s, false)),
-        )
-        .route("/parental/status", get(filtering::parental_status))
+        // Safe browsing and parental control.  Not implemented: status reports
+        // both as off and every change is refused.  See the safe browsing and
+        // parental control section of TASK.md.
+        .route("/safebrowsing/status", get(filtering::hashprefix_status))
+        .route("/safebrowsing/enable", post(hashprefix_unsupported))
+        .route("/safebrowsing/disable", post(hashprefix_unsupported))
+        .route("/parental/status", get(filtering::hashprefix_status))
+        .route("/parental/enable", post(hashprefix_unsupported))
+        .route("/parental/disable", post(hashprefix_unsupported))
+        // Safe search.
         .route(
             "/safesearch/enable",
             post(|State(s): State<Shared>| filtering::safesearch_set(s, true)),
@@ -449,6 +440,21 @@ async fn dhcp_unsupported() -> Response {
         StatusCode::NOT_IMPLEMENTED,
         "this build of sift has no DHCP server; \
          use your router or a separate DHCP service",
+    )
+        .into_response()
+}
+
+/// Answers the safe browsing and parental control toggles.
+///
+/// This build makes no hash-prefix lookups -- see the safe browsing and
+/// parental control section of TASK.md -- so a request to switch one on is
+/// refused rather than stored.  Storing it would leave the config file
+/// claiming a protection that nothing performs.
+async fn hashprefix_unsupported() -> Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        "this build of sift performs no safe browsing or parental control \
+         lookups; block these categories with a filter list instead",
     )
         .into_response()
 }
@@ -883,6 +889,42 @@ mod tests {
         assert!(seen, "the build should carry an install bundle");
         assert!(!is_install_page("/index.html"));
         assert!(!is_install_page("/static/main.abc.js"));
+    }
+
+    #[tokio::test]
+    async fn every_safe_browsing_and_parental_change_is_refused() {
+        // Storing the toggle would leave the config file claiming a lookup
+        // that this build never makes.
+        let r = hashprefix_unsupported().await;
+        assert_eq!(r.status(), StatusCode::NOT_IMPLEMENTED);
+    }
+
+    #[tokio::test]
+    async fn safe_browsing_and_parental_report_themselves_off() {
+        // Echoing the stored value would tell the interface a checker is
+        // running when none is -- the trap `dhcp_status` avoids.
+        let Json(v) = crate::handlers::filtering::hashprefix_status().await;
+        assert_eq!(v["enabled"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn every_hashprefix_mutation_route_refuses() {
+        let src = include_str!("routes.rs");
+        for route in [
+            "/safebrowsing/enable",
+            "/safebrowsing/disable",
+            "/parental/enable",
+            "/parental/disable",
+        ] {
+            let line = src
+                .lines()
+                .find(|l| l.contains(&format!("\"{route}\"")))
+                .unwrap_or_else(|| panic!("{route} is not routed"));
+            assert!(
+                line.contains("hashprefix_unsupported"),
+                "{route} must refuse, but routes to: {line}"
+            );
+        }
     }
 
     #[test]

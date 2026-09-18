@@ -1,5 +1,4 @@
-//! Filter lists, custom rules, rewrites, blocked services and the safety
-//! toggles.
+//! Filter lists, custom rules, rewrites, blocked services and safe search.
 
 use axum::Json;
 use axum::extract::{Query, State};
@@ -566,28 +565,14 @@ pub async fn rewrite_settings_update(
     s.save_config().map_err(ApiError::internal)
 }
 
-/// `POST /control/safebrowsing/enable` and `/disable`
-pub async fn safebrowsing_set(s: Shared, enabled: bool) -> ApiResult<()> {
-    s.config.write().filtering.safebrowsing_enabled = enabled;
-
-    s.save_config().map_err(ApiError::internal)
-}
-
-/// `GET /control/safebrowsing/status`
-pub async fn safebrowsing_status(State(s): State<Shared>) -> Json<serde_json::Value> {
-    Json(json!({ "enabled": s.config.read().filtering.safebrowsing_enabled }))
-}
-
-/// `POST /control/parental/enable` and `/disable`
-pub async fn parental_set(s: Shared, enabled: bool) -> ApiResult<()> {
-    s.config.write().filtering.parental_enabled = enabled;
-
-    s.save_config().map_err(ApiError::internal)
-}
-
-/// `GET /control/parental/status`
-pub async fn parental_status(State(s): State<Shared>) -> Json<serde_json::Value> {
-    Json(json!({ "enabled": s.config.read().filtering.parental_enabled }))
+/// `GET /control/safebrowsing/status` and `/control/parental/status`
+///
+/// Always off.  This build ships neither checker -- see the safe browsing and
+/// parental control section of TASK.md -- and echoing whatever the config file
+/// happens to hold would tell the interface a lookup is running when none is,
+/// which is the same trap `dhcp_status` avoids.
+pub async fn hashprefix_status() -> Json<serde_json::Value> {
+    Json(json!({ "enabled": false }))
 }
 
 /// The safe-search settings, as the API exchanges them.
