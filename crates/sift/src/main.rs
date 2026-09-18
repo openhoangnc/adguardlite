@@ -277,6 +277,9 @@ async fn run(args: Args, paths: Paths, mut config: sift_config::Config) -> anyho
             disabled: args.no_check_update,
             work: application.paths.work.clone(),
             config: application.paths.config.clone(),
+            // Captured now, before an update can move the running binary out
+            // of the way; see the field's comment.
+            exe: std::env::current_exe().ok(),
         }),
         version_cache: parking_lot::RwLock::new(None),
     });

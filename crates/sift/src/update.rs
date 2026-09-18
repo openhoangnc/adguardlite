@@ -71,6 +71,16 @@ pub struct Updater {
     pub work: PathBuf,
     /// The config file, copied into the backup before anything moves.
     pub config: PathBuf,
+    /// Where this binary is, captured at startup.
+    ///
+    /// It has to be captured before the update rather than asked for after
+    /// it: on Linux `current_exe` reads `/proc/self/exe`, which names the
+    /// *inode* that is running, and the update moves that inode into
+    /// `agh-backup`.  Asking afterwards therefore answers the backup's path,
+    /// and starting it puts the old binary straight back -- with the same
+    /// process id and no restart for anyone to notice.  Upstream keeps the
+    /// path for the same reason; see AdGuardHome issue 4735.
+    pub exe: Option<PathBuf>,
 }
 
 impl SelfUpdater for Updater {
@@ -99,21 +109,27 @@ impl SelfUpdater for Updater {
     }
 
     fn update(&self, version: String) -> UpdateFuture {
+        let exe = self.exe.clone();
         let work = self.work.clone();
         let config = self.config.clone();
 
-        Box::pin(async move { perform(&work, &config, &version).await })
+        Box::pin(async move {
+            let exe = exe.ok_or_else(|| "this executable has no path".to_string())?;
+
+            perform(&exe, &work, &config, &version).await
+        })
     }
 
     fn restart(&self) -> String {
-        restart_into_the_new_binary()
+        match &self.exe {
+            Some(exe) => restart_into(exe),
+            None => "this executable has no path".to_string(),
+        }
     }
 }
 
 /// Downloads `version`, checks it, and puts it in place of this binary.
-async fn perform(work: &Path, config: &Path, version: &str) -> Result<(), String> {
-    let exe = std::env::current_exe().map_err(|e| format!("finding this executable: {e}"))?;
-
+async fn perform(exe: &Path, work: &Path, config: &Path, version: &str) -> Result<(), String> {
     let Some(asset) = asset_name() else {
         return Err(format!(
             "no release is published for {}/{}",
@@ -132,7 +148,7 @@ async fn perform(work: &Path, config: &Path, version: &str) -> Result<(), String
         .map_err(|e| format!("creating {}: {e}", update_dir.display()))?;
 
     let out = match stage(&update_dir, work, config, version, &asset).await {
-        Ok(staged) => install(&exe, &staged, config, &backup_dir),
+        Ok(staged) => install(exe, &staged, config, &backup_dir),
         Err(e) => Err(e),
     };
 
@@ -454,25 +470,20 @@ fn can_bind_privileged() -> bool {
     }
 }
 
-/// Starts the new binary in place of this process.
+/// Starts the binary at `exe` in place of this process.
 ///
 /// Returns only on failure: on success this image is gone.  The arguments and
 /// the environment are this process's, so the new binary is started exactly
 /// the way the old one was -- which is what makes it work under a unit file
 /// nobody here wrote.
-fn restart_into_the_new_binary() -> String {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p,
-        Err(e) => return format!("finding this executable: {e}"),
-    };
-
+fn restart_into(exe: &Path) -> String {
     tracing::info!(exe = %exe.display(), "restarting into the new binary");
 
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt as _;
 
-        let err = std::process::Command::new(&exe)
+        let err = std::process::Command::new(exe)
             .args(std::env::args_os().skip(1))
             .exec();
 
@@ -480,6 +491,8 @@ fn restart_into_the_new_binary() -> String {
     }
     #[cfg(not(unix))]
     {
+        let _ = exe;
+
         "restarting in place is not supported on this platform".to_string()
     }
 }
