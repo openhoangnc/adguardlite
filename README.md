@@ -3,26 +3,211 @@
 [![Docker](https://github.com/openhoangnc/sift/actions/workflows/docker.yml/badge.svg)](https://github.com/openhoangnc/sift/actions/workflows/docker.yml)
 [![Image](https://img.shields.io/badge/ghcr.io-openhoangnc%2Fsift-blue?logo=docker&logoColor=white)](https://github.com/openhoangnc/sift/pkgs/container/sift)
 
-**Sift** is a Rust backend for
-[AdGuard Home](https://github.com/AdguardTeam/AdGuardHome), built as a drop-in
-replacement for the Go binary of release **v0.107.79**: the same config file,
-the same on-disk data, the same HTTP API, and the same Docker contract — in a
-smaller image, with less memory and more throughput. The web interface is this
-project's own — React, TypeScript and ECharts against the same control API,
-English only — with the features this build does not have left out.
+**Sift is a network-wide ad and tracker blocker.** Point your router or your
+devices at it, and every DNS query on the network goes through the filter lists
+you subscribe to. It is one static binary of about 10 MB, or a 57 MB container
+image, and it runs on anything from a Raspberry Pi upward.
 
-The DNS filtering path, the web interface, the storage formats, the encrypted
-listeners and the operational surface are done and verified against the Go
-build. Two things are **deliberately excluded** rather than pending —
-DHCP and DNSCrypt — and each refuses clearly at the point a user would
-notice. [What is excluded, and
-why](#what-is-excluded-and-why) explains each one.
+It serves plain DNS, DNS-over-TLS, DNS-over-HTTPS, DNS-over-QUIC and HTTP/3;
+keeps per-client settings, a query log and statistics; and has a web interface
+for all of it — written for this project in React and TypeScript, English only.
 
-It is not produced, endorsed or supported by AdGuard; see
+It is also a **drop-in replacement for [AdGuard
+Home](https://github.com/AdguardTeam/AdGuardHome) v0.107.79**. It reads and
+writes the same `AdGuardHome.yaml`, the same query log, the same `stats.db` and
+the same sessions, serves the same control API, and ships in an image with the
+same runtime contract — so it can take over an existing installation in place
+and hand it back without changing a file. That interchangeability is a
+property, not the point: [Compatibility, and how it was
+checked](#compatibility-and-how-it-was-checked) is what it rests on.
+
+Sift is not produced, endorsed or supported by AdGuard; see
 [NOTICE.md](NOTICE.md). Documentation is under [`docs/`](docs/):
 [FAQ](docs/faq.md) · [Configuration](docs/configuration.md) ·
 [Clients](docs/clients.md) · [Encryption](docs/encryption.md) ·
 [Privacy](docs/privacy.md).
+
+## Install on a machine
+
+```bash
+curl -s -S -L https://raw.githubusercontent.com/openhoangnc/sift/main/scripts/install.sh | sh -s -- -v
+```
+
+That installs sift into `/opt/AdGuardHome`, registers it with systemd (or
+launchd on macOS) under the name `AdGuardHome`, and starts it. Open
+`http://<this machine>:3000` and the setup wizard takes it from there. Run the
+same line again later and it upgrades in place; run it on a machine that is
+already up to date and it does nothing.
+
+**Run it on a machine already running AdGuard Home and it takes that
+installation over.** The binary is replaced and nothing else is: the config
+file, the whole data directory and the unit file stay exactly as they are,
+because both builds read and write them in the same formats under the same
+names. The Go binary is kept beside the new one as `AdGuardHome.bak`, so going
+back is three commands, which the script prints when it finishes.
+
+The archives are statically linked against musl, so one build per architecture
+runs on any distribution however old its glibc, and are published with a
+`checksums.txt` the script verifies before it replaces anything. It also runs
+the downloaded binary once, before the running server is touched: an archive
+for the wrong architecture fails then rather than after the swap.
+
+| | |
+|---|---|
+| `-v`, `-V` | turn progress messages on or off |
+| `-u` | remove the binary and the service, and keep the config file and the data directory |
+| `-r` | install again even when the version on offer is the one already installed |
+| `-t v0.5.0` | install a particular release rather than the newest |
+| `-o /srv` | install into `/srv/AdGuardHome`; the default is wherever the installed service already runs from, or `/opt` |
+| `-C`, `-O` | build the archive name for another cpu or operating system |
+
+Published archives: `linux_amd64`, `linux_arm64`, `linux_armv7`,
+`darwin_amd64` and `darwin_arm64`. Anything else builds from source —
+[Building](#building).
+
+## Install with Docker
+
+A multi-architecture image — `linux/amd64` and `linux/arm64` — is published to
+the GitHub Container Registry on every push to `main`:
+
+```bash
+docker pull ghcr.io/openhoangnc/sift:latest
+```
+
+```yaml
+services:
+  adguardhome:
+    image: ghcr.io/openhoangnc/sift:latest
+    container_name: adguardhome
+    restart: unless-stopped
+    volumes:
+      - ./work:/opt/adguardhome/work
+      - ./conf:/opt/adguardhome/conf
+    ports:
+      - 53:53/tcp
+      - 53:53/udp
+      - 3000:3000/tcp
+```
+
+Or directly:
+
+```bash
+docker run -d --name adguardhome \
+  -v "$PWD/work:/opt/adguardhome/work" \
+  -v "$PWD/conf:/opt/adguardhome/conf" \
+  -p 53:53/tcp -p 53:53/udp -p 3000:3000/tcp \
+  ghcr.io/openhoangnc/sift:latest
+```
+
+The image is a drop-in for `adguard/adguardhome`: same binary path, working
+directory, exposed ports and entrypoint arguments. An existing deployment only
+changes its `image:` line, and keeps its config and data directory as they are
+— bind mounts or named volumes alike, and nobody is signed out. Switching back
+is the same one-line change, and costs nothing: both builds read each other's
+`AdGuardHome.yaml`, `querylog.json`, `stats.db`, `sessions.db` and downloaded
+filter lists.
+
+| Tag | What it points at |
+|---|---|
+| `latest` | the newest build of `main` |
+| `sha-<short>` | one specific commit |
+| `1.2.3`, `1.2` | a `v1.2.3` release tag |
+
+The registry keeps only the **newest three releases**; everything older is
+deleted, `sha-` tags included. Deploy against a `sha-` tag rather than `latest`
+if you want a restart to redeploy the same bytes, and mirror the image into
+your own registry — or rebuild it from the commit — if you need one to stay
+pullable for longer than three builds.
+
+To build the same image yourself:
+
+```bash
+docker build -f docker/Dockerfile -t sift .
+```
+
+## Updating
+
+When a newer release exists, the top bar says so and offers **Install**. That
+downloads the archive for this machine, checks it against the published
+`checksums.txt`, runs the new binary — once for its version and once over your
+real configuration with `--check-config` — and only then moves it into place
+and restarts into it. The binary it replaced and a copy of your config file are
+left in `<work>/agh-backup`.
+
+The button is offered only where it would work. It is **not** offered inside a
+container, where the image is what gets updated and a replaced binary is
+discarded by the next `docker run`; nor where the executable's directory is
+read-only; nor where a restart could not bind the ports the server uses now. In
+each of those cases the profile menu says which one it is rather than simply
+omitting the button, and it says so too when the check could not reach GitHub
+and when there is nothing newer to install. `--no-check-update` switches the
+whole thing off, check included.
+
+For a container, pull a newer image. For a machine installed from the shell,
+run the installer line again.
+
+## What it does
+
+- **Filtering.** Blocklists and allowlists in AdGuard's and uBlock's syntax,
+  your own rules, and the system hosts file. The **Filters** page offers a
+  catalogue of 65 vetted lists, each with a written note, a measured rule count
+  and tags — including a flag for the country a regional list serves — so the
+  picker answers "which one do I want?" rather than listing names.
+- **Blocked services.** A catalogue of 139 services, blockable globally or per
+  client, on a weekly schedule that can pause them for chosen hours.
+- **Safe search**, enforced for Bing, DuckDuckGo, Ecosia, Google, Pixabay,
+  Yandex and YouTube.
+- **Encrypted DNS, inbound and out.** DNS-over-TLS, DNS-over-HTTPS,
+  DNS-over-QUIC and HTTP/3 listeners on a reloadable certificate, and upstreams
+  over any of them. Apple `.mobileconfig` profiles are generated for both.
+- **Clients.** Matched by address, subnet, MAC or ClientID, most specific
+  first, with their own filtering, safe search, blocked services, upstreams and
+  log exclusions. Names are discovered from the hosts file, the ARP table,
+  reverse DNS and WHOIS.
+- **Query log and statistics.** Every query with its verdict, the rule that
+  produced it and the list that rule came from — filterable by domain, client,
+  verdict or list. Statistics are kept per hour and drawn on the dashboard.
+- **Rewrites, DNS64, DDR, EDNS client subnet, DNSSEC, bogus-NXDOMAIN
+  filtering, rate limiting and access lists**, each behaving as AdGuard Home's
+  does.
+- **Operations.** A systemd or launchd service, log rotation, privilege
+  dropping, ipset, a pidfile, and self-update.
+
+## What is excluded, and why
+
+Three features are decisions rather than gaps. Nothing else in the Go build's
+surface is missing; `TASK.md` records the full state and the smaller deviations
+(cited rule on ties, `gob` byte-equality, ipset through the command rather than
+netlink, and a few more).
+
+- **Safe browsing and parental control.** Both were implemented over AdGuard's
+  hash-prefix protocol, and both were removed. They were the only thing here
+  that sent anything derived from your queries to a third party: the hostname
+  never left, but a two-byte prefix of each parent label's SHA-256 went to
+  AdGuard's family resolver for every name that reached that step, and a bucket
+  that was not cached cost a round trip before the query could be answered.
+  Block malware, phishing or adult content with a filter list instead — the
+  catalogue carries lists for each. `/control/safebrowsing/status` and
+  `/control/parental/status` report the features off whatever the config holds,
+  and every change answers **501**. Your stored settings round-trip untouched,
+  per-client ones included.
+
+- **DHCP.** This build will not serve DHCP; run it on your router or a
+  dedicated service. `/control/dhcp/status` always reports the feature off and
+  every settings change answers **501**, so the web interface cannot store DHCP
+  configuration that nothing would act on. The `dhcp:` section of the config
+  file is still read and written unchanged, so switching back to the Go build
+  keeps your settings, and the DHCP settings page is gone from the web
+  interface rather than present and inert.
+
+- **DNSCrypt.** It is the one remaining protocol needing cryptography this
+  project does not already have — X25519, Ed25519 and a NaCl-style secretbox —
+  plus a signed-certificate protocol and AdGuard's provider-key file format,
+  and a mistake there fails silently rather than visibly. `port_dnscrypt` and
+  `dnscrypt_config_file` round-trip through the config untouched; the port is
+  never bound, and an `sdns://` upstream is reported at startup and skipped.
+  DNSCrypt itself is still in use — AdGuard's own provider list publishes
+  stamps for it — so front sift with `dnscrypt-proxy` if you need it.
 
 ## Measured against the Go build
 
@@ -47,7 +232,7 @@ against 5,000 blocked names. The load generator in
 servers and so competes with them for CPU; treat the ratios as meaningful and
 the absolute numbers as a floor. The binary sizes compare against AdGuard's
 published release, not a local `go build`, which is larger because it keeps
-its debug info.
+its debug info; both have shrunk a little since, as features were removed.
 
 ### At a larger list count
 
@@ -90,121 +275,6 @@ being built at load. `cargo run --release -p sift-filter --example loadprofile
 <dir of lists>` prints the phase timings, a footprint breakdown and per-query
 costs, which is how all of the above was measured.
 
-## Installing on a machine
-
-```bash
-curl -s -S -L https://raw.githubusercontent.com/openhoangnc/sift/main/scripts/install.sh | sh -s -- -v
-```
-
-That installs sift into `/opt/AdGuardHome`, registers it with systemd (or
-launchd on macOS) under the name `AdGuardHome`, and starts it. Run the same
-line again later and it upgrades in place; run it on a machine that is already
-up to date and it does nothing.
-
-**Run it on a machine already running AdGuard Home and it takes that
-installation over.** The binary is replaced and nothing else is: the config
-file, the whole data directory and the unit file stay exactly as they are,
-because both builds read and write them in the same formats under the same
-names. The Go binary is kept beside the new one as `AdGuardHome.bak`, so going
-back is three commands, which the script prints when it finishes.
-
-The archives are statically linked against musl, so one build per architecture
-runs on any distribution however old its glibc, and are published with a
-`checksums.txt` the script verifies before it replaces anything. It also runs
-the downloaded binary once, before the running server is touched: an archive
-for the wrong architecture fails then rather than after the swap.
-
-| | |
-|---|---|
-| `-v`, `-V` | turn progress messages on or off |
-| `-u` | remove the binary and the service, and keep the config file and the data directory |
-| `-r` | install again even when the version on offer is the one already installed |
-| `-t v0.5.0` | install a particular release rather than the newest |
-| `-o /srv` | install into `/srv/AdGuardHome`; the default is wherever the installed service already runs from, or `/opt` |
-| `-C`, `-O` | build the archive name for another cpu or operating system |
-
-Published archives: `linux_amd64`, `linux_arm64`, `linux_armv7`,
-`darwin_amd64` and `darwin_arm64`. Anything else builds from source —
-[Building](#building).
-
-### Updating from the web interface
-
-When a newer release exists, the top bar says so and offers **Install**. That
-downloads the archive for this machine, checks it against the published
-`checksums.txt`, runs the new binary — once for its version and once over your
-real configuration with `--check-config` — and only then moves it into place
-and restarts into it. The binary it replaced and a copy of your config file are
-left in `<work>/agh-backup`, which is where AdGuard Home's own updater puts
-them.
-
-The button is offered only where it would work. It is **not** offered inside a
-container, where the image is what gets updated and a replaced binary is
-discarded by the next `docker run`; nor where the executable's directory is
-read-only; nor where a restart could not bind the ports the server uses now.
-`--no-check-update` switches the whole thing off, check included.
-
-## The published image
-
-A multi-architecture image — `linux/amd64` and `linux/arm64`, so it runs on a
-Raspberry Pi as well as a server — is published to the GitHub Container
-Registry on every push to `main`:
-
-```bash
-docker pull ghcr.io/openhoangnc/sift:latest
-```
-
-| Tag | What it points at |
-|---|---|
-| `latest` | the newest build of `main` |
-| `sha-<short>` | one specific commit |
-| `1.2.3`, `1.2` | a `v1.2.3` release tag |
-
-The registry keeps only the **newest three releases**; everything older is
-deleted, `sha-` tags included. Deploy against a `sha-` tag rather than `latest`
-if you want a restart to redeploy the same bytes, and mirror the image into
-your own registry — or rebuild it from the commit — if you need one to stay
-pullable for longer than three builds.
-
-It is a drop-in for `adguard/adguardhome`: same binary path, working directory,
-exposed ports and entrypoint arguments. An existing deployment only changes its
-`image:` line, and keeps its config and data directory as they are — bind
-mounts or named volumes alike, and nobody is signed out.
-
-Switching back is the same one-line change. Both builds read each other's
-`AdGuardHome.yaml`, `querylog.json`, `stats.db`, `sessions.db` and downloaded
-filter lists, so a rollback costs nothing.
-
-```yaml
-services:
-  adguardhome:
-    image: ghcr.io/openhoangnc/sift:latest
-    container_name: adguardhome
-    restart: unless-stopped
-    volumes:
-      - ./work:/opt/adguardhome/work
-      - ./conf:/opt/adguardhome/conf
-    ports:
-      - 53:53/tcp
-      - 53:53/udp
-      - 3000:3000/tcp
-```
-
-Or directly:
-
-```bash
-docker run -d --name adguardhome \
-  -v "$PWD/work:/opt/adguardhome/work" \
-  -v "$PWD/conf:/opt/adguardhome/conf" \
-  -p 53:53/tcp -p 53:53/udp -p 3000:3000/tcp \
-  ghcr.io/openhoangnc/sift:latest
-```
-
-To build the same image yourself:
-
-```bash
-docker build -f docker/Dockerfile -t sift .
-```
-
 ## Compatibility, and how it was checked
 
 Every claim below was verified against a running AdGuard Home v0.107.79, not
@@ -224,32 +294,13 @@ read off the source.
 | `sessions.db` | same layout | Sessions are stored the way the Go build stores them, so a restart signs nobody out and either build reads the other's file. |
 | Docker | same contract | Entrypoint, command, working directory, user, volumes, exposed ports, environment, healthcheck and stop signal are identical. A configured `adguard/adguardhome` container was swapped to this image on the same volumes and swapped back: the config file survived byte for byte, sessions stayed valid in both directions, and each build read the other's `querylog.json`, `stats.db` and filter cache. |
 
+Two things are deliberately **not** shared with the Go build. The version this
+reports is its own, not v0.107.79 — it is the only way to tell which of the two
+binaries is installed. And the web interface is this project's, so the
+control API carries one path and a few fields upstream has no use for; the two
+builds never serve the same interface, so nothing is broken by that.
+
 Reproduce it with `scripts/verify.sh` (see [Verifying](#verifying)).
-
-## What is excluded, and why
-
-Two features are decisions rather than gaps. Nothing else in the Go build's
-surface is missing; `TASK.md` records the full state and the smaller deviations
-(cited rule on ties, `gob` byte-equality, ipset through the command rather than
-netlink, and a few more).
-
-- **DHCP.** This build will not serve DHCP; run it on your router or a
-  dedicated service. `/control/dhcp/status` always reports the feature off and
-  every settings change answers **501**, so the web interface cannot store DHCP
-  configuration that nothing would act on. The `dhcp:` section of the config
-  file is still read and written unchanged, so switching back to the Go build
-  keeps your settings, and the DHCP settings page is gone from the web
-  interface rather than present and inert.
-
-- **DNSCrypt.** It is the one remaining protocol needing cryptography this
-  project does not already have — X25519, Ed25519 and a NaCl-style secretbox —
-  plus a signed-certificate protocol and AdGuard's provider-key file format,
-  and a mistake there fails silently rather than visibly. `port_dnscrypt` and
-  `dnscrypt_config_file` round-trip through the config untouched; the port is
-  never bound, and an `sdns://` upstream is reported at startup and skipped.
-  DNSCrypt itself is still in use — AdGuard's own provider list publishes
-  stamps for it — so front sift with `dnscrypt-proxy` if you need it.
-  The web interface no longer offers it anywhere.
 
 ## Layout
 
@@ -263,17 +314,17 @@ crates/sift-bolt      a minimal bbolt reader and writer
 crates/sift-gob       Go `gob` for the statistics unit
 crates/sift-stats     statistics collection, aggregation and persistence
 crates/sift-api       the control API and the embedded web interface
-crates/sift   the binary
-web/client           the web interface: React, TypeScript, ECharts, Vite
-web/build            the same, built and brotli-compressed for embedding
-docs                 the documentation the web interface links to
+crates/sift           the binary
+web/client            the web interface: React, TypeScript, ECharts, Vite
+web/build             the same, built and brotli-compressed for embedding
+docs                  the documentation the web interface links to
 ```
 
 ## Building
 
 ```bash
 cargo build --release            # fast to build, fast to run
-cargo build --profile dist       # fat LTO, stripped: the 10.7 MB binary
+cargo build --profile dist       # fat LTO, stripped: the small binary
 ```
 
 The workspace is split so `cargo` parallelises across crates, dependencies are
@@ -308,7 +359,7 @@ cargo run --release -- --no-check-update -c ./AdGuardHome.yaml -w ./work
 
 ## Verifying
 
-`cargo test --workspace` runs 706 unit and integration tests, including the
+`cargo test --workspace` runs 745 unit and integration tests, including the
 differential against the real filter list and the query-log and gob golden
 files — none of which need a network or a running Go build.
 
@@ -342,7 +393,10 @@ multi-architecture tag to GHCR, and then prunes the package back to the newest
 three releases. Documentation-only commits are skipped, and a newer push
 cancels an in-flight build.
 
-`.github/workflows/ci.yml` — formatting, lints, the 621-test suite, and the
+`.github/workflows/release.yml` builds the installer's archives for every
+published architecture and attaches them to a `v*` tag.
+
+`.github/workflows/ci.yml` — formatting, lints, the test suite, and the
 differential against a freshly cloned AdGuard Home — is `workflow_dispatch`
 only. It costs nothing until it is started from the Actions tab, because all of
 it also runs locally: `cargo test --workspace` and `scripts/verify.sh`.
@@ -350,6 +404,8 @@ it also runs locally: `cargo test --workspace` and `scripts/verify.sh`.
 ## Licence
 
 GPL-3.0, matching AdGuard Home. This is a derivative work: it redistributes
-AdGuard's compiled web interface, their blocked-services catalogue and
-fixtures captured from a running instance. [NOTICE.md](NOTICE.md) lists what
-came from where, and how to regenerate it.
+AdGuard's blocked-services catalogue, their safe-search rules, the blocklist
+registry their own client bundles, and fixtures captured from a running
+instance. The web interface is this project's own and carries none of their
+material. [NOTICE.md](NOTICE.md) lists what came from where, and how to
+regenerate it.

@@ -21,7 +21,7 @@ AdGuard did not make it.
 | Modified from | AdGuard Home v0.107.79, commit `05ba17b282da1c4393d6a4ba4db0cf519194a362` |
 | Backend | rewritten in Rust; no upstream source carried over |
 | Web interface | written for this project; no AdGuard source, text or design — see [The web interface](#the-web-interface) |
-| Removed | DHCP, DNSCrypt, self-update |
+| Removed | DHCP, DNSCrypt, safe browsing and parental control |
 | Renamed | to "Sift"; see [Trademarks](#trademarks) |
 
 Every release since carries its changes in [TASK.md](TASK.md) and in the git
