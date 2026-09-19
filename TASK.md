@@ -2114,3 +2114,38 @@ tree, beside the datagram one that was already there: one asserting eight
 queries in a row are answered over each of TCP, DoT, DoH and DoQ, and one that
 floods the limiter over UDP and then asks over TCP, so a shared limiter that
 spends a connection's allowance on datagrams fails.
+
+## Found in a running server's log, and fixed
+
+A running server's log filled with one line, twice a second:
+
+```
+WARN Illegal SNI extension: ignoring IP address presented as hostname (3131382e37312e3133342e313436)
+```
+
+The hex decodes to `118.71.134.146`: a client had put an IP address where a
+hostname belongs, in the SNI extension of its ClientHello, and rustls writes
+that warning once per handshake. Something was reconnecting twice a second, and
+nothing else in the log survived it.
+
+The message is about the **peer's** message rather than this server's
+configuration, and nothing an operator can do changes it: rustls decides on its
+own terms whether to carry on. It is not even a lead. SNI names the *server*, so
+the address in it is this server's own as the client reached it — the warning
+never said who was connecting. A DoT client that goes on to ask something is in
+the query log with its address and `dot`; one that only handshakes is recorded
+nowhere. Either way the log line is the same.
+
+So the default filter now carries `rustls::msgs=error` alongside `rustls=warn`,
+which is the whole of rustls' message *parsing*: every warning in that module
+reports a malformed handshake received from somewhere else. Warnings from the
+rest of rustls — the ones about this server's own certificates and keys — still
+come through.
+
+`DEP_FILTER` in `crates/sift/src/main.rs` is now one constant that
+`init_logging` and the filter tests share, so the two cannot drift.
+`a_peers_malformed_handshake_does_not_flood_the_log` asserts both halves, under
+`--verbose` as well as without it: a WARN from `rustls::msgs::handshake` is
+dropped, and a WARN from `rustls` is not. `RUST_LOG` still overrides all of it
+for anyone debugging a handshake.
+

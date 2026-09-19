@@ -103,6 +103,21 @@ fn main() -> std::process::ExitCode {
     }
 }
 
+/// The dependency levels folded into the default log filter.
+///
+/// `rustls::msgs` is quieted below its warnings on purpose. Every warning that
+/// module emits reports a *peer's* malformed handshake message, and the common
+/// one -- "Illegal SNI extension: ignoring IP address presented as hostname"
+/// -- is written once per connection, so a single client dialling the DoT or
+/// HTTPS port by address rather than by name fills the log at whatever rate it
+/// reconnects. There is nothing for an operator to act on: the warning names
+/// the address the client dialled rather than the client, so it does not even
+/// say who is doing it, and rustls decides on its own terms whether to carry
+/// on with the handshake. Warnings from the rest of rustls, which are about
+/// *this* server's configuration and keys, still come through.
+const DEP_FILTER: &str =
+    "hyper=warn,rustls=warn,rustls::msgs=error,h2=warn,hickory_proto=warn,tokio_util=warn";
+
 /// Configures tracing from the flags and the environment.
 ///
 /// The default filter sets a global level rather than naming this crate: the
@@ -117,9 +132,7 @@ fn init_logging(args: &Args, log: &sift_config::model::LogConfig) {
     };
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         // Quiet the dependencies that are chatty at these levels.
-        EnvFilter::new(format!(
-            "{default},hyper=warn,rustls=warn,h2=warn,hickory_proto=warn,tokio_util=warn"
-        ))
+        EnvFilter::new(format!("{default},{DEP_FILTER}"))
     });
 
     // `--logfile` wins over the configured file, which is what upstream does:
@@ -828,9 +841,7 @@ mod tests {
     fn default_filter(verbose: bool) -> EnvFilter {
         let default = if verbose { "debug" } else { "info" };
 
-        EnvFilter::new(format!(
-            "{default},hyper=warn,rustls=warn,h2=warn,hickory_proto=warn,tokio_util=warn"
-        ))
+        EnvFilter::new(format!("{default},{}", super::DEP_FILTER))
     }
 
     /// Reports whether the filter would let an INFO event from `target`
@@ -955,6 +966,27 @@ mod tests {
     fn verbose_enables_debug() {
         assert!(enables(default_filter(true), "AdGuardHome", Level::DEBUG));
         assert!(!enables(default_filter(false), "AdGuardHome", Level::DEBUG));
+    }
+
+    /// A client that dials an encrypted listener by address puts an IP in the
+    /// SNI extension, and rustls warns about it once per connection.  One such
+    /// client reconnecting twice a second was enough to bury everything else.
+    #[test]
+    fn a_peers_malformed_handshake_does_not_flood_the_log() {
+        for verbose in [false, true] {
+            assert!(
+                !enables(
+                    default_filter(verbose),
+                    "rustls::msgs::handshake",
+                    Level::WARN
+                ),
+                "message-parsing warnings are the peer's doing, not the operator's"
+            );
+            assert!(
+                enables(default_filter(verbose), "rustls", Level::WARN),
+                "a warning about this server's own TLS must still be seen"
+            );
+        }
     }
 
     #[test]
