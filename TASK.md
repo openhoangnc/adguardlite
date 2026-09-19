@@ -1721,6 +1721,15 @@ report `v0.107.79`.
   anything outside it: a typo would otherwise become a filter chip that
   matches nothing. Measured at the time of writing, `starter` selects exactly
   five lists, which is the question most people arrive with.
+- **A client that sends no OPT record is held to 512 bytes over UDP, not
+  2,048.** RFC 1035 gives such a client 512 and RFC 6891 gives it no way to ask
+  for more, so that is what it is sent, with the truncation bit set and the
+  full answer a TCP retry away. The Go build sends it up to 2,048 — but only
+  with `enable_dnssec` and the cache both on, because the number is an artifact
+  of dnsproxy reading the client's limit out of a request it had itself edited
+  to carry `OPT(2048, DO)` for the upstream. Matching it would mean
+  fragmenting a 2 KB datagram towards a client that never said it could take
+  one. Measured four ways and written up under *Found comparing answer shapes*.
 - **One API path is added, none changed.** `GET /control/filtering/catalogue`
   serves the vetted-blocklist catalogue that AdGuard Home bundles in its own
   client, so the "Choose blocklists" picker can offer 66 known lists — their
@@ -1933,15 +1942,85 @@ four in `tests/forward.rs` driving a fake upstream that answers the way a
 signed name is answered, including that the cache keeps the whole answer while
 each client is handed its own shape of it.
 
-**Two divergences this turned up and did not fix**, both found while comparing
-shapes and both worth their own pass:
+**Two divergences this turned up**, both found while comparing shapes and both
+fixed in their own pass afterwards: UDP truncation, below, and
+`_dns.resolver.arpa` being forwarded when there is nothing to answer with —
+see *Found comparing answer shapes, and fixed* below.
 
-- **UDP answers are not truncated to what the client advertised.**
-  `server::truncate_if_needed` uses a fixed 4 KB, so a 22-record `TXT` answer
-  goes out whole with `TC` clear where the Go build sets `TC` and cuts. A
-  client that advertised 512 bytes is entitled to expect less than it gets.
-- **`_dns.resolver.arpa` is forwarded when there is nothing to say.** With no
-  encrypted listener configured, `ddr::handle` declines and the query goes
-  upstream, which answers with *its* designated resolvers — so a client doing
-  DDR discovery can be pointed at the upstream rather than at this server. The
-  Go build answers the name itself, empty, and never forwards it.
+## Found comparing answer shapes, and fixed
+
+### A UDP answer was not cut to what the client could receive
+
+`server::truncate_if_needed` compared the encoded answer against a fixed 4 KB
+and, if it was over, **threw away every record** and returned a header with the
+truncation bit set. So a client that advertised 512 bytes was sent a 2,539-byte
+`cloudflare.com TXT` answer with `TC` clear — a datagram the network may drop
+whole, and one that is fragmented above the path MTU, which firewalls do drop —
+while `adobe.com TXT`, whose full answer is 6 KB, came back as 27 bytes holding
+nothing at all.
+
+Both halves are now right: the limit comes from the request, and what fits is
+kept rather than discarded. `msg::truncate` finds the longest prefix of the
+answer, authority and additional sections that encodes inside the limit, by
+halving rather than by adding up record lengths — names are compressed as they
+are written, so what a record costs depends on what is already in the message,
+and the only honest measure is to encode it. The prefix, and emptying the
+sections behind a half-full one, is what `miekg/dns`'s `Msg.Truncate` leaves.
+The OPT record is never dropped: it is not an answer.
+
+It runs in the same `finish` closure as `shape_to_request`, not at the listener,
+because a running Go build **logs the truncated answer** — its `querylog.json`
+held 2,039 bytes and 26 records for the query it answered with 2,039 bytes and
+26 records, and 488 bytes and 6 for the same question from a client advertising
+512. The query log shows what the client got.
+
+| `adobe.com TXT`, 74 records, 6,022 bytes whole | Go v0.107.79 | before | after |
+|---|---|---|---|
+| client advertised 512 | 469B `TC` | 2,539B, no `TC` | 487B `TC` |
+| client advertised 1400 | 1,354B `TC` | 2,539B, no `TC` | 1,319B `TC` |
+| client advertised 4096 | 4,019B `TC` | **27B**, nothing kept | 4,046B `TC` |
+| client advertised 8192 | 6,022B | 6,022B | 6,022B |
+| over TCP | 6,011B | 6,011B | 6,011B |
+
+Record counts differ from the Go build's by one or two at the same limit, and
+that is not a difference in behaviour: each server holds its own cached copy of
+the upstream's answer and a TXT set comes back in a different order each time,
+so how many fit is a fact about the records rather than about the server. Both
+answers are the most that fits.
+
+**The limit for a client that sent no OPT record is 512 here, and 2,048 in the
+Go build.** That is a deliberate deviation, recorded under *Deliberate
+deviations*. The 2,048 was measured before it was explained: sweeping advertised
+sizes put it inside `[2046, 2061)` across seven names, and `dropbox.com`'s
+2,046-byte answer ruled out 2,000. The cause is in dnsproxy — `addDO` gives a
+request with no OPT record one of `OPT(2048, DO)` on its way upstream, and
+`scrub` then reads the client's limit back out of the request it just edited
+with `dnsSize(isUDP, dctx.Req)`. It is an artifact, and a conditional one:
+turning `enable_dnssec` off, or the cache off, and the Go build cuts the same
+answer to 512 like everything else. Measured:
+
+| Go v0.107.79, `adobe.com TXT`, client sent no OPT | no-EDNS limit |
+|---|---|
+| `enable_dnssec: true`, `cache_enabled: true` | 2,048 (2,018B, 25 records) |
+| `enable_dnssec: false`, `cache_enabled: true` | 512 (466B, 6 records) |
+| `enable_dnssec: false`, `cache_enabled: false` | 512 (479B, 5 records) |
+| `enable_dnssec: true`, `cache_enabled: false` | 512 (503B, 5 records) |
+
+Reproducing it would mean deliberately sending a 2 KB datagram to a client that
+never said it could take one, in exactly one of four configurations, and
+fragmenting it on the way. `dnsSize` — `max(512, advertised)` — is what the Go
+code means, and it is what this build does.
+
+`tests/compat/truncate_diff.py` is the guard, run by `scripts/verify.sh`. It
+compares a property rather than bytes, for the ordering reason above: that the
+answer fits, that `TC` is set when and only when something was left out, and
+that a stream transport is not cut. Run against **v0.7.2** it reports 35
+problems, the bug itself among them — `2539 bytes for a client that asked for
+512`. Nine tests cover it without the oracle: six in `msg.rs`, including that
+one more record would not have fitted, and three in `tests/forward.rs` for the
+transports.
+
+One thing hickory will not reproduce: `Edns::set_max_payload` floors what it
+stores at 512, so a request advertising 128 is answered with an OPT record
+saying 512 where the Go build echoes 128. RFC 6891 6.2.3 makes the two mean the
+same thing, and the floor is the reason the limit is right.

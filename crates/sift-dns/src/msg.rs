@@ -8,6 +8,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use hickory_proto::op::{Message, MessageType, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA, CNAME, SOA};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
+use hickory_proto::serialize::binary::BinEncodable;
 
 use crate::edns;
 
@@ -172,6 +173,89 @@ pub fn strip_dnssec(resp: &mut Message, qtype: RecordType) {
     resp.answers.retain(keep);
     resp.authorities.retain(keep);
     resp.additionals.retain(keep);
+}
+
+/// The smallest UDP payload any client may be held to.
+///
+/// RFC 6891 6.2.3: an OPT record advertising less than this means this, so a
+/// client asking for 128 bytes is still sent up to 512.  The Go build agrees --
+/// a request advertising 0 was answered with 489 bytes.
+pub const MIN_UDP_PAYLOAD: usize = 512;
+
+/// How large a UDP answer `req` said it could receive.
+///
+/// Upstream's `dnsSize`: the OPT record's advertised size, floored at 512, and
+/// 512 for a request that carried no OPT record at all.  Only plain UDP asks:
+/// every other transport this server speaks carries a length of its own, and
+/// upstream answers them with `dns.MaxMsgSize`.
+pub fn udp_limit(req: &Message) -> usize {
+    req.edns
+        .as_ref()
+        .map_or(MIN_UDP_PAYLOAD, |e| usize::from(e.max_payload()))
+        .max(MIN_UDP_PAYLOAD)
+}
+
+/// Returns a message's encoded size, or `usize::MAX` if it cannot be encoded.
+///
+/// A message that will not encode must never be reported as fitting: the
+/// caller drops records until something does, and claiming a fit would send
+/// the whole thing.
+fn encoded_len(msg: &Message) -> usize {
+    msg.to_bytes().map_or(usize::MAX, |b| b.len())
+}
+
+/// Assigns the first `keep` records of `all` back into their sections.
+fn set_prefix(resp: &mut Message, all: &[Record], answers: usize, authorities: usize, keep: usize) {
+    let a = keep.min(answers);
+    let b = keep.min(answers + authorities);
+
+    resp.answers = all[..a].to_vec();
+    resp.authorities = all[a..b].to_vec();
+    resp.additionals = all[b..keep].to_vec();
+}
+
+/// Cuts a response down to `limit` bytes, setting the truncation bit if
+/// anything had to go.  Reports whether anything did.
+///
+/// What survives is a *prefix* of the answer, authority and additional
+/// sections in that order, which is what `miekg/dns`'s `Msg.Truncate` leaves:
+/// its loop stops at the first record that does not fit and adds nothing after
+/// it, so a half-full answer section empties the two behind it. The OPT record
+/// is never dropped -- it is not an answer, it is the terms of the exchange --
+/// and hickory keeps it outside these sections anyway.
+///
+/// The prefix is found by halving rather than by adding up record lengths,
+/// because names are compressed as they are written: what a record costs
+/// depends on what is already in the message, and the only honest measure of
+/// that is to encode it.  Adding a record never makes the message smaller, so
+/// the answer is the longest prefix that fits.
+pub fn truncate(resp: &mut Message, limit: usize) -> bool {
+    if encoded_len(resp) <= limit {
+        return false;
+    }
+
+    let answers = resp.answers.len();
+    let authorities = resp.authorities.len();
+    let mut all = std::mem::take(&mut resp.answers);
+    all.append(&mut resp.authorities);
+    all.append(&mut resp.additionals);
+    let total = all.len();
+
+    let (mut lo, mut hi) = (0usize, total);
+    while lo < hi {
+        let mid = (lo + hi).div_ceil(2);
+        set_prefix(resp, &all, answers, authorities, mid);
+        if encoded_len(resp) <= limit {
+            lo = mid;
+        } else {
+            hi = mid - 1;
+        }
+    }
+
+    set_prefix(resp, &all, answers, authorities, lo);
+    resp.metadata.truncation = lo < total;
+
+    lo < total
 }
 
 /// Shapes a response to what the request asked for, just before it is sent.
@@ -665,5 +749,137 @@ mod tests {
         shape_to_request(&q, &mut resp);
         assert_eq!(types(&resp.answers), types(&before.answers));
         assert_eq!(first_addr(&resp), first_addr(&before));
+    }
+
+    /// A query for `example.com. A` as it arrives on the wire, with an OPT
+    /// record advertising `bufsize` when `edns` is set.
+    ///
+    /// Built by hand because hickory's `Edns::set_max_payload` floors what it
+    /// stores at 512, and what is under test here is a client that advertises
+    /// less than that.
+    fn wire_query(edns: Option<u16>) -> Message {
+        use hickory_proto::serialize::binary::BinDecodable;
+
+        let mut w = vec![0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00];
+        w.extend_from_slice(&[0x00, u8::from(edns.is_some())]);
+        w.extend_from_slice(b"\x07example\x03com\x00");
+        w.extend_from_slice(&[0x00, 0x01, 0x00, 0x01]);
+        if let Some(size) = edns {
+            // The OPT record: root name, type 41, class = the advertised size.
+            w.push(0x00);
+            w.extend_from_slice(&[0x00, 0x29]);
+            w.extend_from_slice(&size.to_be_bytes());
+            w.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+        }
+
+        Message::from_bytes(&w).expect("a well-formed query")
+    }
+
+    /// A response holding `n` address records, which is the cheap way to make
+    /// one too big for a datagram.
+    fn many_answers(n: usize) -> Message {
+        let q = query("example.com.", RecordType::A);
+        let mut resp = reply(&q, ResponseCode::NoError);
+        resp.answers = (0..n)
+            .map(|i| {
+                let addr = Ipv4Addr::new(192, 0, 2, u8::try_from(i % 254).unwrap_or(1));
+                Record::from_rdata(
+                    Name::from_utf8("example.com.").unwrap(),
+                    300,
+                    RData::A(A(addr)),
+                )
+            })
+            .collect();
+
+        resp
+    }
+
+    #[test]
+    fn the_udp_limit_is_what_the_request_advertised() {
+        assert_eq!(udp_limit(&wire_query(None)), 512, "no OPT record means 512");
+        assert_eq!(udp_limit(&wire_query(Some(1400))), 1400);
+        assert_eq!(udp_limit(&wire_query(Some(4096))), 4096);
+        assert_eq!(
+            udp_limit(&wire_query(Some(128))),
+            512,
+            "RFC 6891 6.2.3: less than 512 means 512"
+        );
+        assert_eq!(udp_limit(&wire_query(Some(0))), 512);
+    }
+
+    #[test]
+    fn an_answer_that_fits_is_left_alone() {
+        let mut resp = many_answers(3);
+        assert!(!truncate(&mut resp, 512));
+        assert_eq!(resp.answers.len(), 3);
+        assert!(!resp.metadata.truncation);
+    }
+
+    #[test]
+    fn an_oversized_answer_keeps_what_fits_and_says_so() {
+        let mut resp = many_answers(120);
+        let whole = resp.to_bytes().expect("encoding").len();
+        assert!(whole > 512, "the fixture has to be too big to start with");
+
+        assert!(truncate(&mut resp, 512));
+        assert!(resp.metadata.truncation, "so the client retries over TCP");
+
+        let cut = resp.to_bytes().expect("encoding").len();
+        assert!(cut <= 512, "{cut} bytes does not fit in 512");
+        assert!(
+            !resp.answers.is_empty(),
+            "records are dropped until it fits, not thrown away wholesale"
+        );
+
+        // And it is the *most* that fits: one more record would not have.
+        let mut one_more = resp.clone();
+        one_more
+            .answers
+            .push(many_answers(1).answers.pop().expect("a record"));
+        assert!(one_more.to_bytes().expect("encoding").len() > 512);
+    }
+
+    #[test]
+    fn a_half_full_answer_section_empties_the_ones_behind_it() {
+        // What `miekg/dns` leaves: its loop stops at the first record that
+        // does not fit and adds nothing after it, section by section.
+        let mut resp = many_answers(120);
+        resp.authorities = vec![soa_record(&query("example.com.", RecordType::A), 300)];
+        resp.additionals = many_answers(2).answers;
+
+        truncate(&mut resp, 512);
+        assert!(!resp.answers.is_empty());
+        assert!(resp.authorities.is_empty());
+        assert!(resp.additionals.is_empty());
+    }
+
+    #[test]
+    fn the_authority_section_is_next_in_line() {
+        // An answer section that fits entirely leaves room for what follows.
+        let q = query("example.com.", RecordType::A);
+        let mut resp = many_answers(2);
+        resp.authorities = (0..40).map(|_| soa_record(&q, 300)).collect();
+
+        truncate(&mut resp, 512);
+        assert_eq!(resp.answers.len(), 2, "the answers all fit");
+        assert!(
+            !resp.authorities.is_empty(),
+            "and some authority records do"
+        );
+        assert!(resp.authorities.len() < 40);
+    }
+
+    #[test]
+    fn the_opt_record_survives_truncation() {
+        // It is not an answer: it is the terms the exchange was conducted on,
+        // and a client that sent one is owed one back however little fits.
+        let mut resp = many_answers(120);
+        let mut e = hickory_proto::op::Edns::new();
+        e.set_max_payload(512);
+        resp.edns = Some(e);
+
+        assert!(truncate(&mut resp, 512));
+        assert!(resp.edns.is_some());
+        assert!(resp.to_bytes().expect("encoding").len() <= 512);
     }
 }

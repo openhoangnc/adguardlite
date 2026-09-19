@@ -519,6 +519,16 @@ impl Resolver {
             // running AdGuard Home stores too.
             if let Action::Respond(resp) = &mut o.action {
                 msg::shape_to_request(req, resp);
+
+                // Plain UDP is the only transport here that carries no length
+                // of its own, so it is the only one where an answer too large
+                // for the client is simply lost.  Cutting it here rather than
+                // at the listener keeps it inside what the query log records:
+                // a running Go build stores the truncated answer, so its log
+                // shows what the client got rather than what it might have.
+                if proto == Proto::Udp {
+                    msg::truncate(resp, msg::udp_limit(req));
+                }
             }
             o.elapsed = started.elapsed();
 

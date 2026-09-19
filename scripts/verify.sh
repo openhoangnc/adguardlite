@@ -99,6 +99,11 @@ python3 "$root/tests/compat/dnssec_diff.py" \
 	--go "127.0.0.1:$go_dns" --rust "127.0.0.1:$rs_dns" \
 	|| fail "responses carry different DNSSEC records, AD bits or OPT records"
 
+say "UDP truncation"
+python3 "$root/tests/compat/truncate_diff.py" \
+	--go "127.0.0.1:$go_dns" --rust "127.0.0.1:$rs_dns" \
+	|| fail "an oversized answer was not cut to what the client asked for"
+
 say "config output"
 for port in "$go_http" "$rs_http"; do
 	curl -sf --max-time 10 -u "$user:$pass" -X POST -H 'Content-Type: application/json' \

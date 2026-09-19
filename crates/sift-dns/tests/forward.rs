@@ -37,7 +37,7 @@ struct Seen {
 /// `delay` holds each answer back, which is what makes a second identical
 /// request arrive while the first is still in flight.
 async fn upstream(answer: IpAddr, delay: Duration) -> (SocketAddr, Arc<Seen>) {
-    serve(answer, delay, false).await
+    serve(answer, delay, Answering::default()).await
 }
 
 /// The same, answering the way a real upstream answers a signed name: the
@@ -45,10 +45,41 @@ async fn upstream(answer: IpAddr, delay: Duration) -> (SocketAddr, Arc<Seen>) {
 /// bit, and an OPT record of its own advertising a size this server never
 /// asked for.
 async fn signing_upstream(answer: IpAddr) -> (SocketAddr, Arc<Seen>) {
-    serve(answer, Duration::ZERO, true).await
+    serve(
+        answer,
+        Duration::ZERO,
+        Answering {
+            signed: true,
+            ..Default::default()
+        },
+    )
+    .await
 }
 
-async fn serve(answer: IpAddr, delay: Duration, signing: bool) -> (SocketAddr, Arc<Seen>) {
+/// The same, answering with enough records that the reply cannot fit in the
+/// 512 bytes a client that sent no OPT record is entitled to.
+async fn wordy_upstream(answer: IpAddr, extra: usize) -> (SocketAddr, Arc<Seen>) {
+    serve(
+        answer,
+        Duration::ZERO,
+        Answering {
+            extra,
+            ..Default::default()
+        },
+    )
+    .await
+}
+
+/// How the fake upstream answers.
+#[derive(Clone, Copy, Default)]
+struct Answering {
+    /// Answer the way a DNSSEC-signed name is answered.
+    signed: bool,
+    /// How many address records to add beyond the first.
+    extra: usize,
+}
+
+async fn serve(answer: IpAddr, delay: Duration, how: Answering) -> (SocketAddr, Arc<Seen>) {
     let sock = UdpSocket::bind("127.0.0.1:0").await.expect("binding");
     let addr = sock.local_addr().expect("local addr");
     let seen = Arc::new(Seen::default());
@@ -77,9 +108,9 @@ async fn serve(answer: IpAddr, delay: Duration, signing: bool) -> (SocketAddr, A
                     IpAddr::V4(a) => RData::A(A(a)),
                     IpAddr::V6(a) => RData::AAAA(hickory_proto::rr::rdata::AAAA(a)),
                 };
-                resp.answers = vec![Record::from_rdata(q.name().clone(), 300, data)];
+                resp.answers = vec![Record::from_rdata(q.name().clone(), 300, data); 1 + how.extra];
 
-                if signing {
+                if how.signed {
                     resp.metadata.authentic_data = true;
                     resp.answers.push(signature(q.name(), RecordType::RRSIG));
                     resp.authorities = vec![
@@ -430,6 +461,64 @@ async fn a_cached_answer_is_shaped_for_whoever_asks_for_it() {
         2,
         "one exchange per shape"
     );
+}
+
+#[tokio::test]
+async fn a_datagram_answer_is_cut_to_what_the_client_can_receive() {
+    // A client that sent no OPT record is entitled to 512 bytes and nothing
+    // more; anything larger is a datagram the network may simply drop, and the
+    // client never learns there was an answer at all.
+    let (server, _) = wordy_upstream("192.0.2.1".parse().unwrap(), 120).await;
+    let r = resolver(server, Settings::default()).await;
+
+    let out = r
+        .resolve(&request("example.com."), Proto::Udp, &lan_client())
+        .await;
+    let resp = answer_to(&out);
+    let wire = resp.to_bytes().expect("encoding");
+
+    assert!(wire.len() <= 512, "{} bytes went out", wire.len());
+    assert!(resp.metadata.truncation, "so the client retries over TCP");
+    assert!(
+        !resp.answers.is_empty() && resp.answers.len() < 121,
+        "what fits is kept, rather than the answer being thrown away"
+    );
+}
+
+#[tokio::test]
+async fn a_client_that_asked_for_room_gets_it() {
+    let (server, _) = wordy_upstream("192.0.2.1".parse().unwrap(), 120).await;
+    let r = resolver(server, Settings::default()).await;
+
+    let mut req = request("example.com.");
+    let mut e = hickory_proto::op::Edns::new();
+    e.set_max_payload(4096);
+    req.edns = Some(e);
+
+    let out = r.resolve(&req, Proto::Udp, &lan_client()).await;
+    let resp = answer_to(&out);
+
+    assert_eq!(resp.answers.len(), 121, "all of it fits in 4096");
+    assert!(!resp.metadata.truncation);
+}
+
+#[tokio::test]
+async fn a_stream_transport_is_never_truncated() {
+    // TCP, DoT, DoH and DoQ all carry a length of their own, so the 512-byte
+    // datagram limit has nothing to do with them.  Upstream answers them with
+    // `dns.MaxMsgSize`.
+    let (server, _) = wordy_upstream("192.0.2.1".parse().unwrap(), 120).await;
+    let r = resolver(server, Settings::default()).await;
+
+    for proto in [Proto::Tcp, Proto::Tls, Proto::Https, Proto::Quic] {
+        let out = r
+            .resolve(&request("example.com."), proto, &lan_client())
+            .await;
+        let resp = answer_to(&out);
+
+        assert_eq!(resp.answers.len(), 121, "{proto:?} carries its own length");
+        assert!(!resp.metadata.truncation, "{proto:?}");
+    }
 }
 
 #[tokio::test]

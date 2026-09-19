@@ -57,7 +57,7 @@ installation.
 ```bash
 cargo build --release            # fast to build and to run
 cargo build --profile dist       # fat LTO, panic=abort, stripped: ~10.7 MB
-cargo test --workspace           # 759 tests, no network or Go build needed
+cargo test --workspace           # 767 tests, no network or Go build needed
 cargo clippy --workspace --all-targets
 ```
 
@@ -135,6 +135,11 @@ The comparison harnesses live in `tests/compat/`:
   declares the status a GET should produce, so two servers failing the same way
   is a failure, not a match.
 - `dns_diff.py` — DNS answers from both servers over A and AAAA.
+- `truncate_diff.py` — that an oversized UDP answer is cut to what the client
+  advertised, with the truncation bit set, and that a stream transport is not
+  cut at all. A property rather than the bytes: each server caches its own copy
+  of an upstream's answer and a TXT set arrives in a different order each time,
+  so *how many* records fit is not a fact about the server.
 - `dnssec_diff.py` — the *shape* of both servers' answers to the same question
   asked five ways: which record types are in each section, the `AD` bit, and
   what the OPT record says. Contents are not compared, because a CDN may
@@ -220,13 +225,19 @@ is observable behaviour copied from `internal/dnsforward`:
     request coalescing, `bogus_nxdomain` and DNS64 live.
 
 Every one of those paths returns through one closure, `finish`, which calls
-`msg::shape_to_request`: whatever is about to be sent is cut back to what the
+`msg::shape_to_request` and, for plain UDP alone, `msg::truncate`: whatever is about to be sent is cut back to what the
 client asked for — no DNSSEC records and no `AD` bit for a request without
 `DO`, and an OPT record only when the request carried one. It is deliberately
 the last step and deliberately in one place, and it runs *before* the query log
 and the statistics observe the outcome, so what is recorded is what the client
-was sent. Upstream splits the same work between `processDNSSECAfterResponse`
-and dnsproxy's `scrub`.
+was sent — a running Go build's `querylog.json` holds the truncated answer too.
+Upstream splits the same work between `processDNSSECAfterResponse` and
+dnsproxy's `scrub`.
+
+Truncation is plain UDP's alone: every other transport here carries a length of
+its own. The limit is `max(512, what the request advertised)`, upstream's
+`dnsSize` — with one deliberate difference for a request that carries no OPT
+record at all, which `TASK.md` records under *Deliberate deviations*.
 
 Which settings apply is decided *before* step 1, by `Resolver::effective`: a
 persistent client that does not use the global settings overrides the filtering

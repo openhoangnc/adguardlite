@@ -354,10 +354,10 @@ pub async fn serve_udp(
         let sock = sock.clone();
         tokio::spawn(async move {
             if let Some(resp) = server.handle(&wire, peer, Proto::Udp).await {
-                // A response larger than the client's buffer would be dropped
-                // by the network; set TC so it retries over TCP.
-                let out = truncate_if_needed(&resp, UDP_BUF);
-                let _ = sock.send_to(&out, peer).await;
+                // Already cut to what this client said it could receive, by
+                // `msg::truncate` in the resolver -- see the comment there for
+                // why it does not happen at this end.
+                let _ = sock.send_to(&resp, peer).await;
             }
         });
     }
@@ -503,25 +503,6 @@ where
         stream.write_all(&resp).await?;
         stream.flush().await?;
     }
-}
-
-/// Sets the truncation bit and strips records if a response will not fit in a
-/// datagram.
-fn truncate_if_needed(wire: &[u8], limit: usize) -> Vec<u8> {
-    if wire.len() <= limit {
-        return wire.to_vec();
-    }
-
-    let Ok(msg) = Message::from_bytes(wire) else {
-        return wire.to_vec();
-    };
-
-    let mut t = Message::query();
-    t.metadata = msg.metadata;
-    t.metadata.truncation = true;
-    t.queries = msg.queries;
-
-    t.to_bytes().unwrap_or_else(|_| wire.to_vec())
 }
 
 /// Binds a UDP socket, allowing address reuse so restarts do not fail.
@@ -1038,23 +1019,6 @@ mod tests {
             s.handle(&q, peer(), Proto::Udp).await.is_none(),
             "and a query carrying no ClientID is not on the allowlist"
         );
-    }
-
-    #[test]
-    fn oversized_responses_get_the_truncation_bit() {
-        let mut m = Message::query();
-        m.metadata.id = 5;
-        m.add_query(Query::query(
-            Name::from_utf8("a.com.").unwrap(),
-            RecordType::A,
-        ));
-        let wire = m.to_bytes().unwrap();
-
-        // Pretend the limit is tiny so truncation kicks in.
-        let out = truncate_if_needed(&wire, 4);
-        let back = Message::from_bytes(&out).unwrap();
-        assert!(back.metadata.truncation);
-        assert!(back.answers.is_empty());
     }
 
     #[test]
