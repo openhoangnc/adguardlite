@@ -58,6 +58,9 @@ dns:
   # Written out rather than left to the default, because the DNSSEC shape
   # comparison only means anything while signatures are being asked for.
   enable_dnssec: true
+  # Likewise: with no TLS configured below there is nothing for either server
+  # to advertise over DDR, which is exactly the case that used to be forwarded.
+  handle_ddr: true
 schema_version: 34
 EOF
 }
@@ -103,6 +106,11 @@ say "UDP truncation"
 python3 "$root/tests/compat/truncate_diff.py" \
 	--go "127.0.0.1:$go_dns" --rust "127.0.0.1:$rs_dns" \
 	|| fail "an oversized answer was not cut to what the client asked for"
+
+say "resolver discovery"
+python3 "$root/tests/compat/ddr_diff.py" \
+	--go "127.0.0.1:$go_dns" --rust "127.0.0.1:$rs_dns" \
+	|| fail "the resolver-discovery name is not answered the same way"
 
 say "config output"
 for port in "$go_http" "$rs_http"; do

@@ -115,8 +115,17 @@ pub struct Settings {
     pub bogus_nxdomain: Vec<(IpAddr, u8)>,
     /// The NAT64 prefixes used for DNS64 synthesis.
     pub dns64: dns64::Prefixes,
-    /// The encrypted endpoints advertised over DDR, when it is handled.
-    pub ddr: Option<ddr::Endpoints>,
+    /// Whether `_dns.resolver.arpa` is answered here rather than forwarded.
+    ///
+    /// Separate from the endpoints below, because they answer separate
+    /// questions: this one decides whether the name is answered at all, and
+    /// the endpoints decide whether the answer carries anything.  A server with
+    /// no encrypted listener still has to answer it -- empty -- since a
+    /// forwarded DDR query comes back with the *upstream's* designated
+    /// resolvers and points the client away from here.
+    pub handle_ddr: bool,
+    /// The encrypted endpoints advertised over DDR, when there are any.
+    pub ddr: ddr::Endpoints,
     /// Whether identical in-flight requests are coalesced.
     pub pending_enabled: bool,
     /// When the global blocked-services list is paused.
@@ -148,7 +157,8 @@ impl Default for Settings {
             dnssec_enabled: false,
             bogus_nxdomain: Vec::new(),
             dns64: dns64::Prefixes::default(),
-            ddr: None,
+            handle_ddr: false,
+            ddr: ddr::Endpoints::default(),
             pending_enabled: false,
             services_schedule: Weekly::default(),
             private_networks: default_private_networks(),
@@ -576,12 +586,13 @@ impl Resolver {
             });
         }
 
-        // 4. Discovery of Designated Resolvers, answered locally.
-        if let Some(ep) = &settings.ddr
-            && ddr::is_query(req)
-        {
+        // 4. Discovery of Designated Resolvers, answered locally -- whether or
+        //    not there is anything to advertise.  A query that reaches an
+        //    upstream is answered with *its* designated resolvers, which would
+        //    hand the client a different server to talk to.
+        if settings.handle_ddr && ddr::is_query(req) {
             return finish(Outcome {
-                action: Action::Respond(Box::new(ddr::respond(req, ep))),
+                action: Action::Respond(Box::new(ddr::respond(req, &settings.ddr))),
                 ..base()
             });
         }
@@ -1701,12 +1712,13 @@ mod tests {
     #[tokio::test]
     async fn a_ddr_query_is_answered_locally() {
         let s = Settings {
-            ddr: Some(ddr::Endpoints {
+            handle_ddr: true,
+            ddr: ddr::Endpoints {
                 server_name: "dns.example".into(),
                 https: Some(443),
                 tls: None,
                 quic: Some(853),
-            }),
+            },
             ..Default::default()
         };
         let r = resolver("", Table::default(), s);
@@ -1727,6 +1739,60 @@ mod tests {
             out.response().unwrap().metadata.response_code,
             ResponseCode::ServFail
         );
+    }
+
+    #[tokio::test]
+    async fn the_ddr_name_is_answered_even_with_nothing_to_advertise() {
+        // With no encrypted listener there is nothing to point a client at --
+        // but the query must not reach an upstream, which would answer it with
+        // *its* designated resolvers and move the client off this server.  A
+        // running AdGuard Home answers the name itself, empty, whenever
+        // `handle_ddr` is on; with it off, it forwards.
+        let s = Settings {
+            handle_ddr: true,
+            ..Default::default()
+        };
+        let r = resolver("", Table::default(), s);
+
+        for qtype in [RecordType::SVCB, RecordType::A, RecordType::HTTPS] {
+            let out = resolve(&r, "_dns.resolver.arpa.", qtype, Proto::Udp).await;
+            let resp = out.response().expect("an answer");
+
+            assert_eq!(
+                resp.metadata.response_code,
+                ResponseCode::NoError,
+                "{qtype} should be answered here, not forwarded"
+            );
+            assert!(resp.answers.is_empty(), "{qtype} has nothing to advertise");
+            assert!(resp.authorities.is_empty(), "{qtype}");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_the_ddr_name_itself_is_answered_here() {
+        // The rest of `resolver.arpa` is forwarded, which is what upstream
+        // does: `resolver.arpa` and `foo.resolver.arpa` both came back with the
+        // upstream's own negative answer.
+        let s = Settings {
+            handle_ddr: true,
+            ..Default::default()
+        };
+        let r = resolver("", Table::default(), s);
+
+        for name in [
+            "resolver.arpa.",
+            "foo.resolver.arpa.",
+            "_dns.foo.resolver.arpa.",
+        ] {
+            let out = resolve(&r, name, RecordType::SVCB, Proto::Udp).await;
+
+            // No upstream is configured, so a forwarded query fails here.
+            assert_eq!(
+                out.response().unwrap().metadata.response_code,
+                ResponseCode::ServFail,
+                "{name} should have gone upstream"
+            );
+        }
     }
 
     #[tokio::test]

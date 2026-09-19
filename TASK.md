@@ -125,9 +125,11 @@ Verification claims below are reproducible with `scripts/verify.sh` and
       and mapped into the NAT64 prefix, with the Well-Known Prefix as default
 - [x] **`bogus_nxdomain`**: an answer inside a configured network becomes
       `NXDOMAIN`
-- [x] **DDR** (`handle_ddr`): `_dns.resolver.arpa` is answered with `SVCB`
-      records for the encrypted listeners that are actually running — DoT only
-      when the certificate names an IP address, as upstream requires
+- [x] **DDR** (`handle_ddr`): `_dns.resolver.arpa` is answered here, and never
+      forwarded — with `SVCB` records for the encrypted listeners that are
+      actually running, DoT only when the certificate names an IP address as
+      upstream requires, and empty when there is nothing to advertise; see
+      *Found comparing answer shapes* below for why the empty case matters
 - [x] **Duplicate-request coalescing** (`pending_requests`): identical
       questions in flight share one upstream exchange, keyed by question and
       client subnet
@@ -2024,3 +2026,62 @@ One thing hickory will not reproduce: `Edns::set_max_payload` floors what it
 stores at 512, so a request advertising 128 is answered with an OPT record
 saying 512 where the Go build echoes 128. RFC 6891 6.2.3 makes the two mean the
 same thing, and the floor is the reason the limit is right.
+
+### A discovery query was answered by the upstream
+
+`_dns.resolver.arpa` is how a client asks which encrypted transports *this*
+resolver offers. `app::ddr_endpoints` returned `None` when there was no
+certificate or no encrypted listener, `Settings::ddr` was that `Option`, and the
+resolver's step 4 read it as "is DDR handled" — so a server with nothing to
+advertise forwarded the query. Quad9 answered it, with **its own** three `SVCB`
+records and their address glue, and a client acting on that discovery stops
+talking to this server at all. The answer a plain `A` for the same name got was
+the upstream's negative one.
+
+The two questions are now separate, which is the whole fix: `Settings::handle_ddr`
+decides whether the name is answered here, and `Settings::ddr` decides whether
+the answer carries anything. `ddr::respond` already returned an empty `NOERROR`
+for a question it had nothing for — it was never reached.
+
+Measured against the Go build, `handle_ddr: true` and no TLS configured:
+
+| `_dns.resolver.arpa` | Go v0.107.79 | before | after |
+|---|---|---|---|
+| `SVCB` | empty `NOERROR`, 47B | `SVCB`×3 + glue, **from Quad9** | empty `NOERROR` |
+| `A`, `AAAA`, `HTTPS` | empty `NOERROR` | the upstream's `SOA` | empty `NOERROR` |
+| `resolver.arpa`, `foo.resolver.arpa` | forwarded | forwarded | forwarded |
+
+The control that settles it: with `handle_ddr: false` the Go build forwards the
+name, and its answers are then byte-for-byte what this build used to give — 418
+bytes for the `SVCB` and 88 for the `A`. So the old behaviour was not a
+different reading of DDR, it was DDR switched off by accident whenever there was
+nothing to advertise.
+
+`tests/compat/ddr_diff.py` is the guard, run by `scripts/verify.sh` with
+`handle_ddr: true` written into the seeded config so it cannot pass vacuously.
+Against **v0.7.2** it reports the forwarded `SVCB` records and all three other
+types. Two tests cover it in the tree, one for the name being answered whatever
+the type and one for the rest of `resolver.arpa` still being forwarded, so an
+over-eager fix fails as loudly as the missing one did.
+
+### One divergence found while writing those harnesses, and not fixed
+
+**Rate limiting applies to every transport here, and to UDP alone upstream.**
+`Server::handle_as` checks the limiter before it parses anything, whatever the
+protocol, so a TCP, DoT, DoH or DoQ client behind a busy address is silently cut
+off — a stream client gets a closed connection with no answer. dnsproxy gates it
+on the transport:
+
+```go
+// ratelimit based on IP only, protects CPU cycles and outbound connections
+if d.Proto == ProtoUDP && p.isRatelimited(ip) {
+	// Don't reply to ratelimited clients.
+	return nil
+}
+```
+
+Which is the right shape: the limit exists so a spoofed datagram cannot be
+turned into amplification, and a client that completed a handshake has already
+proved its address. Found because a harness firing a few hundred queries at
+`ratelimit: 20` lost TCP answers at random, which is exactly what a real busy
+NAT would look like.

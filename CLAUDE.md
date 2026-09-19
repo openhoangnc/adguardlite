@@ -57,7 +57,7 @@ installation.
 ```bash
 cargo build --release            # fast to build and to run
 cargo build --profile dist       # fat LTO, panic=abort, stripped: ~10.7 MB
-cargo test --workspace           # 767 tests, no network or Go build needed
+cargo test --workspace           # 769 tests, no network or Go build needed
 cargo clippy --workspace --all-targets
 ```
 
@@ -135,6 +135,8 @@ The comparison harnesses live in `tests/compat/`:
   declares the status a GET should produce, so two servers failing the same way
   is a failure, not a match.
 - `dns_diff.py` — DNS answers from both servers over A and AAAA.
+- `ddr_diff.py` — that `_dns.resolver.arpa` is answered by the server being
+  asked rather than forwarded, and that the rest of `resolver.arpa` is not.
 - `truncate_diff.py` — that an oversized UDP answer is cut to what the client
   advertised, with the truncation bit set, and that a stream transport is not
   cut at all. A property rather than the bytes: each server caches its own copy
@@ -212,7 +214,9 @@ is observable behaviour copied from `internal/dnsforward`:
 3. an access-blocked host is **dropped** on UDP and `REFUSED` on TCP — silence
    on a datagram transport is deliberate, so a spoofed source gains no
    amplification;
-4. DDR (`_dns.resolver.arpa`) is answered locally;
+4. DDR (`_dns.resolver.arpa`) is answered locally — always, when `handle_ddr`
+   is on: forwarding it means the client is handed the *upstream's* designated
+   resolvers;
 5. rewrites apply *even when protection is off*;
 6. filtering, in upstream's order: blocklists, then blocked services, then
    safe search — upstream checks safe browsing and parental control between
@@ -225,9 +229,10 @@ is observable behaviour copied from `internal/dnsforward`:
     request coalescing, `bogus_nxdomain` and DNS64 live.
 
 Every one of those paths returns through one closure, `finish`, which calls
-`msg::shape_to_request` and, for plain UDP alone, `msg::truncate`: whatever is about to be sent is cut back to what the
-client asked for — no DNSSEC records and no `AD` bit for a request without
-`DO`, and an OPT record only when the request carried one. It is deliberately
+`msg::shape_to_request` and, for plain UDP alone, `msg::truncate`: whatever is
+about to be sent is cut back to what the client asked for — no DNSSEC records
+and no `AD` bit for a request without `DO`, an OPT record only when the request
+carried one, and no more bytes than it said it could take. It is deliberately
 the last step and deliberately in one place, and it runs *before* the query log
 and the statistics observe the outcome, so what is recorded is what the client
 was sent — a running Go build's `querylog.json` holds the truncated answer too.

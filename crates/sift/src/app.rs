@@ -320,11 +320,14 @@ pub fn clients(c: &Config) -> sift_dns::clients::Registry {
 
 /// Describes the encrypted endpoints DDR should advertise.
 ///
-/// Returns `None` when DDR is off, no certificate names the server, or no
-/// encrypted listener is configured — there would be nothing to point at.
-pub fn ddr_endpoints(c: &Config) -> Option<sift_dns::ddr::Endpoints> {
-    if !c.dns.handle_ddr || !c.tls.enabled || c.tls.server_name.is_empty() {
-        return None;
+/// Empty when no certificate names the server or no encrypted listener is
+/// configured — there would be nothing to point at.  Whether the DDR name is
+/// answered at all is `dns.handle_ddr`, and it is a separate question: the name
+/// is answered either way, because a DDR query that reaches an upstream comes
+/// back naming *that* resolver.
+pub fn ddr_endpoints(c: &Config) -> sift_dns::ddr::Endpoints {
+    if !c.tls.enabled || c.tls.server_name.is_empty() {
+        return sift_dns::ddr::Endpoints::default();
     }
 
     let ep = sift_dns::ddr::Endpoints {
@@ -338,7 +341,11 @@ pub fn ddr_endpoints(c: &Config) -> Option<sift_dns::ddr::Endpoints> {
         quic: (c.tls.port_dns_over_quic != 0).then_some(c.tls.port_dns_over_quic),
     };
 
-    (!ep.is_empty()).then_some(ep)
+    if ep.is_empty() {
+        return sift_dns::ddr::Endpoints::default();
+    }
+
+    ep
 }
 
 /// Where the configured certificate and key are to be read from.
@@ -403,6 +410,7 @@ pub fn settings(c: &Config) -> Settings {
             c.dns.use_dns64,
             c.dns.dns64_prefixes.iter().map(|p| (p.addr, p.bits)),
         ),
+        handle_ddr: c.dns.handle_ddr,
         ddr: ddr_endpoints(c),
         pending_enabled: c.dns.pending_requests.enabled,
         services_schedule: schedule(&c.filtering.blocked_services.schedule),

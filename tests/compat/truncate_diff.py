@@ -20,12 +20,17 @@ adds an `OPT(2048, DO)` to the request on its way upstream and then reads the
 client's limit back out of the request it just edited -- and it only appears
 with `enable_dnssec` and the cache both on.  It is reported here rather than
 failed on; see TASK.md.
+
+Both servers must be running with rate limiting off -- `scripts/verify.sh`
+seeds `ratelimit: 0` -- because this asks a few hundred questions in a row and a
+rate-limited query is not answered at all.
 """
 
 import argparse
 import socket
 import struct
 import sys
+import time
 
 # Names with answers far too large for one datagram.  A TXT set is the usual
 # way a real deployment meets this: SPF, DKIM and half a dozen verification
@@ -69,7 +74,7 @@ def over_udp(addr, name, edns, bufsize=4096, timeout=6.0, tries=3):
                 s.sendto(build(name, TXT, edns, bufsize), addr)
                 return counts(s.recv(65535))
             except (socket.timeout, struct.error):
-                continue
+                time.sleep(0.2)
 
     return None
 
@@ -92,32 +97,39 @@ def over_tcp(addr, name, timeout=6.0, tries=3):
                 if len(buf) == want:
                     return counts(buf)
             except (socket.timeout, struct.error, ConnectionError):
-                continue
+                time.sleep(0.2)
 
     return None
 
 
-def check(label, addr, name, whole):
-    """Reports every way `addr` mishandles a large answer for `name`."""
+def check(label, addr, name):
+    """Reports every way `addr` mishandles a large answer for `name`.
+
+    The whole answer is measured again for each size, right next to the probe
+    it judges: a TXT set is re-fetched when its entry expires and comes back in
+    another order, so a length measured a few seconds earlier is not something
+    the next answer can be held to.
+    """
     problems = []
 
     for advertised in (512, 1024, 1232, 1400, 2048, 4096):
+        limit = max(MIN_UDP_PAYLOAD, advertised)
         got = over_udp(addr, name, edns=True, bufsize=advertised)
-        if got is None:
+        whole = over_udp(addr, name, edns=True, bufsize=65535)
+        if got is None or whole is None:
             problems.append(f"{label} {name}: no answer advertising {advertised}")
             continue
 
-        limit = max(MIN_UDP_PAYLOAD, advertised)
         if got["len"] > limit:
             problems.append(
                 f"{label} {name}: {got['len']} bytes for a client that asked for {advertised}"
             )
-        if whole > limit and not got["tc"]:
+        elif whole["len"] > limit and not got["tc"]:
             problems.append(
                 f"{label} {name}: cut to {got['len']} bytes advertising {advertised} "
                 "without setting the truncation bit"
             )
-        if whole <= limit and got["tc"]:
+        elif whole["len"] <= limit and got["records"] == whole["records"] and got["tc"]:
             problems.append(
                 f"{label} {name}: truncation bit set although the answer fits in {advertised}"
             )
@@ -157,7 +169,7 @@ def main():
 
         for label, addr in servers.items():
             checked += 1
-            problems += check(label, addr, name, whole[label]["len"])
+            problems += check(label, addr, name)
 
         # The one case the two are known to answer differently.
         plain = {k: over_udp(v, name, edns=False) for k, v in servers.items()}
