@@ -74,7 +74,7 @@ impl Key {
                 .to_ascii_lowercase(),
             qtype: q.query_type().into(),
             qclass: q.query_class().into(),
-            dnssec_ok: crate::edns::dnssec_ok(req) || req.metadata.authentic_data,
+            dnssec_ok: crate::edns::wants_dnssec(req),
             upstreams: None,
         })
     }

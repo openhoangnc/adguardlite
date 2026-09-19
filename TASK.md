@@ -117,7 +117,10 @@ Verification claims below are reproducible with `scripts/verify.sh` and
       configured one; never a loopback or private address, and recorded in the
       query log's `ECS` field
 - [x] **DNSSEC**: the `DO` bit is set on upstream queries when `enable_dnssec`
-      is on, so a validating client below this server receives signatures
+      is on, so a validating client below this server receives signatures — and
+      every answer is shaped back to what the client asked for on the way out,
+      which is the part that was missing; see *Found debugging a Mac that could
+      not resolve Cloudflare* below
 - [x] **DNS64** synthesis (RFC 6147): an empty `AAAA` answer is retried as `A`
       and mapped into the NAT64 prefix, with the Well-Known Prefix as default
 - [x] **`bogus_nxdomain`**: an answer inside a configured network becomes
@@ -1866,3 +1869,79 @@ handshakes are gone. Recorded so the next person does not re-derive them.
 - **The HTTP/1.1 DoH fallback has no test.** It is reviewed by reading only;
   every reachable DoH server negotiates h2, so exercising it needs an h1-only
   local server that nothing else in the tree wants.
+
+## Found debugging a Mac that could not resolve Cloudflare, and fixed
+
+`curl https://api.cloudflare.com` on macOS failed with `connect=0.000000s` —
+never a TCP connection, so `getaddrinfo` had failed before it. `github.com`
+worked. Chrome worked for both, and so did `dig`. The pattern was the tell:
+**every failing name was DNSSEC-signed** (Cloudflare signs by default, and
+`github.com` does not), Chrome speaks DoH to this server directly and never
+asks macOS, and `dig` prints whatever arrives rather than judging its shape.
+
+**Every answer carried whatever the upstream said, not an answer to the
+client's question.** `forward` sets the `DO` bit on every upstream query while
+`enable_dnssec` is on — which is the point of the setting — and the response
+went back to the client unchanged. So a plain `A` query, `DO` never set, was
+answered with an `RRSIG` in the answer section. RFC 4035 3.2.1 forbids that,
+and macOS's `mDNSResponder` enforces it: a response carrying records it did not
+ask for is discarded, question and all.
+
+Measured against a real `adguard/adguardhome:v0.107.79` on the same upstream,
+one query shape per row. Four divergences, all of them in the same family:
+
+| a plain `A` query for a signed name | Go v0.107.79 | before | after |
+|---|---|---|---|
+| answer section | `A A` | `A A RRSIG` | `A A` |
+| authority section of a negative answer | `SOA` | `SOA RRSIG NSEC RRSIG` | `SOA` |
+| `AD` bit, client asked for neither `DO` nor `AD` | clear | set | clear |
+| OPT record, request carried none | absent | `udp=512 do=1` | absent |
+| OPT record, request advertised 1400 | `udp=1400 do=0` | `udp=512 do=1` | `udp=1400 do=0` |
+
+`msg::shape_to_request` is the fix, called from the one `finish` closure every
+path out of `Resolver::resolve` returns through — so a path added later cannot
+forget it, and the query log and statistics, which observe the outcome
+afterwards, record what the client was actually sent. A running Go build stores
+the same: its `querylog.json` holds `A A` for a plain query and keeps the
+`RRSIG` only for the entries whose client set `DO`.
+
+Four rules, each measured rather than inferred:
+
+- **Signatures go only to a client that set `DO`.** `RRSIG`, `DNSKEY`, `DS`,
+  `NSEC` and `NSEC3` are dropped from all three sections — the RFC 4035 and RFC
+  5155 set, deliberately not hickory's `RecordType::is_dnssec`, which also
+  counts `TSIG` and `SIG`.
+- **Except the question's own type.** A `DNSKEY` question is answered with its
+  keys whatever `DO` says — they are the answer — while the `RRSIG` over them is
+  not. Confirmed against the Go build for `DNSKEY`, `DS` and `NSEC` questions.
+- **`AD` is cleared unless the client set `DO` or `AD`** (RFC 6840 5.7). The Go
+  build answers a signed name `ad=0` when neither is set, `ad=1` when `AD`
+  alone is — and `ad=0` for an unsigned name either way, so it is passing the
+  upstream's verdict through rather than echoing the request.
+- **The OPT record is the client's, not the upstream's.** No OPT in, no OPT out;
+  one in, and the answer carries the request's own `DO` bit and advertised
+  size. The Go build echoes 512, 1400 and 4096 back unchanged, and adds an OPT
+  to answers it built itself — a `NOTIMP` from `refuse_any` included, which
+  this now does too.
+
+`tests/compat/dnssec_diff.py` is the guard, run by `scripts/verify.sh`: seven
+names by five request forms, comparing the shape of both servers' answers
+rather than their contents, since a CDN may hand the two different addresses
+but cannot make one of them volunteer an `RRSIG`. All 35 agree. Fourteen tests in
+the tree cover it without the oracle — five in `msg.rs`, five in `edns.rs`, and
+four in `tests/forward.rs` driving a fake upstream that answers the way a
+signed name is answered, including that the cache keeps the whole answer while
+each client is handed its own shape of it.
+
+**Two divergences this turned up and did not fix**, both found while comparing
+shapes and both worth their own pass:
+
+- **UDP answers are not truncated to what the client advertised.**
+  `server::truncate_if_needed` uses a fixed 4 KB, so a 22-record `TXT` answer
+  goes out whole with `TC` clear where the Go build sets `TC` and cuts. A
+  client that advertised 512 bytes is entitled to expect less than it gets.
+- **`_dns.resolver.arpa` is forwarded when there is nothing to say.** With no
+  encrypted listener configured, `ddr::handle` declines and the query goes
+  upstream, which answers with *its* designated resolvers — so a client doing
+  DDR discovery can be pointed at the upstream rather than at this server. The
+  Go build answers the name itself, empty, and never forwards it.

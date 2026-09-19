@@ -3,6 +3,10 @@
 //! Both are per-request edits to the OPT pseudo-record, and both are visible
 //! to the client: the subnet is recorded in the query log's `ECS` field, and
 //! the DO bit decides whether an upstream returns signatures at all.
+//!
+//! The OPT record on the way back is shaped here too, by [`mirror_request`]:
+//! what this server asked an upstream for is not what the client asked for,
+//! and the client is owed an answer to its own question.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
@@ -134,6 +138,41 @@ pub fn dnssec_ok(msg: &Message) -> bool {
     msg.edns.as_ref().is_some_and(|e| e.flags().dnssec_ok)
 }
 
+/// Reports whether a message asked to be told about DNSSEC at all.
+///
+/// `DO` asks for the records themselves and `AD` only for the verdict, and
+/// either changes what the answer may say: the cache keys on this, and a
+/// response's `AD` bit is only left standing for a client that set one of the
+/// two.
+pub fn wants_dnssec(msg: &Message) -> bool {
+    dnssec_ok(msg) || msg.metadata.authentic_data
+}
+
+/// Shapes a response's OPT record to match the request's.
+///
+/// RFC 6891 makes OPT part of one question-and-answer exchange rather than
+/// something a server volunteers, and a running AdGuard Home answers that way:
+/// a request that carried no OPT record is answered without one, and a request
+/// that carried one is answered with *its* `DO` bit and *its* advertised
+/// payload size.  Neither is the upstream's, and the upstream's is what
+/// arrives: [`crate::resolver::Resolver::forward`] asks with `DO` set whenever
+/// `enable_dnssec` is on, and the answer comes back advertising whatever size
+/// that server liked -- 512 from one, 1232 from another.
+pub fn mirror_request(req: &Message, resp: &mut Message) {
+    let Some(asked) = req.edns.as_ref() else {
+        resp.edns = None;
+
+        return;
+    };
+
+    // A response built here carries no OPT record of its own, and a client
+    // that sent one still expects one back -- upstream answers even a
+    // locally-built `NOTIMP` that way.
+    let edns = resp.edns.get_or_insert_with(Edns::new);
+    edns.set_dnssec_ok(asked.flags().dnssec_ok);
+    edns.set_max_payload(asked.max_payload());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,5 +265,89 @@ mod tests {
         let mut m = query();
         set_dnssec_ok(&mut m, false);
         assert!(m.edns.is_none());
+    }
+
+    #[test]
+    fn wanting_dnssec_covers_both_bits() {
+        let mut m = query();
+        assert!(!wants_dnssec(&m));
+
+        m.metadata.authentic_data = true;
+        assert!(wants_dnssec(&m), "`AD` alone asks for the verdict");
+
+        let mut m = query();
+        set_dnssec_ok(&mut m, true);
+        assert!(wants_dnssec(&m), "and `DO` alone asks for the records");
+    }
+
+    /// A response as an upstream hands one back: its own OPT record, with `DO`
+    /// set because that is what it was asked, and its own payload size.
+    fn answer() -> Message {
+        let mut m = Message::query();
+        m.metadata.message_type = hickory_proto::op::MessageType::Response;
+
+        let mut e = Edns::new();
+        e.set_max_payload(1232);
+        e.set_dnssec_ok(true);
+        m.edns = Some(e);
+
+        m
+    }
+
+    #[test]
+    fn a_request_without_an_opt_record_is_answered_without_one() {
+        let mut resp = answer();
+        mirror_request(&query(), &mut resp);
+
+        assert!(
+            resp.edns.is_none(),
+            "an OPT record the client never sent is one macOS discards the answer over"
+        );
+    }
+
+    #[test]
+    fn the_answers_opt_record_carries_the_requests_own_terms() {
+        let mut req = query();
+        let mut e = Edns::new();
+        e.set_max_payload(1400);
+        req.edns = Some(e);
+
+        let mut resp = answer();
+        mirror_request(&req, &mut resp);
+
+        let got = resp
+            .edns
+            .expect("the client sent an OPT record, so it gets one back");
+        assert!(!got.flags().dnssec_ok, "the client did not ask for DNSSEC");
+        assert_eq!(
+            got.max_payload(),
+            1400,
+            "and advertised its own size, not 1232"
+        );
+    }
+
+    #[test]
+    fn a_locally_built_answer_gains_the_opt_record_the_client_expects() {
+        // Nothing this server synthesises -- a block, a rewrite, `NOTIMP` --
+        // carries an OPT record, and a running AdGuard Home answers all three
+        // with one when the request had one.
+        let mut req = query();
+        req.edns = Some(Edns::new());
+
+        let mut resp = Message::query();
+        mirror_request(&req, &mut resp);
+
+        assert!(resp.edns.is_some());
+    }
+
+    #[test]
+    fn a_validating_client_keeps_its_dnssec_bit() {
+        let mut req = query();
+        set_dnssec_ok(&mut req, true);
+
+        let mut resp = answer();
+        mirror_request(&req, &mut resp);
+
+        assert!(resp.edns.expect("an OPT record").flags().dnssec_ok);
     }
 }

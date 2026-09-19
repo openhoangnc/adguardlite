@@ -511,6 +511,15 @@ impl Resolver {
             ..Default::default()
         };
         let finish = |mut o: Outcome| {
+            // Every path out of here goes through this, which is the point:
+            // what leaves is shaped to the question the client asked rather
+            // than to the one this server asked an upstream.  It runs before
+            // the query log and the statistics observe the outcome, so what is
+            // recorded is what the client was actually sent -- which is what a
+            // running AdGuard Home stores too.
+            if let Action::Respond(resp) = &mut o.action {
+                msg::shape_to_request(req, resp);
+            }
             o.elapsed = started.elapsed();
 
             o

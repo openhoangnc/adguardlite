@@ -55,6 +55,9 @@ dns:
     - 127.0.0.1
   port: $3
   ratelimit: 0
+  # Written out rather than left to the default, because the DNSSEC shape
+  # comparison only means anything while signatures are being asked for.
+  enable_dnssec: true
 schema_version: 34
 EOF
 }
@@ -90,6 +93,11 @@ printf '%s\n' google.com github.com example.com cloudflare.com >> "$corpus"
 python3 "$root/tests/compat/dns_diff.py" \
 	--go "127.0.0.1:$go_dns" --rust "127.0.0.1:$rs_dns" --corpus "$corpus" --workers 6 \
 	|| fail "DNS answers differ"
+
+say "DNSSEC response shapes"
+python3 "$root/tests/compat/dnssec_diff.py" \
+	--go "127.0.0.1:$go_dns" --rust "127.0.0.1:$rs_dns" \
+	|| fail "responses carry different DNSSEC records, AD bits or OPT records"
 
 say "config output"
 for port in "$go_http" "$rs_http"; do

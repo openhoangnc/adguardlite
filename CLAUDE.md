@@ -57,7 +57,7 @@ installation.
 ```bash
 cargo build --release            # fast to build and to run
 cargo build --profile dist       # fat LTO, panic=abort, stripped: ~10.7 MB
-cargo test --workspace           # 745 tests, no network or Go build needed
+cargo test --workspace           # 759 tests, no network or Go build needed
 cargo clippy --workspace --all-targets
 ```
 
@@ -124,7 +124,10 @@ the moment two servers were compared:
 - `/control/querylog/config` reports its interval in **milliseconds**, while
   the legacy `/control/querylog_info` reports **days**;
 - a plain entry in `dns.blocked_hosts` matches that name and *nothing else* —
-  not its subdomains — while `||name^` matches the subdomains too.
+  not its subdomains — while `||name^` matches the subdomains too;
+- a response is shaped to the request before it is sent: no signatures and no
+  `AD` for a client that did not ask, and an OPT record only when the request
+  carried one, on the request's own terms.
 
 The comparison harnesses live in `tests/compat/`:
 
@@ -132,6 +135,11 @@ The comparison harnesses live in `tests/compat/`:
   declares the status a GET should produce, so two servers failing the same way
   is a failure, not a match.
 - `dns_diff.py` — DNS answers from both servers over A and AAAA.
+- `dnssec_diff.py` — the *shape* of both servers' answers to the same question
+  asked five ways: which record types are in each section, the `AD` bit, and
+  what the OPT record says. Contents are not compared, because a CDN may
+  legitimately answer the two differently — but it cannot make one of them
+  volunteer an `RRSIG` nobody asked for.
 - `gob-oracle/` — a small Go program that encodes and decodes the statistics
   unit with Go's own `encoding/gob`, so the Rust codec is checked against the
   implementation it must interoperate with.
@@ -210,6 +218,15 @@ is observable behaviour copied from `internal/dnsforward`:
 9. cache;
 10. upstream — which is where the client subnet, the DNSSEC `DO` bit,
     request coalescing, `bogus_nxdomain` and DNS64 live.
+
+Every one of those paths returns through one closure, `finish`, which calls
+`msg::shape_to_request`: whatever is about to be sent is cut back to what the
+client asked for — no DNSSEC records and no `AD` bit for a request without
+`DO`, and an OPT record only when the request carried one. It is deliberately
+the last step and deliberately in one place, and it runs *before* the query log
+and the statistics observe the outcome, so what is recorded is what the client
+was sent. Upstream splits the same work between `processDNSSECAfterResponse`
+and dnsproxy's `scrub`.
 
 Which settings apply is decided *before* step 1, by `Resolver::effective`: a
 persistent client that does not use the global settings overrides the filtering

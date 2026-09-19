@@ -1,10 +1,15 @@
 //! Construction of DNS responses, matching `internal/dnsforward/msg.go`.
+//!
+//! And their shaping on the way out, by [`shape_to_request`]: a response is
+//! the answer to one client's question, not a copy of what an upstream said.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use hickory_proto::op::{Message, MessageType, ResponseCode};
 use hickory_proto::rr::rdata::{A, AAAA, CNAME, SOA};
 use hickory_proto::rr::{Name, RData, Record, RecordType};
+
+use crate::edns;
 
 /// The TTL used for blocked responses when none is configured.
 pub const DEFAULT_BLOCKED_TTL: u32 = 3600;
@@ -134,6 +139,70 @@ pub fn refused(req: &Message) -> Message {
 /// A `SERVFAIL` response.
 pub fn servfail(req: &Message) -> Message {
     reply(req, ResponseCode::ServFail)
+}
+
+/// The record types DNSSEC adds to a response.
+///
+/// RFC 4035 3.2.1 and RFC 5155 name exactly these, and they are what a client
+/// that did not set the `DO` bit must not be sent.  Deliberately not hickory's
+/// `RecordType::is_dnssec`, which also counts `TSIG` and `SIG` -- transaction
+/// security rather than DNSSEC data -- and the `CDS`/`CDNSKEY` a zone
+/// publishes for its parent to read like any other record.
+const fn is_dnssec_record(t: RecordType) -> bool {
+    matches!(
+        t,
+        RecordType::RRSIG
+            | RecordType::DNSKEY
+            | RecordType::DS
+            | RecordType::NSEC
+            | RecordType::NSEC3
+    )
+}
+
+/// Removes a response's DNSSEC records, except the ones `qtype` asked for.
+///
+/// A `DNSKEY` question is answered with its keys whatever the `DO` bit says --
+/// they are the answer -- while the `RRSIG` that came with them is not.  A
+/// running AdGuard Home was measured doing that for `DNSKEY`, `DS` and `NSEC`
+/// questions, and stripping the `NSEC` and `RRSIG` records out of the
+/// authority section of a negative answer while leaving the `SOA`.
+pub fn strip_dnssec(resp: &mut Message, qtype: RecordType) {
+    let keep = |r: &Record| r.record_type() == qtype || !is_dnssec_record(r.record_type());
+
+    resp.answers.retain(keep);
+    resp.authorities.retain(keep);
+    resp.additionals.retain(keep);
+}
+
+/// Shapes a response to what the request asked for, just before it is sent.
+///
+/// Upstream splits this between `processDNSSECAfterResponse` in
+/// `internal/dnsforward` and dnsproxy's `scrub`; here it is one step, run at
+/// the single point every answer leaves the resolver through, so a path added
+/// later cannot forget it.  What it corrects is that the question this server
+/// asked an upstream is not the question the client asked this server.
+pub fn shape_to_request(req: &Message, resp: &mut Message) {
+    // `forward` sets the `DO` bit on every upstream query while
+    // `enable_dnssec` is on, so signatures arrive whether or not anyone below
+    // asked for them, and passing them on is what RFC 4035 3.2.1 forbids.
+    // macOS enforces it: `mDNSResponder` discards a response carrying records
+    // it did not ask for, so `getaddrinfo` fails for every signed name --
+    // every Cloudflare-hosted one, since Cloudflare signs by default -- while
+    // an unsigned name resolves and `dig`, which prints whatever arrives
+    // rather than judging its shape, shows nothing wrong.
+    if !edns::dnssec_ok(req) {
+        strip_dnssec(resp, qtype(req));
+    }
+
+    // `AD` claims the answer was validated, which RFC 6840 5.7 leaves
+    // meaningless to a client that set neither `DO` nor `AD`.  Upstream
+    // clears it for exactly those clients, and keeps the upstream's own
+    // verdict for the rest.
+    if !edns::wants_dnssec(req) {
+        resp.metadata.authentic_data = false;
+    }
+
+    edns::mirror_request(req, resp);
 }
 
 /// A `NOERROR` response carrying the given addresses, filtered to the question's
@@ -486,5 +555,115 @@ mod tests {
         );
         clamp_ttls(&mut m, 0, 0);
         assert_eq!(m.answers[0].ttl, 100);
+    }
+
+    /// A record of `rtype` with opaque rdata, which is how a DNSSEC record
+    /// arrives here: hickory is built without its `dnssec` feature, so an
+    /// `RRSIG` parses as `Unknown` and keeps `RecordType::RRSIG`.
+    fn dnssec_record(name: &str, rtype: RecordType) -> Record {
+        Record::from_rdata(
+            Name::from_utf8(name).unwrap(),
+            300,
+            RData::Unknown {
+                code: rtype,
+                rdata: hickory_proto::rr::rdata::NULL::with(vec![0x01, 0x02, 0x03]),
+            },
+        )
+    }
+
+    /// The answer an upstream gives a query it was asked with `DO` set: the
+    /// records, their signature, a denial in the authority section, and `AD`.
+    fn signed_answer(req: &Message) -> Message {
+        let mut m = with_addrs(req, &["1.2.3.4".parse().unwrap()], 300);
+        m.metadata.authentic_data = true;
+        m.answers
+            .push(dnssec_record("example.com.", RecordType::RRSIG));
+        m.authorities = vec![
+            soa_record(req, 300),
+            dnssec_record("example.com.", RecordType::NSEC),
+            dnssec_record("example.com.", RecordType::RRSIG),
+        ];
+
+        m
+    }
+
+    fn types(rs: &[Record]) -> Vec<RecordType> {
+        rs.iter().map(Record::record_type).collect()
+    }
+
+    #[test]
+    fn a_plain_query_is_answered_without_signatures() {
+        let q = query("example.com.", RecordType::A);
+        let mut resp = signed_answer(&q);
+        shape_to_request(&q, &mut resp);
+
+        assert_eq!(types(&resp.answers), vec![RecordType::A]);
+        assert_eq!(
+            types(&resp.authorities),
+            vec![RecordType::SOA],
+            "the denial of existence goes with the signatures; the SOA stays"
+        );
+        assert!(!resp.metadata.authentic_data);
+        assert!(resp.edns.is_none());
+    }
+
+    #[test]
+    fn a_validating_client_is_answered_with_everything() {
+        let mut q = query("example.com.", RecordType::A);
+        edns::set_dnssec_ok(&mut q, true);
+
+        let mut resp = signed_answer(&q);
+        shape_to_request(&q, &mut resp);
+
+        assert_eq!(
+            types(&resp.answers),
+            vec![RecordType::A, RecordType::RRSIG],
+            "asking for DNSSEC is how signatures are asked for"
+        );
+        assert_eq!(resp.authorities.len(), 3);
+        assert!(resp.metadata.authentic_data);
+    }
+
+    #[test]
+    fn the_question_type_survives_even_unasked_for() {
+        // The keys are the answer to a `DNSKEY` question; the signature over
+        // them is not.  Measured against a running AdGuard Home.
+        let q = query("example.com.", RecordType::DNSKEY);
+        let mut resp = reply(&q, ResponseCode::NoError);
+        resp.answers = vec![
+            dnssec_record("example.com.", RecordType::DNSKEY),
+            dnssec_record("example.com.", RecordType::DNSKEY),
+            dnssec_record("example.com.", RecordType::RRSIG),
+        ];
+
+        shape_to_request(&q, &mut resp);
+        assert_eq!(
+            types(&resp.answers),
+            vec![RecordType::DNSKEY, RecordType::DNSKEY]
+        );
+    }
+
+    #[test]
+    fn a_client_that_asked_only_for_the_verdict_keeps_it() {
+        // `AD` without `DO`: tell me whether it validated, not with what.
+        let mut q = query("example.com.", RecordType::A);
+        q.metadata.authentic_data = true;
+
+        let mut resp = signed_answer(&q);
+        shape_to_request(&q, &mut resp);
+
+        assert_eq!(types(&resp.answers), vec![RecordType::A]);
+        assert!(resp.metadata.authentic_data);
+    }
+
+    #[test]
+    fn an_unsigned_answer_is_left_alone() {
+        let q = query("example.com.", RecordType::A);
+        let mut resp = with_addrs(&q, &["1.2.3.4".parse().unwrap()], 300);
+        let before = resp.clone();
+
+        shape_to_request(&q, &mut resp);
+        assert_eq!(types(&resp.answers), types(&before.answers));
+        assert_eq!(first_addr(&resp), first_addr(&before));
     }
 }

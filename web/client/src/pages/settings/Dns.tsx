@@ -324,7 +324,7 @@ function Server({ config, save }: { config: DnsConfig; save: Save }) {
             <Check
                 checked={d.dnssec_enabled}
                 label="Ask upstreams to validate DNSSEC"
-                hint="Sets the DO bit on every outgoing query and passes the result through. The upstream has to support it."
+                hint="Sets the DO bit on every outgoing query, so a device that asks for signatures is given them. The upstream has to support it."
                 onChange={(v) => set('dnssec_enabled', v)}
             />
             <Check

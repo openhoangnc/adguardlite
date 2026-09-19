@@ -37,6 +37,18 @@ struct Seen {
 /// `delay` holds each answer back, which is what makes a second identical
 /// request arrive while the first is still in flight.
 async fn upstream(answer: IpAddr, delay: Duration) -> (SocketAddr, Arc<Seen>) {
+    serve(answer, delay, false).await
+}
+
+/// The same, answering the way a real upstream answers a signed name: the
+/// address, its `RRSIG`, a signed denial in the authority section, the `AD`
+/// bit, and an OPT record of its own advertising a size this server never
+/// asked for.
+async fn signing_upstream(answer: IpAddr) -> (SocketAddr, Arc<Seen>) {
+    serve(answer, Duration::ZERO, true).await
+}
+
+async fn serve(answer: IpAddr, delay: Duration, signing: bool) -> (SocketAddr, Arc<Seen>) {
     let sock = UdpSocket::bind("127.0.0.1:0").await.expect("binding");
     let addr = sock.local_addr().expect("local addr");
     let seen = Arc::new(Seen::default());
@@ -66,6 +78,20 @@ async fn upstream(answer: IpAddr, delay: Duration) -> (SocketAddr, Arc<Seen>) {
                     IpAddr::V6(a) => RData::AAAA(hickory_proto::rr::rdata::AAAA(a)),
                 };
                 resp.answers = vec![Record::from_rdata(q.name().clone(), 300, data)];
+
+                if signing {
+                    resp.metadata.authentic_data = true;
+                    resp.answers.push(signature(q.name(), RecordType::RRSIG));
+                    resp.authorities = vec![
+                        signature(q.name(), RecordType::NSEC),
+                        signature(q.name(), RecordType::RRSIG),
+                    ];
+
+                    let mut e = hickory_proto::op::Edns::new();
+                    e.set_max_payload(1232);
+                    e.set_dnssec_ok(true);
+                    resp.edns = Some(e);
+                }
             }
 
             let wire = resp.to_bytes().expect("encoding");
@@ -75,6 +101,20 @@ async fn upstream(answer: IpAddr, delay: Duration) -> (SocketAddr, Arc<Seen>) {
     });
 
     (addr, seen)
+}
+
+/// A DNSSEC record with opaque rdata, which is how one arrives: hickory is
+/// built without its `dnssec` feature, so an `RRSIG` parses as `Unknown` while
+/// still reporting `RecordType::RRSIG`.
+fn signature(name: &Name, rtype: RecordType) -> Record {
+    Record::from_rdata(
+        name.clone(),
+        300,
+        RData::Unknown {
+            code: rtype,
+            rdata: hickory_proto::rr::rdata::NULL::with(vec![0x01, 0x02, 0x03]),
+        },
+    )
 }
 
 /// Builds a resolver pointed at one upstream.
@@ -238,6 +278,158 @@ async fn the_dnssec_bit_is_set_only_when_it_is_asked_for() {
         .resolve(&request("example.com."), Proto::Udp, &lan_client())
         .await;
     assert!(*seen.dnssec.lock());
+}
+
+/// The settings a server has when `enable_dnssec` is on, which is the default
+/// a fresh AdGuardHome.yaml carries.
+fn dnssec_on() -> Settings {
+    Settings {
+        dnssec_enabled: true,
+        ..Default::default()
+    }
+}
+
+fn record_types(m: &Message) -> (Vec<RecordType>, Vec<RecordType>) {
+    (
+        m.answers.iter().map(Record::record_type).collect(),
+        m.authorities.iter().map(Record::record_type).collect(),
+    )
+}
+
+fn answer_to(out: &sift_dns::resolver::Outcome) -> &Message {
+    match &out.action {
+        Action::Respond(m) => m,
+        Action::Drop => panic!("the query should have been answered"),
+    }
+}
+
+#[tokio::test]
+async fn a_plain_query_is_never_answered_with_signatures() {
+    // The bit is set upstream for every query while `enable_dnssec` is on, so
+    // the signatures arrive whether the client asked or not.  Passing them on
+    // is what macOS's `mDNSResponder` throws the whole answer away over.
+    let (server, _) = signing_upstream("192.0.2.1".parse().unwrap()).await;
+    let r = resolver(server, dnssec_on()).await;
+
+    let out = r
+        .resolve(&request("example.com."), Proto::Udp, &lan_client())
+        .await;
+    let resp = answer_to(&out);
+
+    assert_eq!(
+        record_types(resp),
+        (vec![RecordType::A], vec![]),
+        "the address, and nothing the client did not ask for"
+    );
+    assert!(!resp.metadata.authentic_data, "nor a validation verdict");
+    assert!(
+        resp.edns.is_none(),
+        "nor an OPT record, the request having carried none"
+    );
+}
+
+#[tokio::test]
+async fn a_validating_client_still_gets_its_signatures() {
+    let (server, seen) = signing_upstream("192.0.2.1".parse().unwrap()).await;
+    let r = resolver(server, dnssec_on()).await;
+
+    let mut req = request("example.com.");
+    sift_dns::edns::set_dnssec_ok(&mut req, true);
+
+    let out = r.resolve(&req, Proto::Udp, &lan_client()).await;
+    let resp = answer_to(&out);
+
+    assert!(*seen.dnssec.lock());
+    assert_eq!(
+        record_types(resp),
+        (
+            vec![RecordType::A, RecordType::RRSIG],
+            vec![RecordType::NSEC, RecordType::RRSIG]
+        ),
+    );
+    assert!(resp.metadata.authentic_data);
+    assert!(resp.edns.as_ref().expect("an OPT record").flags().dnssec_ok);
+}
+
+#[tokio::test]
+async fn the_answers_opt_record_is_the_clients_own() {
+    // The upstream advertises 1232 and sets `DO` because that is what it was
+    // asked; the client asked for neither.
+    let (server, _) = signing_upstream("192.0.2.1".parse().unwrap()).await;
+    let r = resolver(server, dnssec_on()).await;
+
+    let mut req = request("example.com.");
+    let mut e = hickory_proto::op::Edns::new();
+    e.set_max_payload(1400);
+    req.edns = Some(e);
+
+    let out = r.resolve(&req, Proto::Udp, &lan_client()).await;
+    let resp = answer_to(&out);
+    let edns = resp
+        .edns
+        .as_ref()
+        .expect("the client sent one, so it gets one");
+
+    assert!(!edns.flags().dnssec_ok);
+    assert_eq!(edns.max_payload(), 1400);
+    assert_eq!(record_types(resp).0, vec![RecordType::A]);
+}
+
+#[tokio::test]
+async fn a_cached_answer_is_shaped_for_whoever_asks_for_it() {
+    // The cache holds what the upstream said; two clients asking the same
+    // question differently are owed different answers out of it.
+    let (server, seen) = signing_upstream("192.0.2.1".parse().unwrap()).await;
+    let r = Resolver::new(
+        Engine::build([(1i64, "")], sift_filter::engine::NO_LISTS),
+        Table::default(),
+        Cache::new(CacheConfig::default()),
+        {
+            let up = sift_dns::addr::parse(&server.to_string())
+                .expect("parsing")
+                .upstream
+                .expect("an upstream");
+            let client = Client::connect(up, &[], Duration::from_secs(2), false, tls_config())
+                .await
+                .expect("connecting");
+
+            SharedPool::new(Pool::new(
+                vec![Arc::new(client)],
+                vec![],
+                vec![],
+                Mode::LoadBalance,
+                Duration::from_secs(2),
+                Duration::from_secs(2),
+            ))
+        },
+        dnssec_on(),
+    );
+
+    let mut signed = request("example.com.");
+    sift_dns::edns::set_dnssec_ok(&mut signed, true);
+    let first = r.resolve(&signed, Proto::Udp, &lan_client()).await;
+    assert_eq!(record_types(answer_to(&first)).0.len(), 2);
+
+    // Same question, no DO: a different cache entry, so the upstream is asked
+    // again -- and the answer is stripped on the way to this client.
+    let out = r
+        .resolve(&request("example.com."), Proto::Udp, &lan_client())
+        .await;
+    assert_eq!(record_types(answer_to(&out)).0, vec![RecordType::A]);
+
+    // And the signed entry is still whole: shaping the answer must not have
+    // reached into what was stored.
+    let again = r.resolve(&signed, Proto::Udp, &lan_client()).await;
+    assert!(again.cached, "the second signed query is a cache hit");
+    assert_eq!(
+        record_types(answer_to(&again)).0,
+        vec![RecordType::A, RecordType::RRSIG]
+    );
+    assert_eq!(
+        seen.count.load(Ordering::SeqCst),
+        2,
+        "one exchange per shape"
+    );
 }
 
 #[tokio::test]
