@@ -57,7 +57,7 @@ installation.
 ```bash
 cargo build --release            # fast to build and to run
 cargo build --profile dist       # fat LTO, panic=abort, stripped: ~10.7 MB
-cargo test --workspace           # 771 tests, no network or Go build needed
+cargo test --workspace           # 782 tests, no network or Go build needed
 cargo clippy --workspace --all-targets
 ```
 
@@ -279,6 +279,13 @@ toggles, its own blocked services and its own safe search.
   the clock. `sift-core/src/schedule.rs` exposes `blocks_at` for that reason.
 - **Blocked services are a separate engine** from the blocklists, so the
   schedule can pause them per request without rebuilding anything.
+- **`sift-dns/src/probe.rs` counts silence, not rate.** A source is refused
+  only after connecting repeatedly without a single query being answered, and
+  one answered query clears its record. Rate is the wrong measure here and
+  `ratelimit_diff.py` guards why: a NAT with a hundred clients behind it is
+  busy and legitimate, and the last build that limited streams by rate cut
+  every one of them off. It runs before the TLS handshake, because the
+  handshake is the cost being avoided.
 - **A protection pause is a deadline, not a timer.**
   `filtering.protection_disabled_until` holds the moment protection comes
   back, so the pause means the same thing across a restart, and

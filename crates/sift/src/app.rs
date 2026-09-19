@@ -144,6 +144,7 @@ impl App {
 
         let server = Arc::new(Server::new(resolver.clone(), limiter, observer));
         server.set_max_concurrent(config.dns.max_goroutines);
+        server.probes.set_config(probe_config(&config));
         *server.access.write() =
             Access::new(&config.dns.allowed_clients, &config.dns.disallowed_clients);
 
@@ -424,6 +425,19 @@ pub fn settings(c: &Config) -> Settings {
                 .collect()
         },
         use_private_ptr_resolvers: c.dns.use_private_ptr_resolvers,
+    }
+}
+
+/// The connection guard's settings, which are the defaults plus the
+/// operator's own exemptions.
+///
+/// `ratelimit_whitelist` is reused rather than a setting of our own: an
+/// address the operator has already exempted from one defence is exempt from
+/// this one, and the config file stays exactly what the Go build writes.
+pub fn probe_config(config: &Config) -> sift_dns::probe::Config {
+    sift_dns::probe::Config {
+        allowlist: config.dns.ratelimit_whitelist.clone(),
+        ..Default::default()
     }
 }
 

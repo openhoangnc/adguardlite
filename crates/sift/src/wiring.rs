@@ -391,6 +391,7 @@ impl Reloader for LiveReloader {
             subnet_len_v6: cfg.dns.ratelimit_subnet_len_ipv6,
             allowlist: cfg.dns.ratelimit_whitelist.clone(),
         });
+        self.server.probes.set_config(crate::app::probe_config(cfg));
         self.resolver
             .cache
             .set_config(crate::app::cache_config(cfg));

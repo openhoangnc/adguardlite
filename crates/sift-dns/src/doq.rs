@@ -8,6 +8,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use quinn::{Endpoint, ServerConfig};
@@ -89,10 +90,23 @@ pub async fn serve(
             }
         };
 
+        // A source that has proved it only ever connects and leaves is
+        // ignored -- not refused -- so nothing at all is sent back to an
+        // address that may have been forged.
+        if !server.probes.admits(incoming.remote_address().ip()) {
+            incoming.ignore();
+
+            continue;
+        }
+
         let server = server.clone();
         let name = server_name.clone();
         tokio::spawn(async move {
             let Ok(conn) = incoming.await else {
+                // Nothing is recorded against an address whose handshake did
+                // not complete: a QUIC initial packet can carry a forged
+                // source, and counting one would let a spoofer shut a victim
+                // out of DoQ.
                 return;
             };
             let peer = conn.remote_address();
@@ -107,42 +121,52 @@ pub async fn serve(
 
             // Each stream is one query; serve them concurrently, which is the
             // point of using QUIC.
+            let served = Arc::new(AtomicU32::new(0));
             loop {
                 let Ok((send, recv)) = conn.accept_bi().await else {
+                    // The connection is over, and the handshake has proved
+                    // the address, so what it did or did not ask counts.
+                    server
+                        .probes
+                        .record(peer.ip(), served.load(Ordering::Relaxed));
+
                     return;
                 };
 
                 let server = server.clone();
                 let id = client_id.clone();
+                let served = served.clone();
                 tokio::spawn(async move {
-                    serve_stream(send, recv, server, peer, id).await;
+                    if serve_stream(send, recv, server, peer, id).await {
+                        served.fetch_add(1, Ordering::Relaxed);
+                    }
                 });
             }
         });
     }
 }
 
-/// Handles one query stream.
+/// Handles one query stream, reporting whether it was answered.
 async fn serve_stream(
     mut send: quinn::SendStream,
     mut recv: quinn::RecvStream,
     server: Arc<Server>,
     peer: SocketAddr,
     client_id: Option<String>,
-) {
+) -> bool {
     // The client closes its send side after the query, so reading to the end
     // yields exactly one framed message.
     let Ok(buf) = recv.read_to_end(MAX_MSG + 2).await else {
-        return;
+        return false;
     };
 
     if buf.len() < 2 {
-        return;
+        return false;
     }
 
     let len = usize::from(u16::from_be_bytes([buf[0], buf[1]]));
     if len == 0 || buf.len() < 2 + len {
-        return;
+        return false;
     }
     let wire = &buf[2..2 + len];
 
@@ -151,22 +175,25 @@ async fn serve_stream(
         // of not replying.
         let _ = send.finish();
 
-        return;
+        return false;
     };
 
     let Ok(len) = u16::try_from(resp.len()) else {
         let _ = send.finish();
 
-        return;
+        return false;
     };
 
     let mut framed = Vec::with_capacity(resp.len() + 2);
     framed.extend_from_slice(&len.to_be_bytes());
     framed.extend_from_slice(&resp);
 
-    if send.write_all(&framed).await.is_ok() {
-        let _ = send.finish();
+    if send.write_all(&framed).await.is_err() {
+        return false;
     }
+    let _ = send.finish();
+
+    true
 }
 
 #[cfg(test)]

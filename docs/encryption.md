@@ -89,6 +89,35 @@ exists for one case: a reverse proxy in front that terminates TLS itself. With
 it off — the default — the DoH route answers only on the encrypted listener, so
 an operator cannot expose queries in the clear by accident.
 
+## Scanners
+
+An encrypted listener reachable from the internet gets scanned, and each visit
+costs a TLS handshake. The server watches for the one thing that tells a
+scanner from a client: a client opens a connection *in order to ask something*.
+
+A source that makes six connections in a minute without a single query being
+answered is refused for ten minutes, and the connection is then closed before
+the handshake rather than after it. One answered query clears an address's
+record completely, so a busy client — or a NAT with a hundred of them behind
+it — can never be shut out by connecting often. Addresses on your own network
+are never counted at all, so a monitor checking whether the port is up is
+unaffected wherever it runs.
+
+When it happens, it is logged once, with the address the rustls warning never
+gives you:
+
+```text
+INFO refusing a source that keeps connecting without asking anything client=198.51.100.7 connections=6 seconds=600
+```
+
+If something legitimate connects without ever asking anything — an unusual
+health check, a probe of your own — add its address to `ratelimit_whitelist`.
+It exempts an address from this and from the rate limiter both, and takes
+effect as soon as the DNS settings are saved.
+
+This is not a substitute for a firewall. It caps what a scanner costs; it does
+not decide who should be able to reach the port in the first place.
+
 ## Checking it works
 
 ```bash

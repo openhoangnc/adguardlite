@@ -13,6 +13,7 @@ pub mod edns;
 pub mod msg;
 pub mod pending;
 pub mod pool;
+pub mod probe;
 pub mod ratelimit;
 pub mod refresh;
 pub mod resolver;

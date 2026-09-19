@@ -10,6 +10,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, UdpSocket};
 
 use crate::msg;
+use crate::probe::Guard;
 use crate::ratelimit::Limiter;
 use crate::resolver::{Action, ClientInfo, Outcome, Proto, Resolver};
 
@@ -231,6 +232,8 @@ pub struct Server {
     pub access: Arc<parking_lot::RwLock<Access>>,
     /// The query observer.
     pub observer: Arc<dyn Observer>,
+    /// The guard over connections that never ask anything.
+    pub probes: Arc<Guard>,
     /// The bound on requests being handled at once, or `None` for no bound.
     ///
     /// This is `max_goroutines`: without it a flood of slow upstream lookups
@@ -250,6 +253,7 @@ impl Server {
             limiter,
             access: Arc::new(parking_lot::RwLock::new(Access::default())),
             observer,
+            probes: Arc::new(Guard::default()),
             concurrency: parking_lot::RwLock::new(None),
         }
     }
@@ -392,10 +396,18 @@ pub async fn serve_tcp(
             () = &mut shutdown => return Ok(()),
         };
 
+        // A source that has proved it only ever connects and leaves is
+        // turned away here, before anything is read from it.
+        if !server.probes.admits(peer.ip()) {
+            continue;
+        }
+
         let server = server.clone();
         tokio::spawn(async move {
             stream.set_nodelay(true).ok();
-            let _ = serve_stream(stream, server, peer, Proto::Tcp, None).await;
+            let probes = server.probes.clone();
+            let served = serve_stream(stream, server, peer, Proto::Tcp, None).await;
+            probes.record(peer.ip(), served);
         });
     }
 }
@@ -424,6 +436,13 @@ pub async fn serve_dot(
             () = &mut shutdown => return Ok(()),
         };
 
+        // The handshake is the cost a scanner imposes, so a source that has
+        // proved it never asks anything is turned away before it: the
+        // connection is closed without a byte of TLS being read.
+        if !server.probes.admits(peer.ip()) {
+            continue;
+        }
+
         let server = server.clone();
         let acceptor = acceptor.clone();
         let name = server_name.clone();
@@ -434,6 +453,10 @@ pub async fn serve_dot(
             // cannot hold a task open.
             let accepted = tokio::time::timeout(TLS_HANDSHAKE_TIMEOUT, acceptor.accept(stream));
             let Ok(Ok(tls_stream)) = accepted.await else {
+                // A handshake that never finished asked nothing by
+                // definition, and TCP has already proved the address.
+                server.probes.record(peer.ip(), 0);
+
                 return;
             };
 
@@ -443,7 +466,9 @@ pub async fn serve_dot(
                 .server_name()
                 .and_then(|sni| client_id_from_sni(sni, &name));
 
-            let _ = serve_stream(tls_stream, server, peer, Proto::Tls, client_id).await;
+            let probes = server.probes.clone();
+            let served = serve_stream(tls_stream, server, peer, Proto::Tls, client_id).await;
+            probes.record(peer.ip(), served);
         });
     }
 }
@@ -479,26 +504,28 @@ async fn serve_stream<S>(
     peer: SocketAddr,
     proto: Proto,
     client_id: Option<String>,
-) -> std::io::Result<()>
+) -> u32
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
+    let mut served = 0;
+
     loop {
         let mut lenbuf = [0u8; 2];
         match tokio::time::timeout(TCP_IDLE, stream.read_exact(&mut lenbuf)).await {
             Ok(Ok(_)) => {}
             // Idle timeout or a clean close: stop serving this connection.
-            _ => return Ok(()),
+            _ => return served,
         }
 
         let n = usize::from(u16::from_be_bytes(lenbuf));
         if n == 0 || n > MAX_TCP_MSG {
-            return Ok(());
+            return served;
         }
 
         let mut wire = vec![0u8; n];
         if stream.read_exact(&mut wire).await.is_err() {
-            return Ok(());
+            return served;
         }
 
         let Some(resp) = server
@@ -506,17 +533,26 @@ where
             .await
         else {
             // Nothing to send: close rather than leave the client waiting.
-            return Ok(());
+            // This does not count as having asked anything, so bytes that do
+            // not parse as a query buy a scanner no exemption.  A client
+            // refused by the access list does count: it is answered REFUSED,
+            // which is a client this server knows about.
+            return served;
         };
 
         let len = match u16::try_from(resp.len()) {
             Ok(l) => l,
-            Err(_) => return Ok(()),
+            Err(_) => return served,
         };
 
-        stream.write_all(&len.to_be_bytes()).await?;
-        stream.write_all(&resp).await?;
-        stream.flush().await?;
+        if stream.write_all(&len.to_be_bytes()).await.is_err()
+            || stream.write_all(&resp).await.is_err()
+            || stream.flush().await.is_err()
+        {
+            return served;
+        }
+
+        served += 1;
     }
 }
 
@@ -804,6 +840,107 @@ mod tests {
             let resp = Message::from_bytes(&buf).unwrap();
             assert_eq!(resp.answers.len(), 1);
         }
+
+        let _ = tx.send(());
+    }
+
+    /// Points the guard at loopback with a low threshold, so the tests can
+    /// drive a refusal the way the internet does.
+    fn watch_loopback(s: &Server, strikes: u32) {
+        s.probes.set_config(crate::probe::Config {
+            strikes,
+            exempt_local: false,
+            ..Default::default()
+        });
+    }
+
+    #[tokio::test]
+    async fn a_connection_that_asks_nothing_costs_a_strike_and_a_query_clears_it() {
+        let s = test_server("||ads.example.com^\n", 0);
+        watch_loopback(&s, 3);
+
+        let listener = bind_tcp("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let probes = s.probes.clone();
+        tokio::spawn(async move {
+            let _ = serve_tcp(listener, s, async {
+                let _ = rx.await;
+            })
+            .await;
+        });
+
+        // Connect and leave without asking anything, as a scanner does.
+        drop(tokio::net::TcpStream::connect(addr).await.unwrap());
+        for _ in 0..100 {
+            if probes.tracked() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(probes.tracked(), 1, "the connection asked nothing");
+
+        // Then ask something on a new connection, which is what a client is
+        // for -- and what a scanner never does.
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let q = wire_query("ads.example.com.", RecordType::A);
+        c.write_all(&(q.len() as u16).to_be_bytes()).await.unwrap();
+        c.write_all(&q).await.unwrap();
+        c.flush().await.unwrap();
+
+        let mut lenbuf = [0u8; 2];
+        tokio::time::timeout(Duration::from_secs(3), c.read_exact(&mut lenbuf))
+            .await
+            .expect("the query must be answered")
+            .unwrap();
+        drop(c);
+
+        for _ in 0..100 {
+            if probes.tracked() == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(probes.tracked(), 0, "an answered query clears the record");
+
+        let _ = tx.send(());
+    }
+
+    #[tokio::test]
+    async fn a_refused_source_is_closed_before_the_handshake() {
+        // The handshake is the cost, so the connection has to go before it:
+        // the client sees end-of-file rather than a certificate.
+        let (cert, key) = test_cert();
+        let loaded = crate::tls::load(&crate::tls::Source {
+            certificate_chain: cert,
+            private_key: key,
+            ..Default::default()
+        })
+        .expect("the test pair must load");
+
+        let s = test_server("", 0);
+        watch_loopback(&s, 2);
+        let ip: IpAddr = "127.0.0.1".parse().unwrap();
+        s.probes.wasted(ip);
+        s.probes.wasted(ip);
+        assert!(!s.probes.admits(ip), "the source is out of strikes");
+
+        let listener = bind_tcp("127.0.0.1:0".parse().unwrap()).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            let _ = serve_dot(listener, loaded.dot, s, Arc::new(String::new()), async {
+                let _ = rx.await;
+            })
+            .await;
+        });
+
+        let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let mut buf = [0u8; 1];
+        let read = tokio::time::timeout(Duration::from_secs(3), c.read(&mut buf))
+            .await
+            .expect("a refused connection is closed at once, not left hanging");
+        assert_eq!(read.unwrap(), 0, "the server closed without a handshake");
 
         let _ = tx.send(());
     }

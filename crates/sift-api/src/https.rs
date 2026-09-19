@@ -5,6 +5,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use axum::Router;
@@ -23,6 +24,7 @@ pub async fn serve(
     addr: SocketAddr,
     tls: Arc<rustls::ServerConfig>,
     app: Router,
+    probes: Arc<sift_dns::probe::Guard>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) -> std::io::Result<tokio::task::JoinHandle<()>> {
     let listener = TcpListener::bind(addr).await?;
@@ -39,7 +41,17 @@ pub async fn serve(
                 _ = shutdown.changed() => return,
             };
 
+            // A source that has proved it only ever connects and leaves is
+            // turned away before the handshake, which is what it costs us.
+            // This port carries DoH and the web interface, so anything that
+            // makes a single request -- a query, a page, an asset -- clears
+            // its record.
+            if !probes.admits(peer.ip()) {
+                continue;
+            }
+
             let acceptor = acceptor.clone();
+            let probes = probes.clone();
             // Each connection gets the router with its peer address attached,
             // so handlers can see who is asking.
             let svc = app
@@ -51,6 +63,10 @@ pub async fn serve(
 
                 let accepted = tokio::time::timeout(HANDSHAKE_TIMEOUT, acceptor.accept(stream));
                 let Ok(Ok(tls_stream)) = accepted.await else {
+                    // A handshake that never finished asked nothing, and TCP
+                    // has already proved the address.
+                    probes.record(peer.ip(), 0);
+
                     return;
                 };
 
@@ -59,8 +75,11 @@ pub async fn serve(
                     Err(_) => return,
                 };
 
+                let served = Arc::new(AtomicU32::new(0));
+                let counted = served.clone();
                 let hyper_svc = hyper::service::service_fn(move |req| {
                     let tower_svc = tower_svc.clone();
+                    counted.fetch_add(1, Ordering::Relaxed);
 
                     async move { tower::util::ServiceExt::oneshot(tower_svc, req).await }
                 });
@@ -68,6 +87,8 @@ pub async fn serve(
                 let _ = Builder::new(TokioExecutor::new())
                     .serve_connection_with_upgrades(TokioIo::new(tls_stream), hyper_svc)
                     .await;
+
+                probes.record(peer.ip(), served.load(Ordering::Relaxed));
             });
         }
     }))

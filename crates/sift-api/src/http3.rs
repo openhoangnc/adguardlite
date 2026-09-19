@@ -59,6 +59,7 @@ pub fn endpoint(addr: SocketAddr, tls: Arc<rustls::ServerConfig>) -> Result<Endp
 pub async fn serve(
     endpoint: Endpoint,
     router: Router,
+    probes: Arc<sift_dns::probe::Guard>,
     shutdown: impl std::future::Future<Output = ()> + Send,
 ) {
     tokio::pin!(shutdown);
@@ -77,35 +78,55 @@ pub async fn serve(
             }
         };
 
+        // A source that has proved it only ever connects and leaves is
+        // ignored -- not refused -- so nothing is sent back to an address
+        // that may have been forged.
+        if !probes.admits(incoming.remote_address().ip()) {
+            incoming.ignore();
+
+            continue;
+        }
+
         let router = router.clone();
+        let probes = probes.clone();
         tokio::spawn(async move {
             let Ok(conn) = incoming.await else {
+                // Nothing is recorded against an address whose handshake did
+                // not complete: a QUIC initial packet can carry a forged
+                // source, and counting one would let a spoofer shut a victim
+                // out of this listener.
                 return;
             };
             let peer = conn.remote_address();
 
-            serve_connection(conn, router, peer).await;
+            let served = serve_connection(conn, router, peer).await;
+            probes.record(peer.ip(), served);
         });
     }
 }
 
 /// Handles every request on one connection.
-async fn serve_connection(conn: quinn::Connection, router: Router, peer: SocketAddr) {
+/// Returns how many requests the connection asked for, which is what tells a
+/// client from something probing the port.
+async fn serve_connection(conn: quinn::Connection, router: Router, peer: SocketAddr) -> u32 {
     let Ok(mut h3) = h3::server::Connection::<_, Bytes>::new(h3_quinn::Connection::new(conn)).await
     else {
-        return;
+        return 0;
     };
 
+    let mut served = 0;
     loop {
         match h3.accept().await {
             Ok(Some(resolver)) => {
+                served += 1;
+
                 let router = router.clone();
                 tokio::spawn(async move {
                     let _ = serve_request(resolver, router, peer).await;
                 });
             }
             // The client is going away, or the connection broke.
-            _ => return,
+            _ => return served,
         }
     }
 }
@@ -214,9 +235,14 @@ mod tests {
         let addr = ep.local_addr().unwrap();
         let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         let task = tokio::spawn(async move {
-            serve(ep, router, async {
-                let _ = rx.await;
-            })
+            serve(
+                ep,
+                router,
+                Arc::new(sift_dns::probe::Guard::default()),
+                async {
+                    let _ = rx.await;
+                },
+            )
             .await;
         });
 

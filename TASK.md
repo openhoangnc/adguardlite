@@ -2149,3 +2149,66 @@ come through.
 dropped, and a WARN from `rustls` is not. `RUST_LOG` still overrides all of it
 for anyone debugging a handshake.
 
+### Quieting the log was not the mitigation
+
+The log was the symptom. What the source was actually costing was **a TLS
+handshake per connection** — the most expensive thing an unauthenticated
+stranger can make this process do — as fast as it cared to reconnect.
+
+The rate limiter could not be pointed at it, and must not be: it is a defence
+against *datagram* amplification and deliberately leaves a connection alone,
+because limiting streams by rate is exactly the bug the commit before this one
+fixed — every client behind one busy address cut off, silently.
+
+What separates a scanner from a busy client is not the rate. **It is that a
+real client asks something.** A DoT client opens a connection in order to send
+a query; a scanner handshakes, learns what it came for, and leaves. So
+`sift-dns/src/probe.rs` counts only the connections that were answered
+*nothing at all*: six within a minute and the source is refused for ten
+minutes, before the handshake rather than after it, and a single answered query
+clears its record. A NAT is answering queries by definition, so it cannot be
+shut out — which is the property the rate-limit version of this got wrong.
+
+Four decisions in it, each because the obvious version is worse:
+
+- **The strikes decay.** A liveness monitor that connects once a minute to see
+  whether the port is up looks exactly like a scanner to a cumulative counter.
+  `connections_spread_out_do_not_accumulate` runs fifty such connections and
+  fails if any of them is refused.
+- **A local address is never counted.** The threat is the internet, and the
+  LAN is where an operator's own probes come from. Only the tests turn this
+  off, through `exempt_local`, so the refusal can be driven over loopback.
+- **An unvalidated QUIC address is never counted.** A QUIC initial packet can
+  carry a forged source, so a spoofer could otherwise lock a victim out of DoQ.
+  The strike is recorded only once the handshake has proved the address; over
+  TCP the accept has already done that, so a handshake that never completes
+  counts there and not here.
+- **Bytes that do not parse as a query buy no exemption.** `serve_stream`
+  counts a query only when an answer was written, so junk on the wire is
+  silence. A client refused by the access list *does* count — it is answered
+  REFUSED, which makes it a client this server knows about.
+
+Wired into all four stream listeners, so the mitigation is not one transport's:
+`serve_tcp` and `serve_dot` in `sift-dns/src/server.rs`, `doq::serve`, and
+`https::serve` with `http3::serve` in `sift-api`, where any single request —
+a DoH query, a page, an asset — counts as asking something. The plain-HTTP web
+listener is left alone.
+
+The operator's escape hatch is `ratelimit_whitelist`, reused rather than a
+setting of our own: adding a field to `AdGuardHome.yaml` that the Go build does
+not write would break the file's round trip for the sake of a defence that
+needs no tuning. `strikes: 0` switches the guard off for anyone who wants that
+in a fork.
+
+Eleven tests, eight over the guard's own decisions and three over the
+listeners: `a_connection_that_asks_nothing_costs_a_strike_and_a_query_clears_it`
+drives a real TCP listener and asserts both directions, and
+`a_refused_source_is_closed_before_the_handshake` asserts the client sees
+end-of-file rather than a certificate — the handshake is the cost, so a
+mitigation that refused *after* it would have saved nothing.
+
+It is documented for operators under *Scanners* in `docs/encryption.md`,
+because a source being refused for ten minutes is behaviour someone has to be
+able to find an explanation for. **It is not a substitute for a firewall**: it
+caps what a scanner costs, and says nothing about who should be able to reach
+the port at all.

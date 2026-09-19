@@ -370,6 +370,7 @@ async fn run(args: Args, paths: Paths, mut config: sift_config::Config) -> anyho
                     addr,
                     tls.https.clone(),
                     sift_api::routes::router(state.clone(), true),
+                    application.server.probes.clone(),
                     shutdown_rx.clone(),
                 )
                 .await
@@ -389,8 +390,9 @@ async fn run(args: Args, paths: Paths, mut config: sift_config::Config) -> anyho
                             tracing::info!(%addr, "serving http/3");
                             let router = sift_api::routes::router(state.clone(), true);
                             let mut rx = shutdown_rx.clone();
+                            let probes = application.server.probes.clone();
                             tasks.push(tokio::spawn(async move {
-                                sift_api::http3::serve(ep, router, async move {
+                                sift_api::http3::serve(ep, router, probes, async move {
                                     let _ = rx.changed().await;
                                 })
                                 .await;
