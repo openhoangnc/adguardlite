@@ -299,7 +299,22 @@ impl Server {
 
             return msg::refused(&req).to_bytes().ok();
         }
-        if !self.limiter.allow(client.ip()) {
+
+        // The limit is a datagram defence, and upstream gates it on the
+        // transport for exactly that reason:
+        //
+        //     // ratelimit based on IP only, protects CPU cycles and outbound
+        //     // connections
+        //     if d.Proto == ProtoUDP && p.isRatelimited(ip) {
+        //
+        // A stream client has completed a handshake, so the address it claims
+        // is its own and no answer sent to it can be aimed at a victim.
+        // Limiting one anyway cut off every client behind a single busy
+        // address -- a NAT, an office, a phone hotspot -- and did it silently:
+        // 60 queries at `ratelimit: 20` left 57 connections closed with no
+        // answer, and on a kept-alive connection the next question could not
+        // even be written.
+        if proto.is_datagram() && !self.limiter.allow(client.ip()) {
             return None;
         }
 
@@ -672,6 +687,40 @@ mod tests {
         assert!(
             s.handle(&q, peer(), Proto::Udp).await.is_none(),
             "third should be limited"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limiting_leaves_the_stream_transports_alone() {
+        // Upstream gates the limit on `d.Proto == ProtoUDP`, because it is
+        // there to stop a spoofed datagram being turned into amplification and
+        // a client that completed a handshake has already proved its address.
+        // Limiting one anyway cut off everyone behind a single busy address,
+        // and silently: a stream client got a closed connection, not an answer.
+        for proto in [Proto::Tcp, Proto::Tls, Proto::Https, Proto::Quic] {
+            let s = test_server("||ads.example.com^\n", 2);
+            let q = wire_query("ads.example.com.", RecordType::A);
+
+            for i in 0..8 {
+                assert!(
+                    s.handle(&q, peer(), proto).await.is_some(),
+                    "{proto:?} query {i} went unanswered",
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_datagram_flood_does_not_spend_a_stream_clients_allowance() {
+        // One limiter, one address, two transports: the datagrams are limited
+        // and the connection is not.
+        let s = test_server("||ads.example.com^\n", 2);
+        let q = wire_query("ads.example.com.", RecordType::A);
+
+        while s.handle(&q, peer(), Proto::Udp).await.is_some() {}
+        assert!(
+            s.handle(&q, peer(), Proto::Tcp).await.is_some(),
+            "the connection should still be answered"
         );
     }
 

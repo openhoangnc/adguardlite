@@ -239,7 +239,10 @@ function Server({ config, save }: { config: DnsConfig; save: Save }) {
     return (
         <Card title="Server">
             <div className="grid grid-2">
-                <Field label="Queries per second, per client" hint="Zero removes the limit.">
+                <Field
+                    label="Queries per second, per client"
+                    hint="Plain UDP only, where a source address can be forged. Zero removes the limit."
+                >
                     <input
                         type="number"
                         min={0}

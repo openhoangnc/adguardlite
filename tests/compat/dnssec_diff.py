@@ -166,7 +166,7 @@ def main():
         "--retries",
         type=int,
         default=2,
-        help="how many times to re-ask a case both servers must agree on",
+        help="how many times to re-ask a case the two answered differently",
     )
     args = ap.parse_args()
 
@@ -179,11 +179,13 @@ def main():
 
     for name, qtype in CASES:
         for label, form in FORMS:
-            # Retried because a public upstream fails on its own sometimes, and
-            # one server hitting that is not a difference between the two.
-            for attempt in range(args.retries + 1):
+            # Asked again on no answer *and* on a disagreement: a public
+            # upstream fails on its own sometimes, and one server catching a
+            # SERVFAIL the other had cached is not a difference between the two.
+            # A real difference is there every time it is asked.
+            for _ in range(args.retries + 1):
                 g, r = ask(go, name, QTYPES[qtype], **form), ask(rust, name, QTYPES[qtype], **form)
-                if g is not None and r is not None:
+                if g is not None and r is not None and g == r:
                     break
             checked += 1
 

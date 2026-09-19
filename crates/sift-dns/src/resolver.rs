@@ -57,6 +57,11 @@ impl Proto {
 
     /// Reports whether the transport is connectionless, and therefore
     /// spoofable for amplification.
+    ///
+    /// Two things turn on it, both because a stream client has already proved
+    /// its address by completing a handshake: an access-blocked client is
+    /// dropped here and told `REFUSED` there, and the rate limit applies here
+    /// and not there.
     pub const fn is_datagram(self) -> bool {
         matches!(self, Proto::Udp)
     }

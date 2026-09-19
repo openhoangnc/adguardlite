@@ -110,7 +110,9 @@ Verification claims below are reproducible with `scripts/verify.sh` and
       upstream query path* below
 - [x] Blocking modes: default, custom IP, NXDOMAIN, null IP, REFUSED —
       including the negative-caching SOA's exact field values
-- [x] Rate limiting per client subnet, with an exemption list
+- [x] Rate limiting per client subnet, with an exemption list — on UDP only, as
+      upstream does, because a client that completed a handshake has already
+      proved the address it claims
 - [x] Access control: allowed and disallowed clients
 - [x] Blocked hosts dropped on UDP, REFUSED on TCP
 - [x] **EDNS Client Subnet**: the client's address masked to /24 or /56, or a
@@ -2064,13 +2066,12 @@ types. Two tests cover it in the tree, one for the name being answered whatever
 the type and one for the rest of `resolver.arpa` still being forwarded, so an
 over-eager fix fails as loudly as the missing one did.
 
-### One divergence found while writing those harnesses, and not fixed
+### Rate limiting applied to every transport, and upstream limits UDP alone
 
-**Rate limiting applies to every transport here, and to UDP alone upstream.**
-`Server::handle_as` checks the limiter before it parses anything, whatever the
-protocol, so a TCP, DoT, DoH or DoQ client behind a busy address is silently cut
-off — a stream client gets a closed connection with no answer. dnsproxy gates it
-on the transport:
+Found while writing those harnesses: one firing a few hundred queries at the
+fixture's `ratelimit: 20` lost TCP answers at random, which is exactly what a
+real busy NAT looks like. `Server::handle_as` checked the limiter before it
+parsed anything, whatever the protocol. dnsproxy gates it on the transport:
 
 ```go
 // ratelimit based on IP only, protects CPU cycles and outbound connections
@@ -2080,8 +2081,36 @@ if d.Proto == ProtoUDP && p.isRatelimited(ip) {
 }
 ```
 
-Which is the right shape: the limit exists so a spoofed datagram cannot be
-turned into amplification, and a client that completed a handshake has already
-proved its address. Found because a harness firing a few hundred queries at
-`ratelimit: 20` lost TCP answers at random, which is exactly what a real busy
-NAT would look like.
+Which is the right shape, and the reason is the same one `Proto::is_datagram`
+already carries for access control: the limit exists so a spoofed datagram
+cannot be turned into amplification — the attacker puts a victim's address in
+the source field and the answer goes there — and a client that completed a
+handshake cannot do that, because the address it claims is the one the packets
+came back to. So `handle_as` now reads
+`proto.is_datagram() && !self.limiter.allow(client.ip())`.
+
+The cost of getting it wrong was not a slower client, it was a silent one.
+Measured against the Go build, both at `ratelimit: 20`, 60 queries from one
+address:
+
+| 60 queries from one address | Go v0.107.79 | before | after |
+|---|---|---|---|
+| UDP | 58 answered, 2 dropped | 58 answered, 2 dropped | 58 answered, 2 dropped |
+| TCP, a connection each | **60 answered** | 20 answered, **40 closed with no answer** | 60 answered |
+| TCP, one kept-alive connection | **60 answered** | 20 answered, then 34 writes failed outright | 60 answered |
+
+The last row is the one that would have been reported as a broken server: the
+connection is torn down mid-conversation, so the client's next question cannot
+even be written, let alone refused.
+
+`tests/compat/ratelimit_diff.py` is the guard. It is the only harness that
+*changes* a setting — the limit has to be on to be visible, and `verify.sh`
+seeds it off so nothing else is throttled — so it sets `ratelimit` through
+`/control/dns_config`, measures, and puts the old value back, which is also why
+`verify.sh` runs it last among the DNS comparisons. Putting it back walks
+`ratelimit` through the config round-trip the step after it checks, so that came
+free. Against **v0.7.2** it reports both stream rows. Two tests cover it in the
+tree, beside the datagram one that was already there: one asserting eight
+queries in a row are answered over each of TCP, DoT, DoH and DoQ, and one that
+floods the limiter over UDP and then asks over TCP, so a shared limiter that
+spends a connection's allowance on datagrams fails.

@@ -112,6 +112,18 @@ python3 "$root/tests/compat/ddr_diff.py" \
 	--go "127.0.0.1:$go_dns" --rust "127.0.0.1:$rs_dns" \
 	|| fail "the resolver-discovery name is not answered the same way"
 
+# Last of the DNS comparisons, because it is the only one that changes a
+# setting: the rate limit has to be on to be visible, and the seeded config
+# turns it off so the comparisons above are not throttled.  It puts the old
+# value back, which also puts `ratelimit` through the config round-trip the
+# next step checks.
+say "rate limiting per transport"
+python3 "$root/tests/compat/ratelimit_diff.py" \
+	--go "http://127.0.0.1:$go_http" --rust "http://127.0.0.1:$rs_http" \
+	--go-dns-port "$go_dns" --rust-dns-port "$rs_dns" \
+	--user "$user" --password "$pass" \
+	|| fail "the rate limit does not apply to the same transports"
+
 say "config output"
 for port in "$go_http" "$rs_http"; do
 	curl -sf --max-time 10 -u "$user:$pass" -X POST -H 'Content-Type: application/json' \

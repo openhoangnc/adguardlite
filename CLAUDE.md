@@ -57,7 +57,7 @@ installation.
 ```bash
 cargo build --release            # fast to build and to run
 cargo build --profile dist       # fat LTO, panic=abort, stripped: ~10.7 MB
-cargo test --workspace           # 769 tests, no network or Go build needed
+cargo test --workspace           # 771 tests, no network or Go build needed
 cargo clippy --workspace --all-targets
 ```
 
@@ -137,6 +137,10 @@ The comparison harnesses live in `tests/compat/`:
 - `dns_diff.py` — DNS answers from both servers over A and AAAA.
 - `ddr_diff.py` — that `_dns.resolver.arpa` is answered by the server being
   asked rather than forwarded, and that the rest of `resolver.arpa` is not.
+- `ratelimit_diff.py` — that both servers limit a burst of datagrams and neither
+  limits a connection. The only harness that changes a setting: the limit has to
+  be on to be visible, so it sets `ratelimit` through the API and puts the old
+  value back, which is why `verify.sh` runs it last of the DNS comparisons.
 - `truncate_diff.py` — that an oversized UDP answer is cut to what the client
   advertised, with the truncation bit set, and that a stream transport is not
   cut at all. A property rather than the bytes: each server caches its own copy
